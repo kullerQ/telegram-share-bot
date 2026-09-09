@@ -8,6 +8,7 @@ import ipaddress
 import logging
 import re
 import socket
+import threading
 import uuid
 from dataclasses import dataclass
 from enum import Enum
@@ -177,13 +178,31 @@ def _download_sync(
     download_dir: Path,
     max_file_bytes: int,
     timeout_seconds: int,
+    abort_event: threading.Event | None = None,
+    work_dir_holder: list[Path] | None = None,
 ) -> DownloadedMedia:
     if not is_safe_media_url(url):
         raise DownloadError(strings.DOWNLOAD_UNSAFE_URL)
 
     work_dir = download_dir / uuid.uuid4().hex
     work_dir.mkdir(parents=True, exist_ok=True)
+    if work_dir_holder is not None:
+        work_dir_holder.append(work_dir)
+
     outtmpl = str(work_dir / "%(title).80B [%(id)s].%(ext)s")
+
+    def _progress_hook(d: dict[str, Any]) -> None:
+        if abort_event is not None and abort_event.is_set():
+            raise DownloadError(
+                strings.DOWNLOAD_TIMED_OUT.format(timeout_seconds=timeout_seconds)
+            )
+        downloaded = d.get("downloaded_bytes") or 0
+        if downloaded > max_file_bytes:
+            raise DownloadError(
+                strings.DOWNLOAD_EXCEEDS_LIMIT.format(
+                    max_mb=max_file_bytes // (1024 * 1024)
+                )
+            )
 
     ydl_opts: dict[str, Any] = {
         "outtmpl": outtmpl,
@@ -201,15 +220,29 @@ def _download_sync(
             "bv*+ba/b"
         ),
         "merge_output_format": "mp4",
+        "progress_hooks": [_progress_hook],
     }
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:  # type: ignore[arg-type]
+            if abort_event is not None and abort_event.is_set():
+                raise DownloadError(
+                    strings.DOWNLOAD_TIMED_OUT.format(timeout_seconds=timeout_seconds)
+                )
+
             extracted = ydl.extract_info(url, download=True)
             if not isinstance(extracted, dict):
                 raise DownloadError(strings.DOWNLOAD_EXTRACT_FAILED)
 
+            if abort_event is not None and abort_event.is_set():
+                raise DownloadError(
+                    strings.DOWNLOAD_TIMED_OUT.format(timeout_seconds=timeout_seconds)
+                )
+
             info = _pick_info(extracted)
+            if info.get("is_live"):
+                raise DownloadError("Live streams cannot be downloaded.")
+
             path = _resolve_downloaded_path(info, work_dir, ydl)
             if not path.exists():
                 raise DownloadError(strings.DOWNLOAD_NO_FILE)
@@ -231,6 +264,11 @@ def _download_sync(
             duration = (
                 int(duration_raw) if isinstance(duration_raw, (int, float)) else None
             )
+
+            if abort_event is not None and abort_event.is_set():
+                raise DownloadError(
+                    strings.DOWNLOAD_TIMED_OUT.format(timeout_seconds=timeout_seconds)
+                )
 
             return DownloadedMedia(
                 path=path,
@@ -281,6 +319,8 @@ async def download_media(
     if not is_safe_media_url(url):
         raise DownloadError(strings.DOWNLOAD_UNSAFE_URL)
 
+    abort_event = threading.Event()
+    work_dir_holder: list[Path] = []
     try:
         return await asyncio.wait_for(
             asyncio.to_thread(
@@ -289,13 +329,23 @@ async def download_media(
                 download_dir,
                 max_file_bytes,
                 timeout_seconds,
+                abort_event,
+                work_dir_holder,
             ),
             timeout=timeout_seconds,
         )
     except TimeoutError as exc:
+        abort_event.set()
+        if work_dir_holder:
+            _cleanup_dir(work_dir_holder[0])
         raise DownloadError(
             strings.DOWNLOAD_TIMED_OUT.format(timeout_seconds=timeout_seconds)
         ) from exc
+    except asyncio.CancelledError:
+        abort_event.set()
+        if work_dir_holder:
+            _cleanup_dir(work_dir_holder[0])
+        raise
 
 
 def cleanup_media(media: DownloadedMedia) -> None:
