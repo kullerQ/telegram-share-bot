@@ -19,6 +19,33 @@ Works in private chats, groups, and channels. The bot does **not** need to be a 
 Without `/setinline`, the bot will not appear when users type `@YourBot`.
 Without `/setinlinefeedback`, the bot cannot learn which result you chose, so the media never replaces the placeholder.
 
+## Docker setup (Recommended)
+
+1. Configure `.env`:
+   ```bash
+   cp .env.example .env
+   # Edit .env and set BOT_TOKEN and STORAGE_CHAT_ID
+   ```
+
+2. Start the container in the background:
+   ```bash
+   docker compose up -d
+   ```
+
+3. **Accessing logs**:
+   - Live stream in console:
+     ```bash
+     docker compose logs -f
+     ```
+   - Direct file access on host:
+     Open `./logs/bot.log` in your editor. Sensitive bot tokens are automatically redacted.
+
+4. Stop or restart:
+   ```bash
+   docker compose restart
+   docker compose down
+   ```
+
 ## Local setup
 
 ```powershell

@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import logging
+import logging.handlers
+import os
 import re
+from pathlib import Path
 from typing import Any
 
 # httpx logs: HTTP Request: POST https://api.telegram.org/bot<TOKEN>/<method> "..."
@@ -50,8 +53,11 @@ class RedactTelegramBotUrlFormatter(logging.Formatter):
         return _redact_telegram_secrets(super().format(record))
 
 
-def configure_logging(level: int = logging.INFO) -> None:
-    """Configure root logging with Telegram secret redaction."""
+def configure_logging(
+    level: int = logging.INFO,
+    log_file: str | Path | None = None,
+) -> None:
+    """Configure root logging with Telegram secret redaction and optional file logging."""
     root = logging.getLogger()
     root.setLevel(level)
 
@@ -71,3 +77,26 @@ def configure_logging(level: int = logging.INFO) -> None:
             existing.addFilter(redact_filter)
 
     logging.getLogger("httpx").addFilter(redact_filter)
+
+    file_target = log_file or os.getenv("LOG_FILE")
+    if file_target:
+        target_path = Path(file_target)
+        try:
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            has_file_handler = any(
+                isinstance(h, logging.handlers.RotatingFileHandler)
+                and getattr(h, "baseFilename", None) == str(target_path.resolve())
+                for h in root.handlers
+            )
+            if not has_file_handler:
+                file_handler = logging.handlers.RotatingFileHandler(
+                    target_path,
+                    maxBytes=10 * 1024 * 1024,
+                    backupCount=3,
+                    encoding="utf-8",
+                )
+                file_handler.setFormatter(formatter)
+                file_handler.addFilter(redact_filter)
+                root.addHandler(file_handler)
+        except Exception as exc:
+            root.warning("Could not initialize log file at %s: %s", target_path, exc)

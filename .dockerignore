@@ -1,0 +1,29 @@
+# Git & Version Control
+.git
+.gitignore
+
+# Virtual Environments & Caching
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# Tests & Documentation
+tests/
+*.md
+
+# Local runtime data & secrets
+downloads/
+logs/
+.env
+.env.*
+!.env.example
+
+# Docker configuration
+Dockerfile*
+docker-compose*.yml
