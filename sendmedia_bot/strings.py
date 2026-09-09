@@ -71,6 +71,7 @@ DOWNLOAD_EXCEEDS_LIMIT = "File exceeds the {max_mb} MB limit."
 DOWNLOAD_FAILED_GENERIC = "Download failed."
 DOWNLOAD_FAILED_WITH_DETAIL = "Download failed: {error}"
 DOWNLOAD_TIMED_OUT = "Download timed out after {timeout_seconds} seconds."
+DOWNLOAD_UNSAFE_URL = "Unsafe or internal URLs are not allowed."
 
 # --- Config / startup (operator-facing) --------------------------------------
 

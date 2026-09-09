@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import ipaddress
 import logging
 import re
+import socket
 import uuid
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Any, cast
+from urllib.parse import urlsplit
 
 import yt_dlp
 
@@ -22,6 +25,72 @@ URL_RE = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
 
 VIDEO_EXTENSIONS = {".mp4", ".webm", ".mkv", ".mov", ".m4v"}
 AUDIO_EXTENSIONS = {".mp3", ".m4a", ".opus", ".ogg", ".wav", ".flac", ".aac"}
+
+
+def _is_safe_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    if (
+        ip.is_loopback
+        or ip.is_private
+        or ip.is_link_local
+        or ip.is_multicast
+        or ip.is_reserved
+        or ip.is_unspecified
+    ):
+        return False
+
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        return _is_safe_ip(ip.ipv4_mapped)
+
+    if str(ip) == "169.254.169.254":
+        return False
+
+    return True
+
+
+def is_safe_media_url(url: str) -> bool:
+    """Validate that a URL uses http(s) and does not point to internal/private/loopback/cloud-metadata networks."""
+    try:
+        parsed = urlsplit(url)
+        scheme = parsed.scheme.lower()
+        if scheme not in ("http", "https"):
+            return False
+
+        hostname = parsed.hostname
+        if not hostname:
+            return False
+
+        hostname_clean = hostname.strip().lower().rstrip(".")
+        if not hostname_clean:
+            return False
+
+        if (
+            hostname_clean == "localhost"
+            or hostname_clean.endswith((".localhost", ".local", ".internal", ".lan"))
+        ):
+            return False
+
+        try:
+            ip = ipaddress.ip_address(hostname_clean)
+            return _is_safe_ip(ip)
+        except ValueError:
+            pass
+
+        addr_info = socket.getaddrinfo(hostname_clean, None, proto=socket.IPPROTO_TCP)
+        if not addr_info:
+            return False
+
+        for res in addr_info:
+            sockaddr = res[4]
+            ip_str = sockaddr[0]
+            ip = ipaddress.ip_address(ip_str)
+            if not _is_safe_ip(ip):
+                return False
+
+        return True
+    except Exception as exc:
+        logger.warning("URL security check rejected %s: %s", url, exc)
+        return False
+
 
 
 class MediaKind(str, Enum):
@@ -109,6 +178,9 @@ def _download_sync(
     max_file_bytes: int,
     timeout_seconds: int,
 ) -> DownloadedMedia:
+    if not is_safe_media_url(url):
+        raise DownloadError(strings.DOWNLOAD_UNSAFE_URL)
+
     work_dir = download_dir / uuid.uuid4().hex
     work_dir.mkdir(parents=True, exist_ok=True)
     outtmpl = str(work_dir / "%(title).80B [%(id)s].%(ext)s")
@@ -206,6 +278,9 @@ async def download_media(
     max_file_bytes: int,
     timeout_seconds: int,
 ) -> DownloadedMedia:
+    if not is_safe_media_url(url):
+        raise DownloadError(strings.DOWNLOAD_UNSAFE_URL)
+
     try:
         return await asyncio.wait_for(
             asyncio.to_thread(
@@ -235,6 +310,9 @@ def _extract_direct_stream_sync(
     url: str,
     max_file_bytes: int,
 ) -> DirectMediaStream | None:
+    if not is_safe_media_url(url):
+        return None
+
     ydl_opts: dict[str, Any] = {
         "noplaylist": True,
         "quiet": True,
@@ -256,6 +334,7 @@ def _extract_direct_stream_sync(
             if (
                 isinstance(direct, str)
                 and direct.startswith("http")
+                and is_safe_media_url(direct)
                 and ".m3u8" not in direct
                 and ".mpd" not in direct
             ):
@@ -274,7 +353,11 @@ def _extract_direct_stream_sync(
                 if not isinstance(f, dict):
                     continue
                 u = f.get("url")
-                if not isinstance(u, str) or not u.startswith("http"):
+                if (
+                    not isinstance(u, str)
+                    or not u.startswith("http")
+                    or not is_safe_media_url(u)
+                ):
                     continue
                 if ".m3u8" in u or ".mpd" in u:
                     continue
@@ -306,6 +389,9 @@ async def get_direct_stream(
     max_file_bytes: int,
     timeout_seconds: int = 15,
 ) -> DirectMediaStream | None:
+    if not is_safe_media_url(url):
+        return None
+
     try:
         return await asyncio.wait_for(
             asyncio.to_thread(_extract_direct_stream_sync, url, max_file_bytes),
