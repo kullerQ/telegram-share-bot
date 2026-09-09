@@ -46,7 +46,7 @@ Open a private chat with the bot, send `/start`, then in any other chat type:
 @YourBot https://youtube.com/watch?v=…
 ```
 
-Tap **Send media**. A placeholder appears first; the bot downloads in the background and replaces it with the file.
+Tap **Send media**. A placeholder appears first; the bot downloads in the background and replaces it with the file. If nothing changes, tap **Download / retry** on that message (needed when `/setinlinefeedback` is off).
 
 ## How it works
 

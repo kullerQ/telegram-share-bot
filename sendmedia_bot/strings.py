@@ -18,8 +18,9 @@ START_MESSAGE = (
     "{bot_name}\n\n"
     "Use me *inline* in any chat:\n"
     "`@{bot_username} {example_url}`\n\n"
-    "Tap the result to send a placeholder, then wait while I download "
-    "and replace it with the media.\n\n"
+        "Tap the result to send a placeholder, then wait while I download "
+        "and replace it with the media. If it stays stuck, tap "
+        "*Download / retry* on the message.\n\n"
     "You can also paste a media URL here and I will send the file back.\n\n"
     "Your chat id (for `STORAGE_CHAT_ID`): `{chat_id}`\n\n"
     "BotFather setup:\n"
@@ -46,9 +47,13 @@ INLINE_NO_URL_TITLE = "No URL found"
 INLINE_NO_URL_DESCRIPTION = "Include a full http(s) link in the inline query."
 
 INLINE_PENDING_TITLE = "Send media"
-INLINE_PENDING_MESSAGE = "Preparing media…\n{url}"
-INLINE_PREPARING_BUTTON = "Preparing…"
+INLINE_PENDING_MESSAGE = (
+    "Preparing media…\n{url}\n\n"
+    "If this does not update automatically, tap the button below."
+)
+INLINE_PREPARING_BUTTON = "Download / retry"
 INLINE_STILL_PREPARING = "Still preparing…"
+INLINE_ALREADY_PREPARING = "Already preparing this media…"
 
 # --- After user chooses an inline result -------------------------------------
 
@@ -56,6 +61,9 @@ INLINE_CHOSEN_NO_URL = "No URL found in the query."
 INLINE_CHOSEN_DOWNLOADING = "Downloading…\n{url}"
 INLINE_CHOSEN_DOWNLOAD_FAILED = "Download failed\n\n{error}"
 INLINE_CHOSEN_PREPARE_FAILED = "Something went wrong while preparing the media."
+INLINE_PENDING_EXPIRED = (
+    "This prepare request expired. Run the inline query again with the URL."
+)
 
 # --- Download errors (shown to users) ----------------------------------------
 

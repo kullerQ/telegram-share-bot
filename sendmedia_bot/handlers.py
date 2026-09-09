@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from typing import cast
 from uuid import uuid4
 
 from telegram import (
@@ -40,7 +41,9 @@ _STALE_INLINE_QUERY_MARKERS = (
     "query id is invalid",
 )
 
-_PREPARING_CALLBACK_DATA = "inline_preparing"
+_CALLBACK_PREFIX = "dl:"
+_PENDING_KEY = "pending_inline"
+_INFLIGHT_KEY = "inflight_inline"
 _EMPTY_KEYBOARD = InlineKeyboardMarkup([])
 
 
@@ -49,6 +52,16 @@ def _settings(context: ContextTypes.DEFAULT_TYPE) -> Settings:
     if not isinstance(settings, Settings):
         raise TypeError("Settings were not attached to the application.")
     return settings
+
+
+def _pending_map(context: ContextTypes.DEFAULT_TYPE) -> dict[str, str]:
+    raw = context.application.bot_data.setdefault(_PENDING_KEY, {})
+    return cast(dict[str, str], raw)
+
+
+def _inflight_set(context: ContextTypes.DEFAULT_TYPE) -> set[str]:
+    raw = context.application.bot_data.setdefault(_INFLIGHT_KEY, set())
+    return cast(set[str], raw)
 
 
 def _is_stale_inline_query_error(exc: BadRequest) -> bool:
@@ -130,7 +143,7 @@ async def url_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Answer quickly; heavy download happens in chosen_inline_result."""
+    """Answer quickly; heavy download happens after the result is chosen."""
     query = update.inline_query
     if query is None:
         return
@@ -165,9 +178,11 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         )
         return
 
+    result_id = uuid4().hex
+    _pending_map(context)[result_id] = url
     await _answer_inline_query(
         query,
-        results=[_pending_media_article(url)],
+        results=[_pending_media_article(result_id, url)],
         cache_time=1,
         is_personal=True,
     )
@@ -184,12 +199,12 @@ async def chosen_inline_result(
     inline_message_id = chosen.inline_message_id
     if not inline_message_id:
         logger.warning(
-            "Chosen inline result without inline_message_id; "
-            "enable /setinlinefeedback and ensure results include a keyboard."
+            "Chosen inline result without inline_message_id "
+            "(enable BotFather /setinlinefeedback, or tap Download / retry)."
         )
         return
 
-    url = extract_url(chosen.query or "")
+    url = _pending_map(context).get(chosen.result_id) or extract_url(chosen.query or "")
     if url is None:
         await _edit_inline_text(
             context,
@@ -198,6 +213,63 @@ async def chosen_inline_result(
         )
         return
 
+    logger.info("Chosen inline result; preparing media for %s", url)
+    await _prepare_inline_media(
+        context,
+        inline_message_id=inline_message_id,
+        url=url,
+        result_id=chosen.result_id,
+    )
+
+
+async def preparing_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Fallback when inline feedback is off or auto-prepare did not start."""
+    query = update.callback_query
+    if query is None or query.data is None:
+        return
+
+    if not query.data.startswith(_CALLBACK_PREFIX):
+        await query.answer()
+        return
+
+    result_id = query.data.removeprefix(_CALLBACK_PREFIX)
+    inline_message_id = query.inline_message_id
+    if not inline_message_id:
+        await query.answer(text=strings.INLINE_PENDING_EXPIRED, show_alert=True)
+        return
+
+    if inline_message_id in _inflight_set(context):
+        await query.answer(text=strings.INLINE_ALREADY_PREPARING)
+        return
+
+    url = _pending_map(context).get(result_id)
+    if url is None:
+        await query.answer(text=strings.INLINE_PENDING_EXPIRED, show_alert=True)
+        return
+
+    await query.answer(text=strings.INLINE_STILL_PREPARING)
+    logger.info("Inline prepare via callback for %s", url)
+    await _prepare_inline_media(
+        context,
+        inline_message_id=inline_message_id,
+        url=url,
+        result_id=result_id,
+    )
+
+
+async def _prepare_inline_media(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    inline_message_id: str,
+    url: str,
+    result_id: str,
+) -> None:
+    inflight = _inflight_set(context)
+    if inline_message_id in inflight:
+        logger.info("Skipping duplicate prepare for inline message %s", inline_message_id)
+        return
+    inflight.add(inline_message_id)
+
     settings = _settings(context)
     media: DownloadedMedia | None = None
     try:
@@ -205,7 +277,7 @@ async def chosen_inline_result(
             context,
             inline_message_id,
             strings.INLINE_CHOSEN_DOWNLOADING.format(url=url),
-            reply_markup=_preparing_keyboard(),
+            reply_markup=_download_keyboard(result_id),
         )
         media = await download_media(
             url=url,
@@ -219,38 +291,36 @@ async def chosen_inline_result(
             inline_message_id=inline_message_id,
             reply_markup=_EMPTY_KEYBOARD,
         )
+        logger.info("Inline media ready for %s (%s)", url, kind.value)
     except DownloadError as exc:
+        logger.warning("Inline download failed for %s: %s", url, exc)
         await _edit_inline_text(
             context,
             inline_message_id,
             strings.INLINE_CHOSEN_DOWNLOAD_FAILED.format(error=exc),
+            reply_markup=_download_keyboard(result_id),
         )
     except Exception:
-        logger.exception("Chosen inline result failed for %s", url)
+        logger.exception("Inline prepare failed for %s", url)
         await _edit_inline_text(
             context,
             inline_message_id,
             strings.INLINE_CHOSEN_PREPARE_FAILED,
+            reply_markup=_download_keyboard(result_id),
         )
     finally:
+        inflight.discard(inline_message_id)
         if media is not None:
             cleanup_media(media)
 
 
-async def preparing_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    if query is None:
-        return
-    await query.answer(text=strings.INLINE_STILL_PREPARING)
-
-
-def _preparing_keyboard() -> InlineKeyboardMarkup:
+def _download_keyboard(result_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [
                 InlineKeyboardButton(
                     strings.INLINE_PREPARING_BUTTON,
-                    callback_data=_PREPARING_CALLBACK_DATA,
+                    callback_data=f"{_CALLBACK_PREFIX}{result_id}",
                 )
             ]
         ]
@@ -268,16 +338,17 @@ def _error_article(title: str, description: str) -> InlineQueryResultArticle:
     )
 
 
-def _pending_media_article(url: str) -> InlineQueryResultArticle:
+def _pending_media_article(result_id: str, url: str) -> InlineQueryResultArticle:
     return InlineQueryResultArticle(
-        id=str(uuid4()),
+        id=result_id,
         title=strings.INLINE_PENDING_TITLE,
         description=url[:120],
         input_message_content=InputTextMessageContent(
             message_text=strings.INLINE_PENDING_MESSAGE.format(url=url)[:4096]
         ),
-        # Keyboard is required so Telegram gives us inline_message_id on choose.
-        reply_markup=_preparing_keyboard(),
+        # Keyboard is required so Telegram gives us inline_message_id on choose,
+        # and also provides a manual fallback via callback_query.
+        reply_markup=_download_keyboard(result_id),
     )
 
 
@@ -293,8 +364,12 @@ async def _edit_inline_text(
             inline_message_id=inline_message_id,
             reply_markup=reply_markup if reply_markup is not None else _EMPTY_KEYBOARD,
         )
-    except TelegramError:
-        logger.debug("Could not edit inline message %s", inline_message_id)
+    except TelegramError as exc:
+        logger.warning(
+            "Could not edit inline message %s: %s",
+            inline_message_id,
+            exc,
+        )
 
 
 def _input_media(

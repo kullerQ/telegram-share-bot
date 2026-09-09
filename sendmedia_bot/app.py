@@ -27,7 +27,7 @@ from sendmedia_bot.handlers import (
     start_command,
     url_message,
 )
-from sendmedia_bot.logging_filters import RedactTelegramBotUrlFilter
+from sendmedia_bot.logging_filters import configure_logging
 
 App = Application[
     ExtBot[None],
@@ -54,7 +54,7 @@ def build_application() -> App:
     application.add_handler(InlineQueryHandler(inline_query))
     application.add_handler(ChosenInlineResultHandler(chosen_inline_result))
     application.add_handler(
-        CallbackQueryHandler(preparing_callback, pattern=r"^inline_preparing$")
+        CallbackQueryHandler(preparing_callback, pattern=r"^dl:")
     )
     application.add_handler(
         MessageHandler(
@@ -66,16 +66,7 @@ def build_application() -> App:
 
 
 def main() -> None:
-    logging.basicConfig(
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        level=logging.INFO,
-    )
-    redact_filter = RedactTelegramBotUrlFilter()
-    for handler in logging.getLogger().handlers:
-        handler.addFilter(redact_filter)
-    # Also cover httpx if it has its own handlers later.
-    logging.getLogger("httpx").addFilter(redact_filter)
-
+    configure_logging()
     application = build_application()
     logging.getLogger(__name__).info(strings.STARTUP_POLLING)
     application.run_polling(
@@ -84,7 +75,8 @@ def main() -> None:
             "inline_query",
             "chosen_inline_result",
             "callback_query",
-        ]
+        ],
+        drop_pending_updates=True,
     )
 
 
