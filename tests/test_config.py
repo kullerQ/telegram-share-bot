@@ -1,0 +1,171 @@
+"""Unit tests for strict configuration parsing, validation, and reset fallback."""
+
+from __future__ import annotations
+
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+from sendmedia_bot.config import (
+    DEFAULT_DOWNLOAD_TIMEOUT_SECONDS,
+    DEFAULT_MAX_FILE_BYTES,
+    DEFAULT_UPLOAD_TIMEOUT_SECONDS,
+    load_settings,
+    parse_bool,
+    parse_int,
+    parse_path,
+)
+
+
+class TestConfigValidation(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.env_file = Path(self.temp_dir.name) / ".env"
+        self.env_file.write_text("DELETE_STORAGE_MESSAGES=wrong\n", encoding="utf-8")
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    # --- parse_bool tests ---
+
+    def test_parse_bool_defaults_when_empty_or_none(self) -> None:
+        self.assertFalse(parse_bool("PARAM", None, default=False))
+        self.assertTrue(parse_bool("PARAM", "", default=True))
+        self.assertFalse(parse_bool("PARAM", "   ", default=False))
+
+    def test_parse_bool_valid_truthy(self) -> None:
+        for val in ("true", "TRUE", "1", "yes", "YES", "y", "on"):
+            with self.subTest(val=val):
+                self.assertTrue(parse_bool("PARAM", val, default=False))
+
+    def test_parse_bool_valid_falsy(self) -> None:
+        for val in ("false", "FALSE", "0", "no", "NO", "n", "off"):
+            with self.subTest(val=val):
+                self.assertFalse(parse_bool("PARAM", val, default=True))
+
+    def test_parse_bool_invalid_non_interactive_raises(self) -> None:
+        with patch("sys.stdin.isatty", return_value=False):
+            with self.assertRaises(RuntimeError) as ctx:
+                parse_bool("DELETE_STORAGE_MESSAGES", "maybe", default=False)
+            self.assertIn("Invalid configuration for DELETE_STORAGE_MESSAGES", str(ctx.exception))
+
+    def test_parse_bool_invalid_interactive_accept_reset(self) -> None:
+        with (
+            patch("sys.stdin.isatty", return_value=True),
+            patch("builtins.input", return_value="y"),
+        ):
+            res = parse_bool(
+                "DELETE_STORAGE_MESSAGES",
+                "invalid_value",
+                default=False,
+                env_file=self.env_file,
+            )
+            self.assertFalse(res)
+            # Verify .env file was updated
+            content = self.env_file.read_text(encoding="utf-8")
+            self.assertIn("DELETE_STORAGE_MESSAGES=false", content)
+
+    def test_parse_bool_invalid_interactive_decline_reset(self) -> None:
+        with (
+            patch("sys.stdin.isatty", return_value=True),
+            patch("builtins.input", return_value="n"),
+        ):
+            with self.assertRaises(RuntimeError) as ctx:
+                parse_bool(
+                    "DELETE_STORAGE_MESSAGES",
+                    "invalid_value",
+                    default=False,
+                    env_file=self.env_file,
+                )
+            self.assertIn("Please fix it in your .env file", str(ctx.exception))
+
+    # --- parse_int tests ---
+
+    def test_parse_int_defaults_when_empty_or_none(self) -> None:
+        self.assertEqual(parse_int("PARAM", None, default=42), 42)
+        self.assertEqual(parse_int("PARAM", "", default=42), 42)
+
+    def test_parse_int_valid_within_bounds(self) -> None:
+        self.assertEqual(
+            parse_int("MAX_FILE_BYTES", "1048576", default=DEFAULT_MAX_FILE_BYTES, min_value=1024),
+            1048576,
+        )
+
+    def test_parse_int_invalid_string_non_interactive(self) -> None:
+        with patch("sys.stdin.isatty", return_value=False):
+            with self.assertRaises(RuntimeError):
+                parse_int("MAX_FILE_BYTES", "not_a_number", default=DEFAULT_MAX_FILE_BYTES)
+
+    def test_parse_int_out_of_bounds_non_interactive(self) -> None:
+        with patch("sys.stdin.isatty", return_value=False):
+            # Below min
+            with self.assertRaises(RuntimeError):
+                parse_int(
+                    "DOWNLOAD_TIMEOUT_SECONDS",
+                    "-5",
+                    default=DEFAULT_DOWNLOAD_TIMEOUT_SECONDS,
+                    min_value=1,
+                )
+            # Above max (Telegram limit 50MB)
+            with self.assertRaises(RuntimeError):
+                parse_int(
+                    "MAX_FILE_BYTES",
+                    "999999999",
+                    default=DEFAULT_MAX_FILE_BYTES,
+                    max_value=50 * 1024 * 1024,
+                )
+
+    def test_parse_int_invalid_interactive_accept_reset(self) -> None:
+        with (
+            patch("sys.stdin.isatty", return_value=True),
+            patch("builtins.input", return_value="yes"),
+        ):
+            res = parse_int(
+                "DOWNLOAD_TIMEOUT_SECONDS",
+                "-10",
+                default=DEFAULT_DOWNLOAD_TIMEOUT_SECONDS,
+                min_value=1,
+                env_file=self.env_file,
+            )
+            self.assertEqual(res, DEFAULT_DOWNLOAD_TIMEOUT_SECONDS)
+
+    # --- parse_path tests ---
+
+    def test_parse_path_defaults_when_empty_or_none(self) -> None:
+        default_path = Path("downloads/media_cache.db")
+        self.assertEqual(parse_path("CACHE_DB_PATH", None, default=default_path), default_path)
+        self.assertEqual(parse_path("CACHE_DB_PATH", "  ", default=default_path), default_path)
+
+    def test_parse_path_directory_rejected(self) -> None:
+        # Existing directory passed as file path
+        with patch("sys.stdin.isatty", return_value=False):
+            with self.assertRaises(RuntimeError):
+                parse_path(
+                    "CACHE_DB_PATH",
+                    self.temp_dir.name,
+                    default=Path("downloads/cache.db"),
+                )
+
+    def test_load_settings_upload_timeout_default(self) -> None:
+        env = {
+            "BOT_TOKEN": "123456789:ABCdefGHIjklMNOpqrsTUVwxyz",
+            "STORAGE_CHAT_ID": "1234567890",
+        }
+        with patch.dict("os.environ", env, clear=True):
+            settings = load_settings(env_file=self.env_file)
+            self.assertEqual(settings.upload_timeout_seconds, DEFAULT_UPLOAD_TIMEOUT_SECONDS)
+
+    def test_load_settings_upload_timeout_custom(self) -> None:
+        env = {
+            "BOT_TOKEN": "123456789:ABCdefGHIjklMNOpqrsTUVwxyz",
+            "STORAGE_CHAT_ID": "1234567890",
+            "UPLOAD_TIMEOUT_SECONDS": "240",
+        }
+        with patch.dict("os.environ", env, clear=True):
+            settings = load_settings(env_file=self.env_file)
+            self.assertEqual(settings.upload_timeout_seconds, 240)
+
+
+if __name__ == "__main__":
+    unittest.main()
