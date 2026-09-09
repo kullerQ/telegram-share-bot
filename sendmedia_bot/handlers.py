@@ -51,6 +51,9 @@ _TASKS_KEY = "inline_prepare_tasks"
 _CANCELLED_KEY = "cancelled_inline"
 _EMPTY_KEYBOARD = InlineKeyboardMarkup([])
 
+_MAX_PENDING_INLINE = 1000
+_MAX_CANCELLED_INLINE = 500
+
 
 def _settings(context: ContextTypes.DEFAULT_TYPE) -> Settings:
     settings = context.application.bot_data.get("settings")
@@ -71,6 +74,18 @@ def _pending_map(context: ContextTypes.DEFAULT_TYPE) -> dict[str, str]:
     return cast(dict[str, str], raw)
 
 
+def _store_pending_url(
+    context: ContextTypes.DEFAULT_TYPE, result_id: str, url: str
+) -> None:
+    pending = _pending_map(context)
+    pending[result_id] = url
+    while len(pending) > _MAX_PENDING_INLINE:
+        try:
+            pending.pop(next(iter(pending)))
+        except (KeyError, StopIteration):
+            break
+
+
 def _task_map(context: ContextTypes.DEFAULT_TYPE) -> dict[str, asyncio.Task[Any]]:
     raw = context.application.bot_data.setdefault(_TASKS_KEY, {})
     return cast(dict[str, asyncio.Task[Any]], raw)
@@ -79,6 +94,18 @@ def _task_map(context: ContextTypes.DEFAULT_TYPE) -> dict[str, asyncio.Task[Any]
 def _cancelled_set(context: ContextTypes.DEFAULT_TYPE) -> set[str]:
     raw = context.application.bot_data.setdefault(_CANCELLED_KEY, set())
     return cast(set[str], raw)
+
+
+def _record_cancelled_inline(
+    context: ContextTypes.DEFAULT_TYPE, inline_message_id: str
+) -> None:
+    cancelled = _cancelled_set(context)
+    cancelled.add(inline_message_id)
+    while len(cancelled) > _MAX_CANCELLED_INLINE:
+        try:
+            cancelled.pop()
+        except KeyError:
+            break
 
 
 def _is_stale_inline_query_error(exc: BadRequest) -> bool:
@@ -260,7 +287,7 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
 
     result_id = uuid4().hex
-    _pending_map(context)[result_id] = url
+    _store_pending_url(context, result_id, url)
     cached = await _cache(context).get(url)
     await _answer_inline_query(
         query,
@@ -286,7 +313,10 @@ async def chosen_inline_result(
         )
         return
 
-    url = _pending_map(context).get(chosen.result_id) or extract_url(chosen.query or "")
+    # Evict chosen item from pending map immediately to prevent memory leak
+    url = _pending_map(context).pop(chosen.result_id, None) or extract_url(
+        chosen.query or ""
+    )
     if url is None:
         await _edit_inline_text(
             context,
@@ -328,7 +358,7 @@ async def cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await query.answer(text=strings.INLINE_CANCEL_ANSWER)
 
     if inline_message_id:
-        _cancelled_set(context).add(inline_message_id)
+        _record_cancelled_inline(context, inline_message_id)
         task = _task_map(context).pop(inline_message_id, None)
         if task is not None and not task.done():
             task.cancel()
