@@ -22,6 +22,7 @@ from sendmedia_bot.handlers import (
     start_command,
     url_message,
 )
+from sendmedia_bot.logging_filters import RedactTelegramBotUrlFilter
 
 App = Application[
     ExtBot[None],
@@ -60,6 +61,12 @@ def main() -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
         level=logging.INFO,
     )
+    redact_filter = RedactTelegramBotUrlFilter()
+    for handler in logging.getLogger().handlers:
+        handler.addFilter(redact_filter)
+    # Also cover httpx if it has its own handlers later.
+    logging.getLogger("httpx").addFilter(redact_filter)
+
     application = build_application()
     logging.getLogger(__name__).info("Starting SendMedia bot (polling)")
     application.run_polling(allowed_updates=["message", "inline_query"])
