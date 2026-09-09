@@ -7,6 +7,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from telegram import (
+    InlineQuery,
     InlineQueryResultArticle,
     InlineQueryResultCachedAudio,
     InlineQueryResultCachedDocument,
@@ -17,7 +18,7 @@ from telegram import (
     Update,
 )
 from telegram.constants import ParseMode
-from telegram.error import TelegramError
+from telegram.error import BadRequest, TelegramError
 from telegram.ext import ContextTypes
 
 from sendmedia_bot.config import Settings
@@ -32,12 +33,50 @@ from sendmedia_bot.downloader import (
 
 logger = logging.getLogger(__name__)
 
+_STALE_INLINE_QUERY_MARKERS = (
+    "query is too old",
+    "query id is invalid",
+)
+
+InlineResult = (
+    InlineQueryResultArticle
+    | InlineQueryResultCachedAudio
+    | InlineQueryResultCachedDocument
+    | InlineQueryResultCachedVideo
+)
+
 
 def _settings(context: ContextTypes.DEFAULT_TYPE) -> Settings:
     settings = context.application.bot_data.get("settings")
     if not isinstance(settings, Settings):
         raise TypeError("Settings were not attached to the application.")
     return settings
+
+
+def _is_stale_inline_query_error(exc: BadRequest) -> bool:
+    message = (exc.message or str(exc)).lower()
+    return any(marker in message for marker in _STALE_INLINE_QUERY_MARKERS)
+
+
+async def _answer_inline_query(
+    query: InlineQuery,
+    *,
+    results: list[InlineResult],
+    cache_time: int,
+    is_personal: bool,
+) -> None:
+    """Answer an inline query, ignoring expired/invalid query ids."""
+    try:
+        await query.answer(
+            results=results,
+            cache_time=cache_time,
+            is_personal=is_personal,
+        )
+    except BadRequest as exc:
+        if _is_stale_inline_query_error(exc):
+            logger.warning("Ignoring stale inline query: %s", exc.message)
+            return
+        raise
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -101,7 +140,8 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     text = (query.query or "").strip()
     if not text:
-        await query.answer(
+        await _answer_inline_query(
+            query,
             results=[
                 _error_article(
                     "Paste a media URL",
@@ -115,7 +155,8 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     url = extract_url(text)
     if url is None:
-        await query.answer(
+        await _answer_inline_query(
+            query,
             results=[
                 _error_article(
                     "No URL found",
@@ -140,16 +181,23 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             context, settings, media
         )
         result = _cached_result(file_id, result_title, result_kind, media.path)
-        await query.answer(results=[result], cache_time=30, is_personal=True)
+        await _answer_inline_query(
+            query,
+            results=[result],
+            cache_time=30,
+            is_personal=True,
+        )
     except DownloadError as exc:
-        await query.answer(
+        await _answer_inline_query(
+            query,
             results=[_error_article("Download failed", str(exc))],
             cache_time=1,
             is_personal=True,
         )
     except Exception as exc:
         logger.exception("Inline query failed for %s", url)
-        await query.answer(
+        await _answer_inline_query(
+            query,
             results=[_error_article("Upload failed", str(exc))],
             cache_time=1,
             is_personal=True,
@@ -265,4 +313,3 @@ def _cached_result(
         caption=title,
         description=f"{suffix.lstrip('.').upper()} file" if suffix else "Document",
     )
-
