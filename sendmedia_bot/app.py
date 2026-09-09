@@ -20,10 +20,10 @@ from telegram.ext import (
 from sendmedia_bot import strings
 from sendmedia_bot.config import load_settings
 from sendmedia_bot.handlers import (
+    cancel_callback,
     chosen_inline_result,
     help_command,
     inline_query,
-    preparing_callback,
     start_command,
     url_message,
 )
@@ -54,7 +54,7 @@ def build_application() -> App:
     application.add_handler(InlineQueryHandler(inline_query))
     application.add_handler(ChosenInlineResultHandler(chosen_inline_result))
     application.add_handler(
-        CallbackQueryHandler(preparing_callback, pattern=r"^dl:")
+        CallbackQueryHandler(cancel_callback, pattern=r"^cancel:")
     )
     application.add_handler(
         MessageHandler(

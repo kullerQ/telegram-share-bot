@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
-from typing import cast
+from typing import Any, cast
 from uuid import uuid4
 
 from telegram import (
@@ -41,9 +42,10 @@ _STALE_INLINE_QUERY_MARKERS = (
     "query id is invalid",
 )
 
-_CALLBACK_PREFIX = "dl:"
+_CALLBACK_PREFIX = "cancel:"
 _PENDING_KEY = "pending_inline"
-_INFLIGHT_KEY = "inflight_inline"
+_TASKS_KEY = "inline_prepare_tasks"
+_CANCELLED_KEY = "cancelled_inline"
 _EMPTY_KEYBOARD = InlineKeyboardMarkup([])
 
 
@@ -59,8 +61,13 @@ def _pending_map(context: ContextTypes.DEFAULT_TYPE) -> dict[str, str]:
     return cast(dict[str, str], raw)
 
 
-def _inflight_set(context: ContextTypes.DEFAULT_TYPE) -> set[str]:
-    raw = context.application.bot_data.setdefault(_INFLIGHT_KEY, set())
+def _task_map(context: ContextTypes.DEFAULT_TYPE) -> dict[str, asyncio.Task[Any]]:
+    raw = context.application.bot_data.setdefault(_TASKS_KEY, {})
+    return cast(dict[str, asyncio.Task[Any]], raw)
+
+
+def _cancelled_set(context: ContextTypes.DEFAULT_TYPE) -> set[str]:
+    raw = context.application.bot_data.setdefault(_CANCELLED_KEY, set())
     return cast(set[str], raw)
 
 
@@ -200,7 +207,7 @@ async def chosen_inline_result(
     if not inline_message_id:
         logger.warning(
             "Chosen inline result without inline_message_id "
-            "(enable BotFather /setinlinefeedback, or tap Download / retry)."
+            "(enable BotFather /setinlinefeedback)."
         )
         return
 
@@ -214,16 +221,25 @@ async def chosen_inline_result(
         return
 
     logger.info("Chosen inline result; preparing media for %s", url)
-    await _prepare_inline_media(
-        context,
-        inline_message_id=inline_message_id,
-        url=url,
-        result_id=chosen.result_id,
+    tasks = _task_map(context)
+    existing = tasks.get(inline_message_id)
+    if existing is not None and not existing.done():
+        return
+
+    task = asyncio.create_task(
+        _prepare_inline_media(
+            context,
+            inline_message_id=inline_message_id,
+            url=url,
+            result_id=chosen.result_id,
+        ),
+        name=f"prepare-inline-{chosen.result_id}",
     )
+    tasks[inline_message_id] = task
 
 
-async def preparing_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Fallback when inline feedback is off or auto-prepare did not start."""
+async def cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Cancel prepare and clear the inline placeholder immediately."""
     query = update.callback_query
     if query is None or query.data is None:
         return
@@ -234,27 +250,23 @@ async def preparing_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     result_id = query.data.removeprefix(_CALLBACK_PREFIX)
     inline_message_id = query.inline_message_id
-    if not inline_message_id:
-        await query.answer(text=strings.INLINE_PENDING_EXPIRED, show_alert=True)
-        return
+    await query.answer(text=strings.INLINE_CANCEL_ANSWER)
 
-    if inline_message_id in _inflight_set(context):
-        await query.answer(text=strings.INLINE_ALREADY_PREPARING)
-        return
+    if inline_message_id:
+        _cancelled_set(context).add(inline_message_id)
+        task = _task_map(context).pop(inline_message_id, None)
+        if task is not None and not task.done():
+            task.cancel()
+        # Bots cannot deleteMessage by inline_message_id; clear content instead.
+        await _edit_inline_text(
+            context,
+            inline_message_id,
+            strings.INLINE_CANCELLED,
+            reply_markup=_EMPTY_KEYBOARD,
+        )
+        logger.info("Cancelled inline prepare for message %s", inline_message_id)
 
-    url = _pending_map(context).get(result_id)
-    if url is None:
-        await query.answer(text=strings.INLINE_PENDING_EXPIRED, show_alert=True)
-        return
-
-    await query.answer(text=strings.INLINE_STILL_PREPARING)
-    logger.info("Inline prepare via callback for %s", url)
-    await _prepare_inline_media(
-        context,
-        inline_message_id=inline_message_id,
-        url=url,
-        result_id=result_id,
-    )
+    _pending_map(context).pop(result_id, None)
 
 
 async def _prepare_inline_media(
@@ -264,20 +276,16 @@ async def _prepare_inline_media(
     url: str,
     result_id: str,
 ) -> None:
-    inflight = _inflight_set(context)
-    if inline_message_id in inflight:
-        logger.info("Skipping duplicate prepare for inline message %s", inline_message_id)
-        return
-    inflight.add(inline_message_id)
-
     settings = _settings(context)
     media: DownloadedMedia | None = None
     try:
+        if inline_message_id in _cancelled_set(context):
+            return
         await _edit_inline_text(
             context,
             inline_message_id,
             strings.INLINE_CHOSEN_DOWNLOADING.format(url=url),
-            reply_markup=_download_keyboard(result_id),
+            reply_markup=_cancel_keyboard(result_id),
         )
         media = await download_media(
             url=url,
@@ -285,41 +293,53 @@ async def _prepare_inline_media(
             max_file_bytes=settings.max_file_bytes,
             timeout_seconds=settings.download_timeout_seconds,
         )
+        if inline_message_id in _cancelled_set(context):
+            return
         file_id, title, kind = await _upload_for_file_id(context, settings, media)
+        if inline_message_id in _cancelled_set(context):
+            return
         await context.bot.edit_message_media(
             media=_input_media(file_id, title, kind),
             inline_message_id=inline_message_id,
             reply_markup=_EMPTY_KEYBOARD,
         )
         logger.info("Inline media ready for %s (%s)", url, kind.value)
+    except asyncio.CancelledError:
+        logger.info("Inline prepare cancelled for %s", url)
+        raise
     except DownloadError as exc:
+        if inline_message_id in _cancelled_set(context):
+            return
         logger.warning("Inline download failed for %s: %s", url, exc)
         await _edit_inline_text(
             context,
             inline_message_id,
             strings.INLINE_CHOSEN_DOWNLOAD_FAILED.format(error=exc),
-            reply_markup=_download_keyboard(result_id),
+            reply_markup=_cancel_keyboard(result_id),
         )
     except Exception:
+        if inline_message_id in _cancelled_set(context):
+            return
         logger.exception("Inline prepare failed for %s", url)
         await _edit_inline_text(
             context,
             inline_message_id,
             strings.INLINE_CHOSEN_PREPARE_FAILED,
-            reply_markup=_download_keyboard(result_id),
+            reply_markup=_cancel_keyboard(result_id),
         )
     finally:
-        inflight.discard(inline_message_id)
+        _task_map(context).pop(inline_message_id, None)
+        _cancelled_set(context).discard(inline_message_id)
         if media is not None:
             cleanup_media(media)
 
 
-def _download_keyboard(result_id: str) -> InlineKeyboardMarkup:
+def _cancel_keyboard(result_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [
                 InlineKeyboardButton(
-                    strings.INLINE_PREPARING_BUTTON,
+                    strings.INLINE_CANCEL_BUTTON,
                     callback_data=f"{_CALLBACK_PREFIX}{result_id}",
                 )
             ]
@@ -346,9 +366,8 @@ def _pending_media_article(result_id: str, url: str) -> InlineQueryResultArticle
         input_message_content=InputTextMessageContent(
             message_text=strings.INLINE_PENDING_MESSAGE.format(url=url)[:4096]
         ),
-        # Keyboard is required so Telegram gives us inline_message_id on choose,
-        # and also provides a manual fallback via callback_query.
-        reply_markup=_download_keyboard(result_id),
+        # Keyboard is required so Telegram gives us inline_message_id on choose.
+        reply_markup=_cancel_keyboard(result_id),
     )
 
 
