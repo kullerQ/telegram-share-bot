@@ -6,6 +6,8 @@ import logging
 
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
+    ChosenInlineResultHandler,
     CommandHandler,
     ContextTypes,
     ExtBot,
@@ -17,8 +19,10 @@ from telegram.ext import (
 
 from sendmedia_bot.config import load_settings
 from sendmedia_bot.handlers import (
+    chosen_inline_result,
     help_command,
     inline_query,
+    preparing_callback,
     start_command,
     url_message,
 )
@@ -47,6 +51,10 @@ def build_application() -> App:
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(InlineQueryHandler(inline_query))
+    application.add_handler(ChosenInlineResultHandler(chosen_inline_result))
+    application.add_handler(
+        CallbackQueryHandler(preparing_callback, pattern=r"^inline_preparing$")
+    )
     application.add_handler(
         MessageHandler(
             filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND,
@@ -69,7 +77,14 @@ def main() -> None:
 
     application = build_application()
     logging.getLogger(__name__).info("Starting SendMedia bot (polling)")
-    application.run_polling(allowed_updates=["message", "inline_query"])
+    application.run_polling(
+        allowed_updates=[
+            "message",
+            "inline_query",
+            "chosen_inline_result",
+            "callback_query",
+        ]
+    )
 
 
 if __name__ == "__main__":

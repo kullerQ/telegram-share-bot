@@ -11,11 +11,13 @@ Works in private chats, groups, and channels. The bot does **not** need to be a 
 3. Copy the bot token into `.env` as `BOT_TOKEN`.
 4. Enable inline mode:
    - `/setinline` → select your bot → set placeholder text, e.g. `Paste a media URL…`
-5. Optional but useful:
-   - `/setinlinefeedback` → enable if you want chosen-result analytics later
+5. **Enable inline feedback** (required for downloads to finish after you tap a result):
+   - `/setinlinefeedback` → select your bot → enable (100% is fine)
+6. Optional:
    - `/setdescription` and `/setabouttext` for store listing text
 
 Without `/setinline`, the bot will not appear when users type `@YourBot`.
+Without `/setinlinefeedback`, the bot cannot learn which result you chose, so the media never replaces the placeholder.
 
 ## Local setup
 
@@ -44,20 +46,20 @@ Open a private chat with the bot, send `/start`, then in any other chat type:
 @YourBot https://youtube.com/watch?v=…
 ```
 
-Tap the result to send the media.
+Tap **Send media**. A placeholder appears first; the bot downloads in the background and replaces it with the file.
 
 ## How it works
 
 1. Telegram sends an `inline_query` with the URL.
-2. The bot downloads via `yt-dlp`.
-3. Media is uploaded to `STORAGE_CHAT_ID` to obtain a Telegram `file_id`, then that storage message is deleted.
-4. The bot answers the inline query with a cached video/audio/document result.
+2. The bot answers **immediately** with a placeholder article (Telegram rejects answers that take too long).
+3. When you tap the result, Telegram sends `chosen_inline_result` (needs `/setinlinefeedback`).
+4. The bot downloads via `yt-dlp`, uploads to `STORAGE_CHAT_ID` for a `file_id`, deletes that storage message, then edits the inline message to the media.
 
 ## Limits
 
 - Max file size ≈ 45 MB (Telegram Bot API upload limit is 50 MB).
 - Download timeout defaults to 90 seconds.
-- Unsupported or oversize URLs return an inline article explaining the error.
+- Unsupported or oversize URLs replace the placeholder with an error message.
 
 ## Notes
 
