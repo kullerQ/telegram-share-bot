@@ -80,6 +80,12 @@ def build_application() -> App:
     )
     application.bot_data["settings"] = settings
     application.bot_data["media_cache"] = MediaCache(settings.cache_db_path)
+    raw_concurrency = getattr(settings, "max_concurrent_downloads", 3)
+    try:
+        concurrency = int(raw_concurrency)
+    except (TypeError, ValueError):
+        concurrency = 3
+    application.bot_data["download_semaphore"] = asyncio.Semaphore(concurrency)
 
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))

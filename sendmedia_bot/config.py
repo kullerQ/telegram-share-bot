@@ -26,6 +26,7 @@ DEFAULT_MAX_FILE_BYTES = 45 * 1024 * 1024
 DEFAULT_DOWNLOAD_TIMEOUT_SECONDS = 90
 DEFAULT_UPLOAD_TIMEOUT_SECONDS = 180
 DEFAULT_DELETE_STORAGE_MESSAGES = True
+DEFAULT_MAX_CONCURRENT_DOWNLOADS = 3
 
 _TRUE_VALUES = frozenset({"true", "1", "yes", "y", "on"})
 _FALSE_VALUES = frozenset({"false", "0", "no", "n", "off"})
@@ -43,6 +44,7 @@ class Settings:
     cache_db_path: Path
     delete_storage_messages: bool
     upload_timeout_seconds: int = DEFAULT_UPLOAD_TIMEOUT_SECONDS
+    max_concurrent_downloads: int = DEFAULT_MAX_CONCURRENT_DOWNLOADS
 
 
 def _update_env_file(env_file: Path, key: str, new_value: str) -> None:
@@ -239,6 +241,15 @@ def load_settings(env_file: Path = _ENV_PATH) -> Settings:
         env_file=env_file,
     )
 
+    max_concurrent_downloads = parse_int(
+        "MAX_CONCURRENT_DOWNLOADS",
+        os.getenv("MAX_CONCURRENT_DOWNLOADS"),
+        default=DEFAULT_MAX_CONCURRENT_DOWNLOADS,
+        min_value=1,
+        max_value=20,
+        env_file=env_file,
+    )
+
     return Settings(
         bot_token=token,
         storage_chat_id=storage_chat_id,
@@ -248,4 +259,5 @@ def load_settings(env_file: Path = _ENV_PATH) -> Settings:
         cache_db_path=cache_db_path,
         delete_storage_messages=delete_storage_messages,
         upload_timeout_seconds=upload_timeout,
+        max_concurrent_downloads=max_concurrent_downloads,
     )

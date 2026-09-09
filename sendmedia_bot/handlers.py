@@ -69,6 +69,14 @@ def _cache(context: ContextTypes.DEFAULT_TYPE) -> MediaCache:
     return cache
 
 
+def _download_semaphore(context: ContextTypes.DEFAULT_TYPE) -> asyncio.Semaphore:
+    sem = context.application.bot_data.get("download_semaphore")
+    if not isinstance(sem, asyncio.Semaphore):
+        sem = asyncio.Semaphore(3)
+        context.application.bot_data["download_semaphore"] = sem
+    return sem
+
+
 def _pending_map(context: ContextTypes.DEFAULT_TYPE) -> dict[str, str]:
     raw = context.application.bot_data.setdefault(_PENDING_KEY, {})
     return cast(dict[str, str], raw)
@@ -222,15 +230,16 @@ async def url_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     # 3. Fallback to local download and upload
     media: DownloadedMedia | None = None
     try:
-        media = await download_media(
-            url=url,
-            download_dir=settings.download_dir,
-            max_file_bytes=settings.max_file_bytes,
-            timeout_seconds=settings.download_timeout_seconds,
-        )
-        sent_msg = await _send_media_to_chat(
-            context, message.chat_id, media, settings=settings
-        )
+        async with _download_semaphore(context):
+            media = await download_media(
+                url=url,
+                download_dir=settings.download_dir,
+                max_file_bytes=settings.max_file_bytes,
+                timeout_seconds=settings.download_timeout_seconds,
+            )
+            sent_msg = await _send_media_to_chat(
+                context, message.chat_id, media, settings=settings
+            )
         file_id, result_kind = _file_id_and_kind_from_message(sent_msg)
         await cache.set(
             url=url,
@@ -453,15 +462,18 @@ async def _prepare_inline_media(
                 )
                 return
 
-        media = await download_media(
-            url=url,
-            download_dir=settings.download_dir,
-            max_file_bytes=settings.max_file_bytes,
-            timeout_seconds=settings.download_timeout_seconds,
-        )
-        if inline_message_id in _cancelled_set(context):
-            return
-        file_id, title, kind = await _upload_for_file_id(context, settings, media)
+        async with _download_semaphore(context):
+            if inline_message_id in _cancelled_set(context):
+                return
+            media = await download_media(
+                url=url,
+                download_dir=settings.download_dir,
+                max_file_bytes=settings.max_file_bytes,
+                timeout_seconds=settings.download_timeout_seconds,
+            )
+            if inline_message_id in _cancelled_set(context):
+                return
+            file_id, title, kind = await _upload_for_file_id(context, settings, media)
         await cache.set(
             url=url,
             file_id=file_id,
