@@ -22,6 +22,7 @@ from telegram.constants import ParseMode
 from telegram.error import BadRequest, TelegramError
 from telegram.ext import ContextTypes
 
+from sendmedia_bot import strings
 from sendmedia_bot.config import Settings
 from sendmedia_bot.downloader import (
     DownloadedMedia,
@@ -80,19 +81,13 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if update.effective_message is None or update.effective_chat is None:
         return
 
-    bot_username = context.bot.username or "YourBot"
+    bot_username = context.bot.username or strings.FALLBACK_BOT_USERNAME
     chat_id = update.effective_chat.id
-    text = (
-        "SendMedia Bot\n\n"
-        "Use me *inline* in any chat:\n"
-        f"`@{bot_username} https://example.com/video`\n\n"
-        "Tap the result to send a placeholder, then wait while I download "
-        "and replace it with the media.\n\n"
-        "You can also paste a media URL here and I will send the file back.\n\n"
-        f"Your chat id (for `STORAGE_CHAT_ID`): `{chat_id}`\n\n"
-        "BotFather setup:\n"
-        "• `/setinline` — enable inline mode\n"
-        "• `/setinlinefeedback` — required so I can finish the download after you tap"
+    text = strings.START_MESSAGE.format(
+        bot_name=strings.BOT_DISPLAY_NAME,
+        bot_username=bot_username,
+        example_url=strings.EXAMPLE_MEDIA_URL,
+        chat_id=chat_id,
     )
     await update.effective_message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
@@ -109,10 +104,10 @@ async def url_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     url = extract_url(message.text)
     if url is None:
-        await message.reply_text("Send a media URL, or use me inline: @BotName <url>")
+        await message.reply_text(strings.DIRECT_URL_HINT)
         return
 
-    status = await message.reply_text("Downloading…")
+    status = await message.reply_text(strings.DIRECT_DOWNLOADING)
     settings = _settings(context)
     media: DownloadedMedia | None = None
     try:
@@ -123,12 +118,12 @@ async def url_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             timeout_seconds=settings.download_timeout_seconds,
         )
         await _send_media_to_chat(context, message.chat_id, media)
-        await status.edit_text("Done.")
+        await status.edit_text(strings.DIRECT_DONE)
     except DownloadError as exc:
-        await status.edit_text(f"Could not download: {exc}")
+        await status.edit_text(strings.DIRECT_DOWNLOAD_FAILED.format(error=exc))
     except Exception:
         logger.exception("Failed to handle direct URL message")
-        await status.edit_text("Something went wrong while sending the media.")
+        await status.edit_text(strings.DIRECT_SEND_FAILED)
     finally:
         if media is not None:
             cleanup_media(media)
@@ -146,8 +141,8 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             query,
             results=[
                 _error_article(
-                    "Paste a media URL",
-                    "Type a YouTube, Twitter/X, etc. link after the bot username.",
+                    strings.INLINE_EMPTY_TITLE,
+                    strings.INLINE_EMPTY_DESCRIPTION,
                 )
             ],
             cache_time=1,
@@ -161,8 +156,8 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             query,
             results=[
                 _error_article(
-                    "No URL found",
-                    "Include a full http(s) link in the inline query.",
+                    strings.INLINE_NO_URL_TITLE,
+                    strings.INLINE_NO_URL_DESCRIPTION,
                 )
             ],
             cache_time=1,
@@ -199,7 +194,7 @@ async def chosen_inline_result(
         await _edit_inline_text(
             context,
             inline_message_id,
-            "No URL found in the query.",
+            strings.INLINE_CHOSEN_NO_URL,
         )
         return
 
@@ -209,7 +204,7 @@ async def chosen_inline_result(
         await _edit_inline_text(
             context,
             inline_message_id,
-            f"Downloading…\n{url}",
+            strings.INLINE_CHOSEN_DOWNLOADING.format(url=url),
             reply_markup=_preparing_keyboard(),
         )
         media = await download_media(
@@ -228,14 +223,14 @@ async def chosen_inline_result(
         await _edit_inline_text(
             context,
             inline_message_id,
-            f"Download failed\n\n{exc}",
+            strings.INLINE_CHOSEN_DOWNLOAD_FAILED.format(error=exc),
         )
     except Exception:
         logger.exception("Chosen inline result failed for %s", url)
         await _edit_inline_text(
             context,
             inline_message_id,
-            "Something went wrong while preparing the media.",
+            strings.INLINE_CHOSEN_PREPARE_FAILED,
         )
     finally:
         if media is not None:
@@ -246,12 +241,19 @@ async def preparing_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     query = update.callback_query
     if query is None:
         return
-    await query.answer(text="Still preparing…")
+    await query.answer(text=strings.INLINE_STILL_PREPARING)
 
 
 def _preparing_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
-        [[InlineKeyboardButton("Preparing…", callback_data=_PREPARING_CALLBACK_DATA)]]
+        [
+            [
+                InlineKeyboardButton(
+                    strings.INLINE_PREPARING_BUTTON,
+                    callback_data=_PREPARING_CALLBACK_DATA,
+                )
+            ]
+        ]
     )
 
 
@@ -269,10 +271,10 @@ def _error_article(title: str, description: str) -> InlineQueryResultArticle:
 def _pending_media_article(url: str) -> InlineQueryResultArticle:
     return InlineQueryResultArticle(
         id=str(uuid4()),
-        title="Send media",
+        title=strings.INLINE_PENDING_TITLE,
         description=url[:120],
         input_message_content=InputTextMessageContent(
-            message_text=f"Preparing media…\n{url}"[:4096]
+            message_text=strings.INLINE_PENDING_MESSAGE.format(url=url)[:4096]
         ),
         # Keyboard is required so Telegram gives us inline_message_id on choose.
         reply_markup=_preparing_keyboard(),
@@ -367,4 +369,4 @@ def _file_id_and_kind_from_message(message: Message) -> tuple[str, MediaKind]:
         return message.audio.file_id, MediaKind.AUDIO
     if message.document is not None:
         return message.document.file_id, MediaKind.DOCUMENT
-    raise RuntimeError("Telegram did not return a usable file_id.")
+    raise RuntimeError(strings.TELEGRAM_NO_FILE_ID)

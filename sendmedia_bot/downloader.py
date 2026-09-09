@@ -13,6 +13,8 @@ from typing import Any, cast
 
 import yt_dlp
 
+from sendmedia_bot import strings
+
 URL_RE = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
 
 VIDEO_EXTENSIONS = {".mp4", ".webm", ".mkv", ".mov", ".m4v"}
@@ -68,21 +70,21 @@ def _resolve_downloaded_path(info: Any, work_dir: Path, ydl: yt_dlp.YoutubeDL) -
 
     files = [p for p in work_dir.glob("*") if p.is_file()]
     if not files:
-        raise DownloadError("Download finished but no file was found.")
+        raise DownloadError(strings.DOWNLOAD_NO_FILE)
     return max(files, key=lambda p: p.stat().st_size)
 
 
 def _pick_info(info: Any) -> dict[str, Any]:
     if not isinstance(info, dict):
-        raise DownloadError("Could not extract media from that URL.")
+        raise DownloadError(strings.DOWNLOAD_EXTRACT_FAILED)
     if "entries" not in info:
         return cast(dict[str, Any], info)
     raw_entries = info.get("entries")
     if raw_entries is None:
-        raise DownloadError("Playlist/empty result is not supported.")
+        raise DownloadError(strings.DOWNLOAD_PLAYLIST_UNSUPPORTED)
     entries = [entry for entry in list(raw_entries) if isinstance(entry, dict)]
     if not entries:
-        raise DownloadError("Playlist/empty result is not supported.")
+        raise DownloadError(strings.DOWNLOAD_PLAYLIST_UNSUPPORTED)
     return cast(dict[str, Any], entries[0])
 
 
@@ -118,21 +120,23 @@ def _download_sync(
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:  # type: ignore[arg-type]
             extracted = ydl.extract_info(url, download=True)
             if not isinstance(extracted, dict):
-                raise DownloadError("Could not extract media from that URL.")
+                raise DownloadError(strings.DOWNLOAD_EXTRACT_FAILED)
 
             info = _pick_info(extracted)
             path = _resolve_downloaded_path(info, work_dir, ydl)
             if not path.exists():
-                raise DownloadError("Download finished but no file was found.")
+                raise DownloadError(strings.DOWNLOAD_NO_FILE)
 
             size = path.stat().st_size
             if size <= 0:
-                raise DownloadError("Downloaded file is empty.")
+                raise DownloadError(strings.DOWNLOAD_EMPTY_FILE)
             if size > max_file_bytes:
                 path.unlink(missing_ok=True)
                 raise DownloadError(
-                    f"File is too large ({size // (1024 * 1024)} MB). "
-                    f"Max is {max_file_bytes // (1024 * 1024)} MB."
+                    strings.DOWNLOAD_TOO_LARGE.format(
+                        size_mb=size // (1024 * 1024),
+                        max_mb=max_file_bytes // (1024 * 1024),
+                    )
                 )
 
             title = str(info.get("title") or path.stem)[:64]
@@ -152,15 +156,19 @@ def _download_sync(
         raise
     except yt_dlp.utils.DownloadError as exc:
         _cleanup_dir(work_dir)
-        message = str(exc).split("\n")[-1].strip() or "Download failed."
+        message = str(exc).split("\n")[-1].strip() or strings.DOWNLOAD_FAILED_GENERIC
         if "File is larger than max-filesize" in message or "filesize" in message.lower():
             raise DownloadError(
-                f"File exceeds the {max_file_bytes // (1024 * 1024)} MB limit."
+                strings.DOWNLOAD_EXCEEDS_LIMIT.format(
+                    max_mb=max_file_bytes // (1024 * 1024)
+                )
             ) from exc
         raise DownloadError(message) from exc
     except Exception as exc:
         _cleanup_dir(work_dir)
-        raise DownloadError(f"Download failed: {exc}") from exc
+        raise DownloadError(
+            strings.DOWNLOAD_FAILED_WITH_DETAIL.format(error=exc)
+        ) from exc
 
 
 def _cleanup_dir(directory: Path) -> None:
@@ -196,7 +204,7 @@ async def download_media(
         )
     except TimeoutError as exc:
         raise DownloadError(
-            f"Download timed out after {timeout_seconds} seconds."
+            strings.DOWNLOAD_TIMED_OUT.format(timeout_seconds=timeout_seconds)
         ) from exc
 
 

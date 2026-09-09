@@ -8,6 +8,8 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from sendmedia_bot import strings
+
 _ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(_ROOT / ".env")
 
@@ -28,21 +30,16 @@ class Settings:
 def load_settings() -> Settings:
     token = os.getenv("BOT_TOKEN", "").strip()
     if not token or token.startswith("123456:"):
-        raise RuntimeError(
-            "Set BOT_TOKEN in .env (create a bot with @BotFather, then /setinline)."
-        )
+        raise RuntimeError(strings.CONFIG_MISSING_BOT_TOKEN)
 
     storage_raw = os.getenv("STORAGE_CHAT_ID", "").strip()
     if not storage_raw or storage_raw == "123456789":
-        raise RuntimeError(
-            "Set STORAGE_CHAT_ID in .env to a chat the bot can write to "
-            "(your user id after /start works)."
-        )
+        raise RuntimeError(strings.CONFIG_MISSING_STORAGE_CHAT_ID)
 
     try:
         storage_chat_id = int(storage_raw)
     except ValueError as exc:
-        raise RuntimeError("STORAGE_CHAT_ID must be an integer.") from exc
+        raise RuntimeError(strings.CONFIG_STORAGE_CHAT_ID_NOT_INT) from exc
 
     max_file_bytes = int(os.getenv("MAX_FILE_BYTES", str(DEFAULT_MAX_FILE_BYTES)))
     download_timeout = int(

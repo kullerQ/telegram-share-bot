@@ -17,6 +17,7 @@ from telegram.ext import (
     filters,
 )
 
+from sendmedia_bot import strings
 from sendmedia_bot.config import load_settings
 from sendmedia_bot.handlers import (
     chosen_inline_result,
@@ -76,7 +77,7 @@ def main() -> None:
     logging.getLogger("httpx").addFilter(redact_filter)
 
     application = build_application()
-    logging.getLogger(__name__).info("Starting SendMedia bot (polling)")
+    logging.getLogger(__name__).info(strings.STARTUP_POLLING)
     application.run_polling(
         allowed_updates=[
             "message",
