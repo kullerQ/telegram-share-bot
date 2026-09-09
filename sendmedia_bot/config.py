@@ -2,20 +2,35 @@
 
 from __future__ import annotations
 
+import logging
 import os
+import re
+import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TypeVar
 
 from dotenv import load_dotenv
 
 from sendmedia_bot import strings
 
+logger = logging.getLogger(__name__)
+
 _ROOT = Path(__file__).resolve().parent.parent
-load_dotenv(_ROOT / ".env")
+_ENV_PATH = _ROOT / ".env"
+load_dotenv(_ENV_PATH)
 
 # Stay under Telegram Bot API's ~50 MB upload limit.
+TELEGRAM_MAX_FILE_BYTES = 50 * 1024 * 1024
 DEFAULT_MAX_FILE_BYTES = 45 * 1024 * 1024
 DEFAULT_DOWNLOAD_TIMEOUT_SECONDS = 90
+DEFAULT_UPLOAD_TIMEOUT_SECONDS = 180
+DEFAULT_DELETE_STORAGE_MESSAGES = True
+
+_TRUE_VALUES = frozenset({"true", "1", "yes", "y", "on"})
+_FALSE_VALUES = frozenset({"false", "0", "no", "n", "off"})
+
+T = TypeVar("T")
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,9 +40,150 @@ class Settings:
     max_file_bytes: int
     download_timeout_seconds: int
     download_dir: Path
+    cache_db_path: Path
+    delete_storage_messages: bool
+    upload_timeout_seconds: int = DEFAULT_UPLOAD_TIMEOUT_SECONDS
 
 
-def load_settings() -> Settings:
+def _update_env_file(env_file: Path, key: str, new_value: str) -> None:
+    try:
+        if not env_file.exists():
+            return
+        lines = env_file.read_text(encoding="utf-8").splitlines()
+        pattern = re.compile(rf"^\s*{re.escape(key)}\s*=")
+        updated = False
+        new_lines: list[str] = []
+        for line in lines:
+            if pattern.match(line):
+                new_lines.append(f"{key}={new_value}")
+                updated = True
+            else:
+                new_lines.append(line)
+        if not updated:
+            new_lines.append(f"{key}={new_value}")
+        env_file.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+        logger.info("Updated %s=%s in %s", key, new_value, env_file.name)
+    except Exception as exc:
+        logger.warning("Could not update %s in %s: %s", key, env_file, exc)
+
+
+def _handle_invalid_param(
+    param_name: str,
+    raw_value: str,
+    default_value: T,
+    reason: str,
+    env_file: Path = _ENV_PATH,
+) -> T:
+    msg = f"Invalid configuration for {param_name}='{raw_value}': {reason}"
+    logger.warning(msg)
+
+    # In a non-interactive environment (CI, Docker, background service), fail fast.
+    if not (sys.stdin and sys.stdin.isatty()):
+        raise RuntimeError(
+            f"{msg}. Non-interactive environment: please fix {param_name} in your .env file."
+        )
+
+    print(f"\n[WARNING] {msg}", file=sys.stderr)
+    try:
+        prompt = (
+            f"Would you like to reset {param_name} to its default value '{default_value}'? [y/N]: "
+        )
+        choice = input(prompt).strip().lower()
+    except (EOFError, KeyboardInterrupt) as exc:
+        raise RuntimeError(f"Configuration setup aborted for {param_name}.") from exc
+
+    if choice in ("y", "yes"):
+        logger.info("Resetting %s to default value: %s", param_name, default_value)
+        _update_env_file(env_file, param_name, str(default_value).lower())
+        return default_value
+
+    raise RuntimeError(
+        f"Invalid configuration for {param_name}='{raw_value}'. Please fix it in your .env file."
+    )
+
+
+def parse_bool(
+    param_name: str,
+    raw_value: str | None,
+    default: bool = DEFAULT_DELETE_STORAGE_MESSAGES,
+    env_file: Path = _ENV_PATH,
+) -> bool:
+    if raw_value is None or not raw_value.strip():
+        return default
+    val = raw_value.strip().lower()
+    if val in _TRUE_VALUES:
+        return True
+    if val in _FALSE_VALUES:
+        return False
+    return _handle_invalid_param(
+        param_name=param_name,
+        raw_value=raw_value,
+        default_value=default,
+        reason="Expected a boolean (true, false, 1, 0, yes, no)",
+        env_file=env_file,
+    )
+
+
+def parse_int(
+    param_name: str,
+    raw_value: str | None,
+    default: int,
+    *,
+    min_value: int | None = None,
+    max_value: int | None = None,
+    env_file: Path = _ENV_PATH,
+) -> int:
+    if raw_value is None or not raw_value.strip():
+        return default
+    stripped = raw_value.strip()
+    try:
+        val = int(stripped)
+        if min_value is not None and val < min_value:
+            raise ValueError(f"must be >= {min_value}")
+        if max_value is not None and val > max_value:
+            raise ValueError(f"must be <= {max_value}")
+        return val
+    except ValueError as exc:
+        bounds = []
+        if min_value is not None:
+            bounds.append(f">= {min_value}")
+        if max_value is not None:
+            bounds.append(f"<= {max_value}")
+        bounds_info = f" ({', '.join(bounds)})" if bounds else ""
+        return _handle_invalid_param(
+            param_name=param_name,
+            raw_value=stripped,
+            default_value=default,
+            reason=f"Expected an integer{bounds_info}: {exc}",
+            env_file=env_file,
+        )
+
+
+def parse_path(
+    param_name: str,
+    raw_value: str | None,
+    default: Path,
+    env_file: Path = _ENV_PATH,
+) -> Path:
+    if raw_value is None or not raw_value.strip():
+        return default
+    stripped = raw_value.strip()
+    try:
+        path = Path(stripped)
+        if path.exists() and path.is_dir():
+            raise ValueError(f"Path '{path}' is a directory, expected a file path")
+        return path
+    except Exception as exc:
+        return _handle_invalid_param(
+            param_name=param_name,
+            raw_value=stripped,
+            default_value=default,
+            reason=str(exc),
+            env_file=env_file,
+        )
+
+
+def load_settings(env_file: Path = _ENV_PATH) -> Settings:
     token = os.getenv("BOT_TOKEN", "").strip()
     if not token or token.startswith("123456:"):
         raise RuntimeError(strings.CONFIG_MISSING_BOT_TOKEN)
@@ -41,13 +197,47 @@ def load_settings() -> Settings:
     except ValueError as exc:
         raise RuntimeError(strings.CONFIG_STORAGE_CHAT_ID_NOT_INT) from exc
 
-    max_file_bytes = int(os.getenv("MAX_FILE_BYTES", str(DEFAULT_MAX_FILE_BYTES)))
-    download_timeout = int(
-        os.getenv("DOWNLOAD_TIMEOUT_SECONDS", str(DEFAULT_DOWNLOAD_TIMEOUT_SECONDS))
+    max_file_bytes = parse_int(
+        "MAX_FILE_BYTES",
+        os.getenv("MAX_FILE_BYTES"),
+        default=DEFAULT_MAX_FILE_BYTES,
+        min_value=1024,
+        max_value=TELEGRAM_MAX_FILE_BYTES,
+        env_file=env_file,
+    )
+
+    download_timeout = parse_int(
+        "DOWNLOAD_TIMEOUT_SECONDS",
+        os.getenv("DOWNLOAD_TIMEOUT_SECONDS"),
+        default=DEFAULT_DOWNLOAD_TIMEOUT_SECONDS,
+        min_value=1,
+        env_file=env_file,
     )
 
     download_dir = _ROOT / "downloads"
     download_dir.mkdir(parents=True, exist_ok=True)
+
+    cache_db_path = parse_path(
+        "CACHE_DB_PATH",
+        os.getenv("CACHE_DB_PATH"),
+        default=download_dir / "media_cache.db",
+        env_file=env_file,
+    )
+
+    delete_storage_messages = parse_bool(
+        "DELETE_STORAGE_MESSAGES",
+        os.getenv("DELETE_STORAGE_MESSAGES"),
+        default=DEFAULT_DELETE_STORAGE_MESSAGES,
+        env_file=env_file,
+    )
+
+    upload_timeout = parse_int(
+        "UPLOAD_TIMEOUT_SECONDS",
+        os.getenv("UPLOAD_TIMEOUT_SECONDS"),
+        default=DEFAULT_UPLOAD_TIMEOUT_SECONDS,
+        min_value=1,
+        env_file=env_file,
+    )
 
     return Settings(
         bot_token=token,
@@ -55,4 +245,7 @@ def load_settings() -> Settings:
         max_file_bytes=max_file_bytes,
         download_timeout_seconds=download_timeout,
         download_dir=download_dir,
+        cache_db_path=cache_db_path,
+        delete_storage_messages=delete_storage_messages,
+        upload_timeout_seconds=upload_timeout,
     )

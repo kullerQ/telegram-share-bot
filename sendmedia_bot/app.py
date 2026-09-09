@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from telegram.ext import (
@@ -18,7 +19,8 @@ from telegram.ext import (
 )
 
 from sendmedia_bot import strings
-from sendmedia_bot.config import load_settings
+from sendmedia_bot.cache import MediaCache
+from sendmedia_bot.config import DEFAULT_UPLOAD_TIMEOUT_SECONDS, load_settings
 from sendmedia_bot.handlers import (
     cancel_callback,
     chosen_inline_result,
@@ -39,15 +41,45 @@ App = Application[
 ]
 
 
+async def _post_init(application: App) -> None:
+    """Ensure the bot's identity is fetched if startup encountered a transient network timeout."""
+    if application.bot._bot_user is None:
+        for attempt in range(1, 4):
+            try:
+                await application.bot.get_me()
+                break
+            except Exception:
+                if attempt == 3:
+                    raise
+                await asyncio.sleep(1.0)
+
+
 def build_application() -> App:
     settings = load_settings()
+    raw_upload_timeout = getattr(settings, "upload_timeout_seconds", DEFAULT_UPLOAD_TIMEOUT_SECONDS)
+    try:
+        upload_timeout = float(raw_upload_timeout)
+    except (TypeError, ValueError):
+        upload_timeout = float(DEFAULT_UPLOAD_TIMEOUT_SECONDS)
+
     application: App = (
         Application.builder()
         .token(settings.bot_token)
         .concurrent_updates(True)
+        .connect_timeout(15.0)
+        .read_timeout(30.0)
+        .write_timeout(20.0)
+        .media_write_timeout(upload_timeout)
+        .pool_timeout(5.0)
+        .get_updates_connect_timeout(15.0)
+        .get_updates_read_timeout(30.0)
+        .get_updates_write_timeout(20.0)
+        .get_updates_pool_timeout(5.0)
+        .post_init(_post_init)
         .build()
     )
     application.bot_data["settings"] = settings
+    application.bot_data["media_cache"] = MediaCache(settings.cache_db_path)
 
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
@@ -77,6 +109,7 @@ def main() -> None:
             "callback_query",
         ],
         drop_pending_updates=True,
+        bootstrap_retries=5,
     )
 
 

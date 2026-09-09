@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import re
 import uuid
 from dataclasses import dataclass
@@ -14,6 +15,8 @@ from typing import Any, cast
 import yt_dlp
 
 from sendmedia_bot import strings
+
+logger = logging.getLogger(__name__)
 
 URL_RE = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
 
@@ -35,6 +38,14 @@ class DownloadedMedia:
     duration: int | None
 
 
+@dataclass(frozen=True, slots=True)
+class DirectMediaStream:
+    direct_url: str
+    title: str
+    kind: MediaKind
+    duration: int | None = None
+
+
 class DownloadError(Exception):
     """Raised when a URL cannot be downloaded within bot limits."""
 
@@ -47,7 +58,11 @@ def extract_url(text: str) -> str | None:
 
 
 def _classify(path: Path) -> MediaKind:
-    suffix = path.suffix.lower()
+    return _classify_ext(path.suffix)
+
+
+def _classify_ext(ext: str) -> MediaKind:
+    suffix = f".{ext.lower().lstrip('.')}"
     if suffix in VIDEO_EXTENSIONS:
         return MediaKind.VIDEO
     if suffix in AUDIO_EXTENSIONS:
@@ -214,3 +229,87 @@ def cleanup_media(media: DownloadedMedia) -> None:
     path.unlink(missing_ok=True)
     if parent.name and parent != path:
         _cleanup_dir(parent)
+
+
+def _extract_direct_stream_sync(
+    url: str,
+    max_file_bytes: int,
+) -> DirectMediaStream | None:
+    ydl_opts: dict[str, Any] = {
+        "noplaylist": True,
+        "quiet": True,
+        "no_warnings": True,
+        "socket_timeout": 10,
+    }
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:  # type: ignore[arg-type]
+            extracted = ydl.extract_info(url, download=False)
+            if not isinstance(extracted, dict):
+                return None
+            info = _pick_info(extracted)
+
+            title = str(info.get("title") or "")[:64]
+            duration_raw = info.get("duration")
+            duration = int(duration_raw) if isinstance(duration_raw, (int, float)) else None
+
+            direct = info.get("url")
+            if (
+                isinstance(direct, str)
+                and direct.startswith("http")
+                and ".m3u8" not in direct
+                and ".mpd" not in direct
+            ):
+                ext = str(info.get("ext") or "mp4")
+                kind = _classify_ext(ext)
+                if kind is not MediaKind.DOCUMENT:
+                    return DirectMediaStream(
+                        direct_url=direct,
+                        title=title,
+                        kind=kind,
+                        duration=duration,
+                    )
+
+            formats = info.get("formats") or []
+            for f in reversed(formats):
+                if not isinstance(f, dict):
+                    continue
+                u = f.get("url")
+                if not isinstance(u, str) or not u.startswith("http"):
+                    continue
+                if ".m3u8" in u or ".mpd" in u:
+                    continue
+                proto = f.get("protocol")
+                if proto not in ("http", "https"):
+                    continue
+                ext = str(f.get("ext") or "")
+                kind = _classify_ext(ext)
+                if kind is MediaKind.DOCUMENT:
+                    continue
+                if f.get("vcodec") == "none" or f.get("acodec") == "none":
+                    continue
+                size = f.get("filesize") or f.get("filesize_approx")
+                if size and isinstance(size, (int, float)) and size > max_file_bytes:
+                    continue
+                return DirectMediaStream(
+                    direct_url=u,
+                    title=title,
+                    kind=kind,
+                    duration=duration,
+                )
+    except Exception as exc:
+        logger.debug("Direct stream extraction skipped or failed for %s: %s", url, exc)
+    return None
+
+
+async def get_direct_stream(
+    url: str,
+    max_file_bytes: int,
+    timeout_seconds: int = 15,
+) -> DirectMediaStream | None:
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(_extract_direct_stream_sync, url, max_file_bytes),
+            timeout=timeout_seconds,
+        )
+    except Exception:
+        return None

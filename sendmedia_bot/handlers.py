@@ -25,14 +25,17 @@ from telegram.error import BadRequest, TelegramError
 from telegram.ext import ContextTypes
 
 from sendmedia_bot import strings
-from sendmedia_bot.config import Settings
+from sendmedia_bot.cache import CachedMedia, MediaCache
+from sendmedia_bot.config import DEFAULT_UPLOAD_TIMEOUT_SECONDS, Settings
 from sendmedia_bot.downloader import (
+    DirectMediaStream,
     DownloadedMedia,
     DownloadError,
     MediaKind,
     cleanup_media,
     download_media,
     extract_url,
+    get_direct_stream,
 )
 
 logger = logging.getLogger(__name__)
@@ -54,6 +57,13 @@ def _settings(context: ContextTypes.DEFAULT_TYPE) -> Settings:
     if not isinstance(settings, Settings):
         raise TypeError("Settings were not attached to the application.")
     return settings
+
+
+def _cache(context: ContextTypes.DEFAULT_TYPE) -> MediaCache:
+    cache = context.application.bot_data.get("media_cache")
+    if not isinstance(cache, MediaCache):
+        raise TypeError("MediaCache was not attached to the application.")
+    return cache
 
 
 def _pending_map(context: ContextTypes.DEFAULT_TYPE) -> dict[str, str]:
@@ -117,7 +127,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def url_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Fallback: download when a URL is sent directly to the bot in private chat."""
+    """Download or send cached media when a URL is sent directly in private chat."""
     message = update.effective_message
     if message is None or not message.text:
         return
@@ -127,8 +137,62 @@ async def url_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await message.reply_text(strings.DIRECT_URL_HINT)
         return
 
-    status = await message.reply_text(strings.DIRECT_DOWNLOADING)
+    cache = _cache(context)
     settings = _settings(context)
+
+    # 1. Attempt instant send from cache
+    cached = await cache.get(url)
+    if cached is not None:
+        logger.info("Cache hit for direct URL: %s", url)
+        try:
+            await _send_cached_media_to_chat(context, message.chat_id, cached)
+            return
+        except BadRequest as exc:
+            logger.warning(
+                "Cached file_id invalid for %s, evicting and falling back to download: %s",
+                url,
+                exc.message,
+            )
+            await cache.evict(url)
+        except Exception:
+            logger.exception("Failed sending cached media for %s, falling back", url)
+            await cache.evict(url)
+
+    # 2. Try direct URL import via Telegram first
+    status = await message.reply_text(strings.DIRECT_DOWNLOADING)
+    direct_stream = await get_direct_stream(
+        url=url,
+        max_file_bytes=settings.max_file_bytes,
+        timeout_seconds=min(15, settings.download_timeout_seconds),
+    )
+    if direct_stream is not None:
+        file_id_info = await _upload_direct_url_for_file_id(
+            context, settings, direct_stream
+        )
+        if file_id_info is not None:
+            file_id, title, kind = file_id_info
+            await cache.set(
+                url=url,
+                file_id=file_id,
+                kind=kind,
+                title=title,
+                duration=direct_stream.duration,
+            )
+            await _send_cached_media_to_chat(
+                context,
+                message.chat_id,
+                CachedMedia(
+                    url=url,
+                    file_id=file_id,
+                    kind=kind,
+                    title=title,
+                    duration=direct_stream.duration,
+                ),
+            )
+            await status.edit_text(strings.DIRECT_DONE)
+            return
+
+    # 3. Fallback to local download and upload
     media: DownloadedMedia | None = None
     try:
         media = await download_media(
@@ -137,7 +201,17 @@ async def url_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             max_file_bytes=settings.max_file_bytes,
             timeout_seconds=settings.download_timeout_seconds,
         )
-        await _send_media_to_chat(context, message.chat_id, media)
+        sent_msg = await _send_media_to_chat(
+            context, message.chat_id, media, settings=settings
+        )
+        file_id, result_kind = _file_id_and_kind_from_message(sent_msg)
+        await cache.set(
+            url=url,
+            file_id=file_id,
+            kind=result_kind,
+            title=media.title,
+            duration=media.duration,
+        )
         await status.edit_text(strings.DIRECT_DONE)
     except DownloadError as exc:
         await status.edit_text(strings.DIRECT_DOWNLOAD_FAILED.format(error=exc))
@@ -187,9 +261,10 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     result_id = uuid4().hex
     _pending_map(context)[result_id] = url
+    cached = await _cache(context).get(url)
     await _answer_inline_query(
         query,
-        results=[_pending_media_article(result_id, url)],
+        results=[_pending_media_article(result_id, url, is_cached=cached is not None)],
         cache_time=1,
         is_personal=True,
     )
@@ -277,6 +352,34 @@ async def _prepare_inline_media(
     result_id: str,
 ) -> None:
     settings = _settings(context)
+    cache = _cache(context)
+
+    # 1. Attempt instant send from cache
+    cached = await cache.get(url)
+    if cached is not None:
+        logger.info("Cache hit for inline media: %s", url)
+        try:
+            if inline_message_id in _cancelled_set(context):
+                return
+            await context.bot.edit_message_media(
+                media=_input_media(cached.file_id, cached.title, cached.kind),
+                inline_message_id=inline_message_id,
+                reply_markup=_EMPTY_KEYBOARD,
+            )
+            logger.info("Inline media sent from cache for %s (%s)", url, cached.kind.value)
+            return
+        except BadRequest as exc:
+            logger.warning(
+                "Cached file_id invalid in inline edit for %s, evicting and falling back: %s",
+                url,
+                exc.message,
+            )
+            await cache.evict(url)
+        except Exception:
+            logger.exception("Failed editing inline media from cache for %s, falling back", url)
+            await cache.evict(url)
+
+    # 2. Cache miss or fallback to download pipeline
     media: DownloadedMedia | None = None
     try:
         if inline_message_id in _cancelled_set(context):
@@ -287,6 +390,39 @@ async def _prepare_inline_media(
             strings.INLINE_CHOSEN_DOWNLOADING.format(url=url),
             reply_markup=_cancel_keyboard(result_id),
         )
+        # Try direct URL import via Telegram first (fastest, zero local upload bandwidth)
+        direct_stream = await get_direct_stream(
+            url=url,
+            max_file_bytes=settings.max_file_bytes,
+            timeout_seconds=min(15, settings.download_timeout_seconds),
+        )
+        if direct_stream is not None:
+            if inline_message_id in _cancelled_set(context):
+                return
+            file_id_info = await _upload_direct_url_for_file_id(
+                context, settings, direct_stream
+            )
+            if file_id_info is not None:
+                file_id, title, kind = file_id_info
+                await cache.set(
+                    url=url,
+                    file_id=file_id,
+                    kind=kind,
+                    title=title,
+                    duration=direct_stream.duration,
+                )
+                if inline_message_id in _cancelled_set(context):
+                    return
+                await context.bot.edit_message_media(
+                    media=_input_media(file_id, title, kind),
+                    inline_message_id=inline_message_id,
+                    reply_markup=_EMPTY_KEYBOARD,
+                )
+                logger.info(
+                    "Inline media ready via direct URL for %s (%s)", url, kind.value
+                )
+                return
+
         media = await download_media(
             url=url,
             download_dir=settings.download_dir,
@@ -296,6 +432,13 @@ async def _prepare_inline_media(
         if inline_message_id in _cancelled_set(context):
             return
         file_id, title, kind = await _upload_for_file_id(context, settings, media)
+        await cache.set(
+            url=url,
+            file_id=file_id,
+            kind=kind,
+            title=title,
+            duration=media.duration,
+        )
         if inline_message_id in _cancelled_set(context):
             return
         await context.bot.edit_message_media(
@@ -358,10 +501,17 @@ def _error_article(title: str, description: str) -> InlineQueryResultArticle:
     )
 
 
-def _pending_media_article(result_id: str, url: str) -> InlineQueryResultArticle:
+def _pending_media_article(
+    result_id: str, url: str, *, is_cached: bool = False
+) -> InlineQueryResultArticle:
+    title = (
+        f"⚡ {strings.INLINE_PENDING_TITLE} (cached)"
+        if is_cached
+        else strings.INLINE_PENDING_TITLE
+    )
     return InlineQueryResultArticle(
         id=result_id,
-        title=strings.INLINE_PENDING_TITLE,
+        title=title,
         description=url[:120],
         input_message_content=InputTextMessageContent(
             message_text=strings.INLINE_PENDING_MESSAGE.format(url=url)[:4096]
@@ -403,20 +553,73 @@ def _input_media(
     return InputMediaDocument(media=file_id, caption=title)
 
 
+async def _upload_direct_url_for_file_id(
+    context: ContextTypes.DEFAULT_TYPE,
+    settings: Settings,
+    stream: DirectMediaStream,
+) -> tuple[str, str, MediaKind] | None:
+    try:
+        if stream.kind is MediaKind.VIDEO:
+            sent_msg = await context.bot.send_video(
+                chat_id=settings.storage_chat_id,
+                video=stream.direct_url,
+                caption=stream.title,
+                duration=stream.duration,
+                supports_streaming=True,
+                disable_notification=True,
+            )
+        elif stream.kind is MediaKind.AUDIO:
+            sent_msg = await context.bot.send_audio(
+                chat_id=settings.storage_chat_id,
+                audio=stream.direct_url,
+                caption=stream.title,
+                duration=stream.duration,
+                title=stream.title,
+                disable_notification=True,
+            )
+        else:
+            sent_msg = await context.bot.send_document(
+                chat_id=settings.storage_chat_id,
+                document=stream.direct_url,
+                caption=stream.title,
+                disable_notification=True,
+            )
+        file_id, result_kind = _file_id_and_kind_from_message(sent_msg)
+        if settings.delete_storage_messages:
+            try:
+                await context.bot.delete_message(
+                    chat_id=settings.storage_chat_id,
+                    message_id=sent_msg.message_id,
+                )
+            except TelegramError:
+                logger.debug("Could not delete storage message %s", sent_msg.message_id)
+        return file_id, stream.title, result_kind
+    except TelegramError as exc:
+        logger.info(
+            "Telegram direct URL fetch not supported or failed for %s: %s",
+            stream.direct_url,
+            exc,
+        )
+        return None
+
+
 async def _upload_for_file_id(
     context: ContextTypes.DEFAULT_TYPE,
     settings: Settings,
     media: DownloadedMedia,
 ) -> tuple[str, str, MediaKind]:
-    message = await _send_media_to_chat(context, settings.storage_chat_id, media)
+    message = await _send_media_to_chat(
+        context, settings.storage_chat_id, media, settings=settings
+    )
     file_id, result_kind = _file_id_and_kind_from_message(message)
-    try:
-        await context.bot.delete_message(
-            chat_id=settings.storage_chat_id,
-            message_id=message.message_id,
-        )
-    except TelegramError:
-        logger.debug("Could not delete storage message %s", message.message_id)
+    if settings.delete_storage_messages:
+        try:
+            await context.bot.delete_message(
+                chat_id=settings.storage_chat_id,
+                message_id=message.message_id,
+            )
+        except TelegramError:
+            logger.debug("Could not delete storage message %s", message.message_id)
     return file_id, media.title, result_kind
 
 
@@ -424,7 +627,16 @@ async def _send_media_to_chat(
     context: ContextTypes.DEFAULT_TYPE,
     chat_id: int,
     media: DownloadedMedia,
+    settings: Settings | None = None,
 ) -> Message:
+    effective_settings = settings if settings is not None else _settings(context)
+    timeout = float(
+        getattr(
+            effective_settings,
+            "upload_timeout_seconds",
+            DEFAULT_UPLOAD_TIMEOUT_SECONDS,
+        )
+    )
     path = media.path
     caption = media.title
 
@@ -438,6 +650,8 @@ async def _send_media_to_chat(
                 duration=media.duration,
                 supports_streaming=True,
                 disable_notification=True,
+                read_timeout=timeout,
+                write_timeout=timeout,
             )
         if media.kind is MediaKind.AUDIO:
             return await context.bot.send_audio(
@@ -447,13 +661,49 @@ async def _send_media_to_chat(
                 duration=media.duration,
                 title=media.title,
                 disable_notification=True,
+                read_timeout=timeout,
+                write_timeout=timeout,
             )
         return await context.bot.send_document(
             chat_id=chat_id,
             document=upload,
             caption=caption,
             disable_notification=True,
+            read_timeout=timeout,
+            write_timeout=timeout,
         )
+
+
+async def _send_cached_media_to_chat(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    cached: CachedMedia,
+) -> Message:
+    caption = cached.title
+    if cached.kind is MediaKind.VIDEO:
+        return await context.bot.send_video(
+            chat_id=chat_id,
+            video=cached.file_id,
+            caption=caption,
+            duration=cached.duration,
+            supports_streaming=True,
+            disable_notification=True,
+        )
+    if cached.kind is MediaKind.AUDIO:
+        return await context.bot.send_audio(
+            chat_id=chat_id,
+            audio=cached.file_id,
+            caption=caption,
+            duration=cached.duration,
+            title=cached.title,
+            disable_notification=True,
+        )
+    return await context.bot.send_document(
+        chat_id=chat_id,
+        document=cached.file_id,
+        caption=caption,
+        disable_notification=True,
+    )
 
 
 def _file_id_and_kind_from_message(message: Message) -> tuple[str, MediaKind]:
