@@ -28,6 +28,7 @@ DEFAULT_UPLOAD_TIMEOUT_SECONDS = 180
 DEFAULT_DELETE_STORAGE_MESSAGES = True
 DEFAULT_MAX_CONCURRENT_DOWNLOADS = 3
 DEFAULT_MAX_DOWNLOADS_PER_USER = 3
+DEFAULT_DOWNLOAD_COOLDOWN_SECONDS = 2
 DEFAULT_ALLOW_PUBLIC = False
 DEFAULT_ALLOWED_MEDIA_HOSTS = frozenset(
     {
@@ -62,6 +63,7 @@ class Settings:
     upload_timeout_seconds: int = DEFAULT_UPLOAD_TIMEOUT_SECONDS
     max_concurrent_downloads: int = DEFAULT_MAX_CONCURRENT_DOWNLOADS
     max_downloads_per_user: int = DEFAULT_MAX_DOWNLOADS_PER_USER
+    download_cooldown_seconds: int = DEFAULT_DOWNLOAD_COOLDOWN_SECONDS
     allowed_user_ids: frozenset[int] = frozenset()
     allow_public: bool = DEFAULT_ALLOW_PUBLIC
     # None means allow any host (`ALLOWED_MEDIA_HOSTS=*`).
@@ -355,6 +357,15 @@ def load_settings(env_file: Path = _ENV_PATH) -> Settings:
         env_file=env_file,
     )
 
+    download_cooldown_seconds = parse_int(
+        "DOWNLOAD_COOLDOWN_SECONDS",
+        os.getenv("DOWNLOAD_COOLDOWN_SECONDS"),
+        default=DEFAULT_DOWNLOAD_COOLDOWN_SECONDS,
+        min_value=0,
+        max_value=60,
+        env_file=env_file,
+    )
+
     allowed_user_ids = parse_user_ids(
         "ALLOWED_USER_IDS",
         os.getenv("ALLOWED_USER_IDS"),
@@ -387,6 +398,7 @@ def load_settings(env_file: Path = _ENV_PATH) -> Settings:
         upload_timeout_seconds=upload_timeout,
         max_concurrent_downloads=max_concurrent_downloads,
         max_downloads_per_user=max_downloads_per_user,
+        download_cooldown_seconds=download_cooldown_seconds,
         allowed_user_ids=allowed_user_ids,
         allow_public=allow_public,
         allowed_media_hosts=allowed_media_hosts,

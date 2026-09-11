@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Any, cast
 from uuid import uuid4
 
@@ -53,6 +54,7 @@ _TASKS_KEY = "inline_prepare_tasks"
 _CANCELLED_KEY = "cancelled_inline"
 _USER_DOWNLOADS_KEY = "user_download_counts"
 _USER_DOWNLOADS_LOCK_KEY = "user_download_lock"
+_USER_COOLDOWN_KEY = "user_download_cooldowns"
 _EMPTY_KEYBOARD = InlineKeyboardMarkup([])
 
 _MAX_PENDING_INLINE = 1000
@@ -104,21 +106,36 @@ def _user_download_counts(context: ContextTypes.DEFAULT_TYPE) -> dict[int, int]:
     return cast(dict[int, int], raw)
 
 
+def _user_cooldowns(context: ContextTypes.DEFAULT_TYPE) -> dict[int, float]:
+    raw = context.application.bot_data.setdefault(_USER_COOLDOWN_KEY, {})
+    return cast(dict[int, float], raw)
+
+
 async def _try_acquire_user_download_slot(
     context: ContextTypes.DEFAULT_TYPE, user_id: int | None
-) -> bool:
-    """Reserve a per-user download slot. Anonymous users are denied."""
+) -> str | None:
+    """Reserve a per-user download slot.
+
+    Returns None on success, or a user-facing error string on denial.
+    """
     if user_id is None:
-        return False
+        return strings.ACCESS_DENIED
     settings = _settings(context)
     max_per_user = settings.max_downloads_per_user
+    cooldown = settings.download_cooldown_seconds
+    now = time.monotonic()
     async with _user_download_lock(context):
         counts = _user_download_counts(context)
+        cooldowns = _user_cooldowns(context)
+        last_started = cooldowns.get(user_id)
+        if cooldown > 0 and last_started is not None and now - last_started < cooldown:
+            return strings.COOLDOWN_LIMITED
         current = counts.get(user_id, 0)
         if current >= max_per_user:
-            return False
+            return strings.RATE_LIMITED
         counts[user_id] = current + 1
-        return True
+        cooldowns[user_id] = now
+        return None
 
 
 async def _release_user_download_slot(
@@ -268,8 +285,9 @@ async def url_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             )
             await cache.evict(url)
 
-    if not await _try_acquire_user_download_slot(context, user_id):
-        await message.reply_text(strings.RATE_LIMITED)
+    denial = await _try_acquire_user_download_slot(context, user_id)
+    if denial is not None:
+        await message.reply_text(denial)
         return
 
     # 2. Try direct URL import via Telegram first
@@ -451,11 +469,12 @@ async def chosen_inline_result(
         return
 
     display_url = safe_url_for_log(url)
-    if not await _try_acquire_user_download_slot(context, user_id):
+    denial = await _try_acquire_user_download_slot(context, user_id)
+    if denial is not None:
         await _edit_inline_text(
             context,
             inline_message_id,
-            strings.RATE_LIMITED,
+            denial,
         )
         return
 

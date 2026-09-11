@@ -52,6 +52,7 @@ class TestConcurrencyLimiter(unittest.IsolatedAsyncioTestCase):
         mock_settings.download_dir = MagicMock()
         mock_settings.upload_timeout_seconds = 10
         mock_settings.max_downloads_per_user = 5
+        mock_settings.download_cooldown_seconds = 0
         # Explicit public mode for the concurrency stress test.
         mock_settings.allowed_user_ids = frozenset()
         mock_settings.allow_public = True
