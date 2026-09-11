@@ -9,6 +9,7 @@ import logging
 import re
 import socket
 import threading
+import time
 import uuid
 from dataclasses import dataclass
 from enum import Enum
@@ -382,6 +383,35 @@ def cleanup_media(media: DownloadedMedia) -> None:
     path.unlink(missing_ok=True)
     if parent.name and parent != path:
         _cleanup_dir(parent)
+
+
+def cleanup_stale_downloads(
+    download_dir: Path,
+    max_age_seconds: int = 3600,
+) -> int:
+    """Remove abandoned download subdirectories older than max_age_seconds.
+
+    Returns the number of directories removed. Top-level files (e.g. the cache DB)
+    are left untouched.
+    """
+    if not download_dir.exists() or not download_dir.is_dir():
+        return 0
+
+    cutoff = time.time() - max_age_seconds
+    removed = 0
+    for child in download_dir.iterdir():
+        if not child.is_dir():
+            continue
+        try:
+            mtime = child.stat().st_mtime
+        except OSError:
+            continue
+        if mtime >= cutoff:
+            continue
+        logger.info("Removing stale download directory: %s", child)
+        _cleanup_dir(child)
+        removed += 1
+    return removed
 
 
 def _extract_direct_stream_sync(

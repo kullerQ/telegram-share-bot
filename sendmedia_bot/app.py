@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from pathlib import Path
 
 from telegram.ext import (
     Application,
@@ -21,6 +22,7 @@ from telegram.ext import (
 from sendmedia_bot import strings
 from sendmedia_bot.cache import MediaCache
 from sendmedia_bot.config import DEFAULT_UPLOAD_TIMEOUT_SECONDS, load_settings
+from sendmedia_bot.downloader import cleanup_stale_downloads
 from sendmedia_bot.handlers import (
     cancel_callback,
     chosen_inline_result,
@@ -42,7 +44,18 @@ App = Application[
 
 
 async def _post_init(application: App) -> None:
-    """Ensure the bot's identity is fetched if startup encountered a transient network timeout."""
+    """Run startup housekeeping and fetch bot identity if needed."""
+    settings = application.bot_data.get("settings")
+    download_dir = getattr(settings, "download_dir", None)
+    if isinstance(download_dir, Path):
+        removed = await asyncio.to_thread(cleanup_stale_downloads, download_dir)
+        if removed:
+            logging.getLogger(__name__).info(
+                "Removed %s stale download director%s on startup",
+                removed,
+                "y" if removed == 1 else "ies",
+            )
+
     if application.bot._bot_user is None:
         for attempt in range(1, 4):
             try:
