@@ -1,0 +1,14 @@
+# Local debug / test: build image from the Dockerfile instead of pulling GHCR.
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.local.yml up --build
+#   docker compose -f docker-compose.yml -f docker-compose.local.yml up -d --build
+
+services:
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: sendmedia_bot:local
+    container_name: sendmedia_bot_local
+    # Prefer a clean exit during local debugging over auto-restart loops.
+    restart: "no"

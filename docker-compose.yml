@@ -1,9 +1,6 @@
 services:
   bot:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: sendmedia_bot:latest
+    image: ghcr.io/kullerq/telegram-share-bot:latest
     container_name: sendmedia_bot
     restart: unless-stopped
     env_file:
