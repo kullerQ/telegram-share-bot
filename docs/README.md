@@ -98,6 +98,12 @@ Open a private chat with the bot, send `/start`, then in any other chat type:
 @YourBot https://youtube.com/watch?v=…
 ```
 
+With `CAPTION_MODE=custom`, append a caption after the link:
+
+```text
+@YourBot https://youtube.com/watch?v=… optional caption text
+```
+
 Tap **Send media**. A placeholder appears first; the bot downloads in the background and replaces it with the file. Tap **Cancel** to stop and clear the placeholder.
 
 ## How it works
@@ -115,6 +121,7 @@ Tap **Send media**. A placeholder appears first; the bot downloads in the backgr
 - User URLs are limited to YouTube / X / Instagram / TikTok by default (`ALLOWED_MEDIA_HOSTS=*` allows any host).
 - TikTok (including `vm.tiktok.com` / `vt.tiktok.com` short links) needs `curl-cffi` for browser impersonation — it is pinned in `requirements.txt`.
 - `HTTPS_ONLY` defaults to true (set `false` to allow plain `http://` media URLs).
+- Captions: `CAPTION_MODE=media` (default, media title), `custom` (only text after the URL), or `off` (no captions). Custom captions are plain text, max 1024 characters, not stored in the media cache, and not sent to `STORAGE_CHAT_ID`.
 - Unsupported or oversize URLs replace the placeholder with an error message.
 
 ## Notes

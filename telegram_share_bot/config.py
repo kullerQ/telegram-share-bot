@@ -7,6 +7,7 @@ import os
 import re
 import sys
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import TypeVar
 
@@ -47,6 +48,24 @@ DEFAULT_ALLOWED_MEDIA_HOSTS = frozenset(
     }
 )
 
+
+class CaptionMode(str, Enum):
+    """How captions are attached to sent media.
+
+    ``media`` — use the extracted media title (previous default).
+    ``custom`` — only a user-supplied caption after the URL; none if omitted.
+    ``off`` — never attach a caption.
+    """
+
+    MEDIA = "media"
+    CUSTOM = "custom"
+    OFF = "off"
+
+
+DEFAULT_CAPTION_MODE = CaptionMode.MEDIA
+# Telegram Bot API caption limit for most media types.
+TELEGRAM_CAPTION_MAX_LENGTH = 1024
+
 _TRUE_VALUES = frozenset({"true", "1", "yes", "y", "on"})
 _FALSE_VALUES = frozenset({"false", "0", "no", "n", "off"})
 
@@ -72,6 +91,31 @@ class Settings:
     https_only: bool = DEFAULT_HTTPS_ONLY
     # None means allow any host (`ALLOWED_MEDIA_HOSTS=*`).
     allowed_media_hosts: frozenset[str] | None = DEFAULT_ALLOWED_MEDIA_HOSTS
+    caption_mode: CaptionMode = DEFAULT_CAPTION_MODE
+
+
+def parse_caption_mode(
+    param_name: str,
+    raw_value: str | None,
+    default: CaptionMode = DEFAULT_CAPTION_MODE,
+    env_file: Path = _ENV_PATH,
+) -> CaptionMode:
+    """Parse CAPTION_MODE: media | custom | off."""
+    if raw_value is None or not raw_value.strip():
+        return default
+    stripped = raw_value.strip().lower()
+    try:
+        return CaptionMode(stripped)
+    except ValueError:
+        allowed = ", ".join(mode.value for mode in CaptionMode)
+        reset = _handle_invalid_param(
+            param_name=param_name,
+            raw_value=raw_value,
+            default_value=default.value,
+            reason=f"Expected one of: {allowed}",
+            env_file=env_file,
+        )
+        return CaptionMode(reset)
 
 
 def parse_media_hosts(
@@ -405,6 +449,13 @@ def load_settings(env_file: Path = _ENV_PATH) -> Settings:
         os.getenv("ALLOWED_MEDIA_HOSTS"),
     )
 
+    caption_mode = parse_caption_mode(
+        "CAPTION_MODE",
+        os.getenv("CAPTION_MODE"),
+        default=DEFAULT_CAPTION_MODE,
+        env_file=env_file,
+    )
+
     return Settings(
         bot_token=token,
         storage_chat_id=storage_chat_id,
@@ -422,4 +473,5 @@ def load_settings(env_file: Path = _ENV_PATH) -> Settings:
         allow_shared_storage=allow_shared_storage,
         https_only=https_only,
         allowed_media_hosts=allowed_media_hosts,
+        caption_mode=caption_mode,
     )

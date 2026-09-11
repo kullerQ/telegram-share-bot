@@ -21,6 +21,7 @@ from urllib.parse import urlsplit
 import yt_dlp
 
 from telegram_share_bot import strings
+from telegram_share_bot.config import TELEGRAM_CAPTION_MAX_LENGTH, CaptionMode
 from telegram_share_bot.normalizer import safe_url_for_log
 
 logger = logging.getLogger(__name__)
@@ -242,10 +243,54 @@ class DownloadError(Exception):
 
 
 def extract_url(text: str) -> str | None:
-    match = URL_RE.search(text.strip())
+    url, _caption = extract_url_and_caption(text)
+    return url
+
+
+def extract_url_and_caption(text: str) -> tuple[str | None, str | None]:
+    """Extract the first http(s) URL and optional caption text after it.
+
+    Caption is everything after the matched URL (typically split by space),
+    stripped. Trailing URL punctuation is not treated as part of the caption.
+    """
+    stripped = text.strip()
+    match = URL_RE.search(stripped)
     if match is None:
+        return None, None
+    url = match.group(0).rstrip(").,]}>'\"")
+    caption_raw = stripped[match.end() :].strip()
+    return url, caption_raw or None
+
+
+def sanitize_caption(text: str, *, max_length: int = 1024) -> str | None:
+    """Strip control chars (except newline/tab) and enforce Telegram length."""
+    cleaned = "".join(
+        ch for ch in text if ch in "\n\t" or ord(ch) >= 32
+    ).strip()
+    if not cleaned:
         return None
-    return match.group(0).rstrip(").,]}>'\"")
+    return cleaned[:max_length]
+
+
+def resolve_caption(
+    mode: CaptionMode,
+    *,
+    media_title: str,
+    custom_caption: str | None,
+    max_length: int = TELEGRAM_CAPTION_MAX_LENGTH,
+) -> str | None:
+    """Pick the user-facing caption for the configured mode.
+
+    Custom captions are never taken from cached media titles. Empty results
+    become ``None`` (no caption). Callers must not enable ParseMode on captions.
+    """
+    if mode is CaptionMode.OFF:
+        return None
+    if mode is CaptionMode.CUSTOM:
+        if custom_caption is None:
+            return None
+        return sanitize_caption(custom_caption, max_length=max_length)
+    return sanitize_caption(media_title, max_length=max_length)
 
 
 def _classify(path: Path) -> MediaKind:

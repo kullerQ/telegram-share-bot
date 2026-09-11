@@ -7,6 +7,7 @@ import contextlib
 import logging
 import time
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from typing import Any, cast
 from uuid import uuid4
 
@@ -29,7 +30,11 @@ from telegram.ext import ContextTypes
 
 from telegram_share_bot import strings
 from telegram_share_bot.cache import CachedMedia, MediaCache
-from telegram_share_bot.config import DEFAULT_UPLOAD_TIMEOUT_SECONDS, Settings
+from telegram_share_bot.config import (
+    DEFAULT_UPLOAD_TIMEOUT_SECONDS,
+    CaptionMode,
+    Settings,
+)
 from telegram_share_bot.downloader import (
     DirectMediaStream,
     DownloadedMedia,
@@ -37,10 +42,11 @@ from telegram_share_bot.downloader import (
     MediaKind,
     cleanup_media,
     download_media,
-    extract_url,
+    extract_url_and_caption,
     get_direct_stream,
     is_allowed_media_host,
     is_https_url,
+    resolve_caption,
 )
 from telegram_share_bot.normalizer import safe_url_for_log
 
@@ -62,6 +68,12 @@ _EMPTY_KEYBOARD = InlineKeyboardMarkup([])
 
 _MAX_PENDING_INLINE = 1000
 _MAX_CANCELLED_INLINE = 500
+
+
+@dataclass(frozen=True, slots=True)
+class PendingInline:
+    url: str
+    custom_caption: str | None = None
 
 
 def _settings(context: ContextTypes.DEFAULT_TYPE) -> Settings:
@@ -163,16 +175,19 @@ async def _release_user_download_slot(
             counts[user_id] = current - 1
 
 
-def _pending_map(context: ContextTypes.DEFAULT_TYPE) -> dict[str, str]:
+def _pending_map(context: ContextTypes.DEFAULT_TYPE) -> dict[str, PendingInline]:
     raw = context.application.bot_data.setdefault(_PENDING_KEY, {})
-    return cast(dict[str, str], raw)
+    return cast(dict[str, PendingInline], raw)
 
 
 def _store_pending_url(
-    context: ContextTypes.DEFAULT_TYPE, result_id: str, url: str
+    context: ContextTypes.DEFAULT_TYPE,
+    result_id: str,
+    url: str,
+    custom_caption: str | None = None,
 ) -> None:
     pending = _pending_map(context)
-    pending[result_id] = url
+    pending[result_id] = PendingInline(url=url, custom_caption=custom_caption)
     while len(pending) > _MAX_PENDING_INLINE:
         try:
             pending.pop(next(iter(pending)))
@@ -240,10 +255,20 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     bot_username = context.bot.username or strings.FALLBACK_BOT_USERNAME
     bot_name = context.bot.first_name or strings.BOT_DISPLAY_NAME
+    settings = _settings(context)
+    caption_hint = ""
+    if settings.caption_mode is CaptionMode.CUSTOM:
+        caption_hint = strings.START_CAPTION_CUSTOM_HINT.format(
+            bot_username=bot_username,
+            example_url=strings.EXAMPLE_MEDIA_URL,
+        )
+    elif settings.caption_mode is CaptionMode.OFF:
+        caption_hint = strings.START_CAPTION_OFF_HINT
     text = strings.START_MESSAGE.format(
         bot_name=bot_name,
         bot_username=bot_username,
         example_url=strings.EXAMPLE_MEDIA_URL,
+        caption_hint=caption_hint,
     )
     await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
 
@@ -263,7 +288,7 @@ async def url_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await message.reply_text(strings.ACCESS_DENIED)
         return
 
-    url = extract_url(message.text)
+    url, custom_caption = extract_url_and_caption(message.text)
     if url is None:
         await message.reply_text(strings.DIRECT_URL_HINT)
         return
@@ -285,7 +310,12 @@ async def url_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if cached is not None:
         logger.info("Cache hit for direct URL: %s", display_url)
         try:
-            await _send_cached_media_to_chat(context, message.chat_id, cached)
+            await _send_cached_media_to_chat(
+                context,
+                message.chat_id,
+                cached,
+                custom_caption=custom_caption,
+            )
             return
         except BadRequest as exc:
             logger.warning(
@@ -339,6 +369,7 @@ async def url_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                         title=title,
                         duration=direct_stream.duration,
                     ),
+                    custom_caption=custom_caption,
                 )
                 await status.edit_text(strings.DIRECT_DONE)
                 return
@@ -354,7 +385,11 @@ async def url_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 https_only=settings.https_only,
             )
             sent_msg = await _send_media_to_chat(
-                context, message.chat_id, media, settings=settings
+                context,
+                message.chat_id,
+                media,
+                settings=settings,
+                custom_caption=custom_caption,
             )
         file_id, result_kind = _file_id_and_kind_from_message(sent_msg)
         await cache.set(
@@ -412,7 +447,7 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         )
         return
 
-    url = extract_url(text)
+    url, custom_caption = extract_url_and_caption(text)
     if url is None:
         await _answer_inline_query(
             query,
@@ -457,7 +492,7 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
 
     result_id = uuid4().hex
-    _store_pending_url(context, result_id, url)
+    _store_pending_url(context, result_id, url, custom_caption=custom_caption)
     cached = await _cache(context).get(url)
     await _answer_inline_query(
         query,
@@ -488,9 +523,14 @@ async def chosen_inline_result(
         return
 
     # Evict chosen item from pending map immediately to prevent memory leak
-    url = _pending_map(context).pop(chosen.result_id, None) or extract_url(
-        chosen.query or ""
-    )
+    pending = _pending_map(context).pop(chosen.result_id, None)
+    url: str | None
+    custom_caption: str | None
+    if pending is not None:
+        url = pending.url
+        custom_caption = pending.custom_caption
+    else:
+        url, custom_caption = extract_url_and_caption(chosen.query or "")
     if url is None:
         await _edit_inline_text(
             context,
@@ -523,6 +563,7 @@ async def chosen_inline_result(
             url=url,
             result_id=chosen.result_id,
             user_id=user_id,
+            custom_caption=custom_caption,
         ),
         name=f"prepare-inline-{chosen.result_id}",
     )
@@ -573,6 +614,7 @@ async def _prepare_inline_media(
     url: str,
     result_id: str,
     user_id: int | None = None,
+    custom_caption: str | None = None,
 ) -> None:
     settings = _settings(context)
     cache = _cache(context)
@@ -587,8 +629,15 @@ async def _prepare_inline_media(
             try:
                 if inline_message_id in _cancelled_set(context):
                     return
+                caption = resolve_caption(
+                    settings.caption_mode,
+                    media_title=cached.title,
+                    custom_caption=custom_caption,
+                )
                 await context.bot.edit_message_media(
-                    media=_input_media(cached.file_id, cached.title, cached.kind),
+                    media=_input_media(
+                        cached.file_id, cached.title, cached.kind, caption=caption
+                    ),
                     inline_message_id=inline_message_id,
                     reply_markup=_EMPTY_KEYBOARD,
                 )
@@ -647,8 +696,13 @@ async def _prepare_inline_media(
                 )
                 if inline_message_id in _cancelled_set(context):
                     return
+                caption = resolve_caption(
+                    settings.caption_mode,
+                    media_title=title,
+                    custom_caption=custom_caption,
+                )
                 await context.bot.edit_message_media(
-                    media=_input_media(file_id, title, kind),
+                    media=_input_media(file_id, title, kind, caption=caption),
                     inline_message_id=inline_message_id,
                     reply_markup=_EMPTY_KEYBOARD,
                 )
@@ -682,8 +736,13 @@ async def _prepare_inline_media(
         )
         if inline_message_id in _cancelled_set(context):
             return
+        caption = resolve_caption(
+            settings.caption_mode,
+            media_title=title,
+            custom_caption=custom_caption,
+        )
         await context.bot.edit_message_media(
-            media=_input_media(file_id, title, kind),
+            media=_input_media(file_id, title, kind, caption=caption),
             inline_message_id=inline_message_id,
             reply_markup=_EMPTY_KEYBOARD,
         )
@@ -788,12 +847,28 @@ def _input_media(
     file_id: str,
     title: str,
     kind: MediaKind,
+    *,
+    caption: str | None,
 ) -> InputMediaVideo | InputMediaAudio | InputMediaDocument:
+    # Captions are always plain text (no ParseMode) to avoid injection.
     if kind is MediaKind.VIDEO:
-        return InputMediaVideo(media=file_id, caption=title)
+        return InputMediaVideo(media=file_id, caption=caption)
     if kind is MediaKind.AUDIO:
-        return InputMediaAudio(media=file_id, caption=title, title=title)
-    return InputMediaDocument(media=file_id, caption=title)
+        return InputMediaAudio(media=file_id, caption=caption, title=title)
+    return InputMediaDocument(media=file_id, caption=caption)
+
+
+def _storage_upload_caption(settings: Settings, media_title: str) -> str | None:
+    """Caption for the temporary storage-chat upload only.
+
+    Never uses user-supplied custom captions (avoids leaking them into
+    STORAGE_CHAT_ID). Media titles are kept only in ``media`` mode.
+    """
+    if settings.caption_mode is CaptionMode.MEDIA:
+        return resolve_caption(
+            CaptionMode.MEDIA, media_title=media_title, custom_caption=None
+        )
+    return None
 
 
 async def _upload_direct_url_for_file_id(
@@ -801,12 +876,13 @@ async def _upload_direct_url_for_file_id(
     settings: Settings,
     stream: DirectMediaStream,
 ) -> tuple[str, str, MediaKind] | None:
+    caption = _storage_upload_caption(settings, stream.title)
     try:
         if stream.kind is MediaKind.VIDEO:
             sent_msg = await context.bot.send_video(
                 chat_id=settings.storage_chat_id,
                 video=stream.direct_url,
-                caption=stream.title,
+                caption=caption,
                 duration=stream.duration,
                 supports_streaming=True,
                 disable_notification=True,
@@ -815,7 +891,7 @@ async def _upload_direct_url_for_file_id(
             sent_msg = await context.bot.send_audio(
                 chat_id=settings.storage_chat_id,
                 audio=stream.direct_url,
-                caption=stream.title,
+                caption=caption,
                 duration=stream.duration,
                 title=stream.title,
                 disable_notification=True,
@@ -824,7 +900,7 @@ async def _upload_direct_url_for_file_id(
             sent_msg = await context.bot.send_document(
                 chat_id=settings.storage_chat_id,
                 document=stream.direct_url,
-                caption=stream.title,
+                caption=caption,
                 disable_notification=True,
             )
         file_id, result_kind = _file_id_and_kind_from_message(sent_msg)
@@ -852,7 +928,13 @@ async def _upload_for_file_id(
     media: DownloadedMedia,
 ) -> tuple[str, str, MediaKind]:
     message = await _send_media_to_chat(
-        context, settings.storage_chat_id, media, settings=settings
+        context,
+        settings.storage_chat_id,
+        media,
+        settings=settings,
+        # Storage path: never apply custom captions.
+        custom_caption=None,
+        force_storage_caption=True,
     )
     file_id, result_kind = _file_id_and_kind_from_message(message)
     if settings.delete_storage_messages:
@@ -871,6 +953,9 @@ async def _send_media_to_chat(
     chat_id: int,
     media: DownloadedMedia,
     settings: Settings | None = None,
+    *,
+    custom_caption: str | None = None,
+    force_storage_caption: bool = False,
 ) -> Message:
     effective_settings = settings if settings is not None else _settings(context)
     timeout = float(
@@ -881,7 +966,14 @@ async def _send_media_to_chat(
         )
     )
     path = media.path
-    caption = media.title
+    if force_storage_caption:
+        caption = _storage_upload_caption(effective_settings, media.title)
+    else:
+        caption = resolve_caption(
+            effective_settings.caption_mode,
+            media_title=media.title,
+            custom_caption=custom_caption,
+        )
 
     with path.open("rb") as file_obj:
         upload = InputFile(file_obj, filename=path.name)
@@ -921,8 +1013,15 @@ async def _send_cached_media_to_chat(
     context: ContextTypes.DEFAULT_TYPE,
     chat_id: int,
     cached: CachedMedia,
+    *,
+    custom_caption: str | None = None,
 ) -> Message:
-    caption = cached.title
+    settings = _settings(context)
+    caption = resolve_caption(
+        settings.caption_mode,
+        media_title=cached.title,
+        custom_caption=custom_caption,
+    )
     if cached.kind is MediaKind.VIDEO:
         return await context.bot.send_video(
             chat_id=chat_id,

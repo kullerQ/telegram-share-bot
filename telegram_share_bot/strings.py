@@ -29,7 +29,15 @@ START_MESSAGE = (
     "Try me inline:\n"
     "<code>@{bot_username} {example_url}</code>\n\n"
     "Or paste a media URL here."
+    "{caption_hint}"
 )
+
+START_CAPTION_CUSTOM_HINT = (
+    "\n\nOptional caption after the link:\n"
+    "<code>@{bot_username} {example_url} your caption here</code>"
+)
+
+START_CAPTION_OFF_HINT = "\n\nMedia is sent without captions."
 
 # --- Direct private-chat URL handling ----------------------------------------
 
