@@ -29,6 +29,7 @@ class TestDownloadTimeout(unittest.IsolatedAsyncioTestCase):
                 timeout_seconds,
                 abort_event=None,
                 work_dir_holder=None,
+                https_only=False,
             ):
                 created = download_dir / "slow_test_uuid"
                 created.mkdir(parents=True, exist_ok=True)

@@ -188,6 +188,18 @@ class TestConfigValidation(unittest.TestCase):
             settings = load_settings(env_file=self.env_file)
             self.assertEqual(settings.allowed_user_ids, frozenset({111, 222}))
             self.assertFalse(settings.allow_public)
+            self.assertTrue(settings.https_only)
+
+    def test_load_settings_https_only_override(self) -> None:
+        env = {
+            "BOT_TOKEN": "123456789:ABCdefGHIjklMNOpqrsTUVwxyz",
+            "STORAGE_CHAT_ID": "1234567890",
+            "ALLOW_PUBLIC": "true",
+            "HTTPS_ONLY": "false",
+        }
+        with patch.dict("os.environ", env, clear=True):
+            settings = load_settings(env_file=self.env_file)
+            self.assertFalse(settings.https_only)
 
     def test_parse_user_ids_invalid_never_opens_bot(self) -> None:
         from telegram_share_bot.config import parse_user_ids

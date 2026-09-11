@@ -57,6 +57,7 @@ class TestConcurrencyLimiter(unittest.IsolatedAsyncioTestCase):
         mock_settings.allowed_user_ids = frozenset()
         mock_settings.allow_public = True
         mock_settings.allowed_media_hosts = None
+        mock_settings.https_only = True
 
         context = MagicMock()
         context.application.bot_data = {

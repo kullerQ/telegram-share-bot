@@ -38,6 +38,7 @@ from telegram_share_bot.downloader import (
     extract_url,
     get_direct_stream,
     is_allowed_media_host,
+    is_https_url,
 )
 from telegram_share_bot.normalizer import safe_url_for_log
 
@@ -265,6 +266,10 @@ async def url_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await message.reply_text(strings.DOWNLOAD_HOST_NOT_ALLOWED)
         return
 
+    if settings.https_only and not is_https_url(url):
+        await message.reply_text(strings.DOWNLOAD_HTTPS_REQUIRED)
+        return
+
     # 1. Attempt instant send from cache
     cached = await cache.get(url)
     if cached is not None:
@@ -299,6 +304,7 @@ async def url_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             max_file_bytes=settings.max_file_bytes,
             timeout_seconds=min(15, settings.download_timeout_seconds),
             allowed_hosts=settings.allowed_media_hosts,
+            https_only=settings.https_only,
         )
         if direct_stream is not None:
             file_id_info = await _upload_direct_url_for_file_id(
@@ -335,6 +341,7 @@ async def url_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 max_file_bytes=settings.max_file_bytes,
                 timeout_seconds=settings.download_timeout_seconds,
                 allowed_hosts=settings.allowed_media_hosts,
+                https_only=settings.https_only,
             )
             sent_msg = await _send_media_to_chat(
                 context, message.chat_id, media, settings=settings
@@ -418,6 +425,20 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 _error_article(
                     strings.INLINE_NO_URL_TITLE,
                     strings.DOWNLOAD_HOST_NOT_ALLOWED,
+                )
+            ],
+            cache_time=1,
+            is_personal=True,
+        )
+        return
+
+    if settings.https_only and not is_https_url(url):
+        await _answer_inline_query(
+            query,
+            results=[
+                _error_article(
+                    strings.INLINE_NO_URL_TITLE,
+                    strings.DOWNLOAD_HTTPS_REQUIRED,
                 )
             ],
             cache_time=1,
@@ -597,6 +618,7 @@ async def _prepare_inline_media(
             max_file_bytes=settings.max_file_bytes,
             timeout_seconds=min(15, settings.download_timeout_seconds),
             allowed_hosts=settings.allowed_media_hosts,
+            https_only=settings.https_only,
         )
         if direct_stream is not None:
             if inline_message_id in _cancelled_set(context):
@@ -636,6 +658,7 @@ async def _prepare_inline_media(
                 max_file_bytes=settings.max_file_bytes,
                 timeout_seconds=settings.download_timeout_seconds,
                 allowed_hosts=settings.allowed_media_hosts,
+                https_only=settings.https_only,
             )
             if inline_message_id in _cancelled_set(context):
                 return

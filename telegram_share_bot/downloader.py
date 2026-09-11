@@ -65,12 +65,15 @@ def _is_safe_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     return True
 
 
-def is_safe_media_url(url: str) -> bool:
+def is_safe_media_url(url: str, *, https_only: bool = False) -> bool:
     """Validate http(s) URL is not internal/private/loopback/cloud-metadata."""
     try:
         parsed = urlsplit(url)
         scheme = parsed.scheme.lower()
-        if scheme not in ("http", "https"):
+        if https_only:
+            if scheme != "https":
+                return False
+        elif scheme not in ("http", "https"):
             return False
 
         hostname = parsed.hostname
@@ -311,6 +314,10 @@ def _pick_info(info: Any) -> dict[str, Any]:
     return picked
 
 
+def is_https_url(url: str) -> bool:
+    return urlsplit(url).scheme.lower() == "https"
+
+
 def _download_sync(
     url: str,
     download_dir: Path,
@@ -318,8 +325,12 @@ def _download_sync(
     timeout_seconds: int,
     abort_event: threading.Event | None = None,
     work_dir_holder: list[Path] | None = None,
+    *,
+    https_only: bool = False,
 ) -> DownloadedMedia:
-    if not is_safe_media_url(url):
+    if https_only and not is_https_url(url):
+        raise DownloadError(strings.DOWNLOAD_HTTPS_REQUIRED)
+    if not is_safe_media_url(url, https_only=https_only):
         raise DownloadError(strings.DOWNLOAD_UNSAFE_URL)
 
     work_dir = download_dir / uuid.uuid4().hex
@@ -473,10 +484,14 @@ async def download_media(
     max_file_bytes: int,
     timeout_seconds: int,
     allowed_hosts: frozenset[str] | None = None,
+    *,
+    https_only: bool = False,
 ) -> DownloadedMedia:
     if not is_allowed_media_host(url, allowed_hosts):
         raise DownloadError(strings.DOWNLOAD_HOST_NOT_ALLOWED)
-    if not is_safe_media_url(url):
+    if https_only and not is_https_url(url):
+        raise DownloadError(strings.DOWNLOAD_HTTPS_REQUIRED)
+    if not is_safe_media_url(url, https_only=https_only):
         raise DownloadError(strings.DOWNLOAD_UNSAFE_URL)
 
     abort_event = threading.Event()
@@ -491,6 +506,7 @@ async def download_media(
                 timeout_seconds,
                 abort_event,
                 work_dir_holder,
+                https_only=https_only,
             ),
             timeout=timeout_seconds,
         )
@@ -548,8 +564,12 @@ def cleanup_stale_downloads(
 def _extract_direct_stream_sync(
     url: str,
     max_file_bytes: int,
+    *,
+    https_only: bool = False,
 ) -> DirectMediaStream | None:
-    if not is_safe_media_url(url):
+    if https_only and not is_https_url(url):
+        return None
+    if not is_safe_media_url(url, https_only=https_only):
         return None
 
     ydl_opts: dict[str, Any] = {
@@ -578,7 +598,7 @@ def _extract_direct_stream_sync(
                 if (
                     isinstance(direct, str)
                     and direct.startswith("http")
-                    and is_safe_media_url(direct)
+                    and is_safe_media_url(direct, https_only=https_only)
                     and ".m3u8" not in direct
                     and ".mpd" not in direct
                 ):
@@ -600,13 +620,16 @@ def _extract_direct_stream_sync(
                     if (
                         not isinstance(u, str)
                         or not u.startswith("http")
-                        or not is_safe_media_url(u)
+                        or not is_safe_media_url(u, https_only=https_only)
                     ):
                         continue
                     if ".m3u8" in u or ".mpd" in u:
                         continue
                     proto = f.get("protocol")
-                    if proto not in ("http", "https"):
+                    if https_only:
+                        if proto != "https":
+                            continue
+                    elif proto not in ("http", "https"):
                         continue
                     ext = str(f.get("ext") or "")
                     kind = _classify_ext(ext)
@@ -631,20 +654,30 @@ def _extract_direct_stream_sync(
         )
     return None
 
+
 async def get_direct_stream(
     url: str,
     max_file_bytes: int,
     timeout_seconds: int = 15,
     allowed_hosts: frozenset[str] | None = None,
+    *,
+    https_only: bool = False,
 ) -> DirectMediaStream | None:
     if not is_allowed_media_host(url, allowed_hosts):
         return None
-    if not is_safe_media_url(url):
+    if https_only and not is_https_url(url):
+        return None
+    if not is_safe_media_url(url, https_only=https_only):
         return None
 
     try:
         return await asyncio.wait_for(
-            asyncio.to_thread(_extract_direct_stream_sync, url, max_file_bytes),
+            asyncio.to_thread(
+                _extract_direct_stream_sync,
+                url,
+                max_file_bytes,
+                https_only=https_only,
+            ),
             timeout=timeout_seconds,
         )
     except Exception:

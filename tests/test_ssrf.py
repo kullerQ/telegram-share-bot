@@ -54,7 +54,17 @@ class TestSsrfProtection(unittest.IsolatedAsyncioTestCase):
         ]
         for url in safe_urls:
             with self.subTest(url=url):
-                self.assertTrue(is_safe_media_url(url))
+                self.assertTrue(is_safe_media_url(url, https_only=False))
+
+    def test_https_only_rejects_http(self) -> None:
+        self.assertFalse(
+            is_safe_media_url("http://8.8.8.8/test.mp4", https_only=True)
+        )
+        self.assertTrue(
+            is_safe_media_url(
+                "https://www.youtube.com/watch?v=dQw4w9WgXcQ", https_only=True
+            )
+        )
 
     def test_dns_guard_blocks_rebinding_to_private_ip(self) -> None:
         private_result = [
