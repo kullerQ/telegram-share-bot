@@ -17,6 +17,7 @@ class TestConcurrencyLimiter(unittest.IsolatedAsyncioTestCase):
             "BOT_TOKEN": "123456789:ABCdefGHIjklMNOpqrsTUVwxyz",
             "STORAGE_CHAT_ID": "1234567890",
             "MAX_CONCURRENT_DOWNLOADS": "5",
+            "ALLOW_PUBLIC": "true",
         }
         with patch.dict("os.environ", env, clear=True):
             settings = load_settings()
@@ -26,6 +27,7 @@ class TestConcurrencyLimiter(unittest.IsolatedAsyncioTestCase):
         env = {
             "BOT_TOKEN": "123456789:ABCdefGHIjklMNOpqrsTUVwxyz",
             "STORAGE_CHAT_ID": "1234567890",
+            "ALLOW_PUBLIC": "true",
         }
         with patch.dict("os.environ", env, clear=True):
             settings = load_settings()
@@ -49,9 +51,10 @@ class TestConcurrencyLimiter(unittest.IsolatedAsyncioTestCase):
         mock_settings.download_timeout_seconds = 10
         mock_settings.download_dir = MagicMock()
         mock_settings.upload_timeout_seconds = 10
-        # Empty allowlist = everyone allowed. An unset MagicMock is truthy and
-        # would make _is_user_allowed deny all users (download never runs).
+        mock_settings.max_downloads_per_user = 5
+        # Explicit public mode for the concurrency stress test.
         mock_settings.allowed_user_ids = frozenset()
+        mock_settings.allow_public = True
 
         context = MagicMock()
         context.application.bot_data = {
@@ -77,6 +80,8 @@ class TestConcurrencyLimiter(unittest.IsolatedAsyncioTestCase):
             return dummy
 
         update = MagicMock()
+        update.effective_user = MagicMock()
+        update.effective_user.id = 42
         msg = MagicMock()
         msg.text = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
         msg.chat_id = 12345

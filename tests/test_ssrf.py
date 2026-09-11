@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import socket
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from telegram_share_bot import strings
 from telegram_share_bot.downloader import (
     DownloadError,
+    _safe_dns_resolution,
     download_media,
     get_direct_stream,
     is_safe_media_url,
@@ -28,6 +31,8 @@ class TestSsrfProtection(unittest.IsolatedAsyncioTestCase):
             "http://10.0.0.1/admin",
             "http://172.16.0.5/status",
             "http://192.168.1.1/router",
+            "http://100.64.1.1/cgnat",
+            "http://100.127.255.255/cgnat",
             "http://[::1]/",
             "file:///etc/passwd",
             "ftp://example.com/file.mp4",
@@ -49,6 +54,25 @@ class TestSsrfProtection(unittest.IsolatedAsyncioTestCase):
         for url in safe_urls:
             with self.subTest(url=url):
                 self.assertTrue(is_safe_media_url(url))
+
+    def test_dns_guard_blocks_rebinding_to_private_ip(self) -> None:
+        private_result = [
+            (
+                socket.AF_INET,
+                socket.SOCK_STREAM,
+                6,
+                "",
+                ("10.0.0.1", 0),
+            )
+        ]
+
+        def fake_getaddrinfo(*_args: object, **_kwargs: object) -> list[tuple[object, ...]]:
+            return private_result
+
+        with patch("socket.getaddrinfo", side_effect=fake_getaddrinfo):
+            with _safe_dns_resolution():
+                with self.assertRaises(OSError):
+                    socket.getaddrinfo("evil.example", 80)
 
     async def test_download_media_blocks_ssrf(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

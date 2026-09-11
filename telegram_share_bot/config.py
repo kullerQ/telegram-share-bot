@@ -27,6 +27,8 @@ DEFAULT_DOWNLOAD_TIMEOUT_SECONDS = 90
 DEFAULT_UPLOAD_TIMEOUT_SECONDS = 180
 DEFAULT_DELETE_STORAGE_MESSAGES = True
 DEFAULT_MAX_CONCURRENT_DOWNLOADS = 3
+DEFAULT_MAX_DOWNLOADS_PER_USER = 3
+DEFAULT_ALLOW_PUBLIC = False
 
 _TRUE_VALUES = frozenset({"true", "1", "yes", "y", "on"})
 _FALSE_VALUES = frozenset({"false", "0", "no", "n", "off"})
@@ -45,7 +47,9 @@ class Settings:
     delete_storage_messages: bool
     upload_timeout_seconds: int = DEFAULT_UPLOAD_TIMEOUT_SECONDS
     max_concurrent_downloads: int = DEFAULT_MAX_CONCURRENT_DOWNLOADS
+    max_downloads_per_user: int = DEFAULT_MAX_DOWNLOADS_PER_USER
     allowed_user_ids: frozenset[int] = frozenset()
+    allow_public: bool = DEFAULT_ALLOW_PUBLIC
 
 
 def parse_user_ids(
@@ -55,8 +59,10 @@ def parse_user_ids(
 ) -> frozenset[int]:
     """Parse a comma-separated list of Telegram user ids.
 
-    Empty / unset means all users are allowed.
+    Empty / unset returns an empty set. Access still requires ALLOW_PUBLIC=true
+    or a non-empty allowlist (see load_settings).
     """
+    _ = env_file
     if raw_value is None or not raw_value.strip():
         return frozenset()
 
@@ -68,16 +74,13 @@ def parse_user_ids(
             continue
         try:
             ids.add(int(token))
-        except ValueError:
-            # Reset to empty (allow everyone) when the operator confirms.
-            _handle_invalid_param(
-                param_name=param_name,
-                raw_value=stripped,
-                default_value="",
-                reason="Expected a comma-separated list of integers",
-                env_file=env_file,
-            )
-            return frozenset()
+        except ValueError as exc:
+            # Never reset to empty (that would open the bot). Fail closed.
+            raise RuntimeError(
+                f"Invalid configuration for {param_name}='{stripped}': "
+                "Expected a comma-separated list of integers. "
+                "Please fix it in your .env file."
+            ) from exc
     return frozenset(ids)
 
 
@@ -200,23 +203,35 @@ def parse_path(
     raw_value: str | None,
     default: Path,
     env_file: Path = _ENV_PATH,
+    *,
+    must_be_under: Path | None = None,
 ) -> Path:
     if raw_value is None or not raw_value.strip():
-        return default
-    stripped = raw_value.strip()
-    try:
-        path = Path(stripped)
-        if path.exists() and path.is_dir():
-            raise ValueError(f"Path '{path}' is a directory, expected a file path")
-        return path
-    except Exception as exc:
-        return _handle_invalid_param(
-            param_name=param_name,
-            raw_value=stripped,
-            default_value=default,
-            reason=str(exc),
-            env_file=env_file,
-        )
+        path = default
+    else:
+        stripped = raw_value.strip()
+        try:
+            path = Path(stripped)
+            if path.exists() and path.is_dir():
+                raise ValueError(f"Path '{path}' is a directory, expected a file path")
+        except Exception as exc:
+            return _handle_invalid_param(
+                param_name=param_name,
+                raw_value=stripped,
+                default_value=default,
+                reason=str(exc),
+                env_file=env_file,
+            )
+
+    if must_be_under is not None:
+        try:
+            path.resolve().relative_to(must_be_under.resolve())
+        except ValueError as exc:
+            raise RuntimeError(
+                f"Invalid configuration for {param_name}='{path}': "
+                f"path must be under {must_be_under}"
+            ) from exc
+    return path
 
 
 def load_settings(env_file: Path = _ENV_PATH) -> Settings:
@@ -258,6 +273,7 @@ def load_settings(env_file: Path = _ENV_PATH) -> Settings:
         os.getenv("CACHE_DB_PATH"),
         default=download_dir / "media_cache.db",
         env_file=env_file,
+        must_be_under=_ROOT,
     )
 
     delete_storage_messages = parse_bool(
@@ -284,11 +300,30 @@ def load_settings(env_file: Path = _ENV_PATH) -> Settings:
         env_file=env_file,
     )
 
+    max_downloads_per_user = parse_int(
+        "MAX_DOWNLOADS_PER_USER",
+        os.getenv("MAX_DOWNLOADS_PER_USER"),
+        default=DEFAULT_MAX_DOWNLOADS_PER_USER,
+        min_value=1,
+        max_value=5,
+        env_file=env_file,
+    )
+
     allowed_user_ids = parse_user_ids(
         "ALLOWED_USER_IDS",
         os.getenv("ALLOWED_USER_IDS"),
         env_file=env_file,
     )
+
+    allow_public = parse_bool(
+        "ALLOW_PUBLIC",
+        os.getenv("ALLOW_PUBLIC"),
+        default=DEFAULT_ALLOW_PUBLIC,
+        env_file=env_file,
+    )
+
+    if not allowed_user_ids and not allow_public:
+        raise RuntimeError(strings.CONFIG_MISSING_ACCESS_CONTROL)
 
     return Settings(
         bot_token=token,
@@ -300,5 +335,7 @@ def load_settings(env_file: Path = _ENV_PATH) -> Settings:
         delete_storage_messages=delete_storage_messages,
         upload_timeout_seconds=upload_timeout,
         max_concurrent_downloads=max_concurrent_downloads,
+        max_downloads_per_user=max_downloads_per_user,
         allowed_user_ids=allowed_user_ids,
+        allow_public=allow_public,
     )

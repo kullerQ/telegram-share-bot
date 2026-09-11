@@ -25,6 +25,29 @@ GENERIC_TRACKING_PARAMS = {
     "sub_source",
 }
 
+# Query keys that typically indicate time-limited / credentialed URLs.
+_SIGNED_QUERY_KEYS = frozenset(
+    {
+        "signature",
+        "sig",
+        "x-amz-signature",
+        "x-amz-credential",
+        "x-amz-security-token",
+        "x-amz-algorithm",
+        "awsaccesskeyid",
+        "access_token",
+        "auth",
+        "token",
+        "expires",
+        "expire",
+        "key-pair-id",
+        "policy",
+        "x-goog-signature",
+        "x-goog-credential",
+        "x-goog-algorithm",
+    }
+)
+
 # YouTube-specific video ID pattern (11 characters: alphanumeric, dash, underscore).
 _YT_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{11}$")
 # Twitter / X status URL pattern.
@@ -33,6 +56,77 @@ _TWITTER_STATUS_RE = re.compile(r"^/([^/]+)/status/(\d+)")
 _INSTAGRAM_POST_RE = re.compile(r"^/(reel|reels|p)/([a-zA-Z0-9_-]+)")
 # TikTok video pattern.
 _TIKTOK_VIDEO_RE = re.compile(r"^/(@[^/]+)/video/(\d+)")
+
+# Domains whose normalized forms are public content ids (safe to share-cache).
+_PUBLIC_CACHE_HOSTS = frozenset(
+    {
+        "youtube.com",
+        "youtu.be",
+        "youtube-nocookie.com",
+        "x.com",
+        "twitter.com",
+        "instagram.com",
+        "tiktok.com",
+    }
+)
+
+
+def looks_signed_url(raw_url: str) -> bool:
+    """Return True if the URL appears to carry auth / signed query parameters."""
+    if not raw_url.strip():
+        return False
+    parsed = urlsplit(raw_url.strip())
+    for key, _value in parse_qsl(parsed.query, keep_blank_values=False):
+        if key.lower() in _SIGNED_QUERY_KEYS:
+            return True
+    return False
+
+
+def is_public_cacheable_url(raw_url: str) -> bool:
+    """Whether a URL is safe to share across users in the file_id cache."""
+    if looks_signed_url(raw_url):
+        return False
+    parsed = urlsplit(raw_url.strip())
+    host = (
+        parsed.netloc.lower()
+        .removeprefix("www.")
+        .removeprefix("m.")
+        .removeprefix("mobile.")
+    )
+    # Platform-normalized public posts are fine; generic hosts with leftover
+    # query params may still be private — only cache known public platforms or
+    # URLs with no query string.
+    if host in _PUBLIC_CACHE_HOSTS or host.endswith(".tiktok.com"):
+        return True
+    return not parsed.query
+
+
+def safe_url_for_log(raw_url: str) -> str:
+    """Return a log/UI-safe URL without signed or arbitrary query secrets.
+
+    Known public platforms keep their canonical form (e.g. YouTube ``?v=``).
+    Signed / credentialed URLs and other query strings are stripped to path only.
+    """
+    clean = raw_url.strip()
+    if not clean:
+        return ""
+    if looks_signed_url(clean):
+        parsed = urlsplit(clean)
+        if not parsed.scheme and not parsed.netloc:
+            return clean[:120]
+        return urlunsplit((parsed.scheme, parsed.netloc, parsed.path or "", "", ""))
+
+    normalized = normalize_url(clean) or clean
+    parsed = urlsplit(normalized)
+    host = (
+        parsed.netloc.lower()
+        .removeprefix("www.")
+        .removeprefix("m.")
+        .removeprefix("mobile.")
+    )
+    if host in _PUBLIC_CACHE_HOSTS or host.endswith(".tiktok.com"):
+        return normalized
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path or "", "", ""))
 
 
 def normalize_url(raw_url: str) -> str:

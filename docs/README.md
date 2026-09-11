@@ -24,8 +24,12 @@ Without `/setinlinefeedback`, the bot cannot learn which result you chose, so th
 1. Configure `.env`:
    ```bash
    cp .env.example .env
-   # Edit .env and set BOT_TOKEN and STORAGE_CHAT_ID
+   # Edit .env: BOT_TOKEN, STORAGE_CHAT_ID, and ALLOWED_USER_IDS (or ALLOW_PUBLIC=true)
    ```
+
+   **Access control is mandatory.** Set `ALLOWED_USER_IDS` to your Telegram user id(s), or explicitly set `ALLOW_PUBLIC=true` if you intend to run an open downloader.
+
+   **Storage chat privacy:** set `STORAGE_CHAT_ID` to your private user id (or a private channel only you can read). Do not use a shared group — every downloaded file is briefly uploaded there.
 
 2. Create host dirs and fix ownership (container runs as uid/gid `1000`):
    ```bash
@@ -45,7 +49,7 @@ Without `/setinlinefeedback`, the bot cannot learn which result you chose, so th
      docker compose logs -f
      ```
    - Direct file access on host:
-     Open `./logs/bot.log` in your editor. Sensitive bot tokens are automatically redacted.
+     Open `./logs/bot.log` in your editor. Bot tokens and URL query strings are automatically redacted.
    - Health: `docker compose ps` should show the bot as `healthy` after startup.
 
 5. Stop or restart:
@@ -77,7 +81,8 @@ copy .env.example .env
 Edit `.env`:
 
 1. Set `BOT_TOKEN` from BotFather.
-2. Set `STORAGE_CHAT_ID` to a chat the bot can write to (your user id works after you `/start` the bot once).
+2. Set `STORAGE_CHAT_ID` to a **private** chat the bot can write to (your user id works after you `/start` the bot once).
+3. Set `ALLOWED_USER_IDS` to your Telegram user id (comma-separated for multiple). Or set `ALLOW_PUBLIC=true` only if you want an open bot.
 
 Run:
 
@@ -104,9 +109,11 @@ Tap **Send media**. A placeholder appears first; the bot downloads in the backgr
 
 - Max file size ≈ 45 MB (Telegram Bot API upload limit is 50 MB).
 - Download timeout defaults to 90 seconds.
+- Global concurrent downloads default to 3; per-user in-flight downloads default to 3.
 - Unsupported or oversize URLs replace the placeholder with an error message.
 
 ## Notes
 
 - Users should `/start` the bot once before relying on inline mode.
 - Respect platform Terms of Service for downloaded content; this project is for personal/lightweight use.
+- Signed / credentialed URLs are not stored in the shared media cache.

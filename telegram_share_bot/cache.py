@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from telegram_share_bot.downloader import MediaKind
-from telegram_share_bot.normalizer import normalize_url
+from telegram_share_bot.normalizer import is_public_cacheable_url, normalize_url, safe_url_for_log
 
 logger = logging.getLogger(__name__)
 
@@ -134,6 +134,8 @@ class MediaCache:
 
     async def get(self, url: str) -> CachedMedia | None:
         """Fetch cached media by raw or normalized URL."""
+        if not is_public_cacheable_url(url):
+            return None
         norm_url = normalize_url(url)
         if not norm_url:
             return None
@@ -148,6 +150,11 @@ class MediaCache:
         duration: int | None,
     ) -> None:
         """Cache media file_id under the normalized URL."""
+        if not is_public_cacheable_url(url):
+            logger.debug(
+                "Skipping cache for non-public URL: %s", safe_url_for_log(url)
+            )
+            return
         norm_url = normalize_url(url)
         if not norm_url:
             return
@@ -161,4 +168,4 @@ class MediaCache:
             return
         removed = await asyncio.to_thread(self._evict_sync, norm_url)
         if removed:
-            logger.info("Evicted %s from media cache", norm_url)
+            logger.info("Evicted %s from media cache", safe_url_for_log(norm_url))

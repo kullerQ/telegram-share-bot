@@ -151,6 +151,7 @@ class TestConfigValidation(unittest.TestCase):
         env = {
             "BOT_TOKEN": "123456789:ABCdefGHIjklMNOpqrsTUVwxyz",
             "STORAGE_CHAT_ID": "1234567890",
+            "ALLOW_PUBLIC": "true",
         }
         with patch.dict("os.environ", env, clear=True):
             settings = load_settings(env_file=self.env_file)
@@ -161,10 +162,38 @@ class TestConfigValidation(unittest.TestCase):
             "BOT_TOKEN": "123456789:ABCdefGHIjklMNOpqrsTUVwxyz",
             "STORAGE_CHAT_ID": "1234567890",
             "UPLOAD_TIMEOUT_SECONDS": "240",
+            "ALLOW_PUBLIC": "true",
         }
         with patch.dict("os.environ", env, clear=True):
             settings = load_settings(env_file=self.env_file)
             self.assertEqual(settings.upload_timeout_seconds, 240)
+
+    def test_load_settings_requires_access_control(self) -> None:
+        env = {
+            "BOT_TOKEN": "123456789:ABCdefGHIjklMNOpqrsTUVwxyz",
+            "STORAGE_CHAT_ID": "1234567890",
+        }
+        with patch.dict("os.environ", env, clear=True):
+            with self.assertRaises(RuntimeError) as ctx:
+                load_settings(env_file=self.env_file)
+            self.assertIn("ALLOWED_USER_IDS", str(ctx.exception))
+
+    def test_load_settings_allowlist_without_public(self) -> None:
+        env = {
+            "BOT_TOKEN": "123456789:ABCdefGHIjklMNOpqrsTUVwxyz",
+            "STORAGE_CHAT_ID": "1234567890",
+            "ALLOWED_USER_IDS": "111,222",
+        }
+        with patch.dict("os.environ", env, clear=True):
+            settings = load_settings(env_file=self.env_file)
+            self.assertEqual(settings.allowed_user_ids, frozenset({111, 222}))
+            self.assertFalse(settings.allow_public)
+
+    def test_parse_user_ids_invalid_never_opens_bot(self) -> None:
+        from telegram_share_bot.config import parse_user_ids
+
+        with self.assertRaises(RuntimeError):
+            parse_user_ids("ALLOWED_USER_IDS", "not-an-id")
 
 
 if __name__ == "__main__":

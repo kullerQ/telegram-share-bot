@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import unittest
 
-from telegram_share_bot.normalizer import normalize_url
+from telegram_share_bot.normalizer import (
+    is_public_cacheable_url,
+    looks_signed_url,
+    normalize_url,
+    safe_url_for_log,
+)
 
 
 class TestNormalizeUrl(unittest.TestCase):
@@ -71,6 +76,38 @@ class TestNormalizeUrl(unittest.TestCase):
         # Should strip utm_* and fbclid, sort remaining query params a=1&b=2
         expected = "https://example.com/video.mp4?a=1&b=2"
         self.assertEqual(normalize_url(url), expected)
+
+    def test_looks_signed_url(self) -> None:
+        self.assertTrue(
+            looks_signed_url(
+                "https://cdn.example.com/v.mp4?X-Amz-Signature=abc&Expires=1"
+            )
+        )
+        self.assertFalse(looks_signed_url("https://cdn.example.com/v.mp4"))
+
+    def test_is_public_cacheable_url(self) -> None:
+        self.assertTrue(
+            is_public_cacheable_url("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+        )
+        self.assertTrue(is_public_cacheable_url("https://cdn.example.com/v.mp4"))
+        self.assertFalse(
+            is_public_cacheable_url(
+                "https://cdn.example.com/v.mp4?token=secret&Expires=99"
+            )
+        )
+        self.assertFalse(
+            is_public_cacheable_url("https://cdn.example.com/v.mp4?custom=1")
+        )
+
+    def test_safe_url_for_log_strips_query(self) -> None:
+        self.assertEqual(
+            safe_url_for_log("https://cdn.example.com/path/v.mp4?token=secret"),
+            "https://cdn.example.com/path/v.mp4",
+        )
+        self.assertEqual(
+            safe_url_for_log("https://www.youtube.com/watch?v=dQw4w9WgXcQ&si=abc"),
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        )
 
 
 if __name__ == "__main__":

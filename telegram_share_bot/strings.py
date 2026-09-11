@@ -17,6 +17,9 @@ EXAMPLE_MEDIA_URL = "https://example.com/video"
 ACCESS_DENIED = "You are not authorized to use this bot."
 INLINE_ACCESS_DENIED_TITLE = "Access denied"
 INLINE_ACCESS_DENIED_DESCRIPTION = "You are not authorized to use this bot."
+RATE_LIMITED = "Too many downloads in progress. Please wait and try again."
+INLINE_RATE_LIMITED_TITLE = "Busy"
+INLINE_RATE_LIMITED_DESCRIPTION = "Too many downloads in progress. Please wait."
 
 START_MESSAGE = (
     "Welcome to <b>{bot_name}</b>!\n\n"
@@ -32,7 +35,7 @@ START_MESSAGE = (
 DIRECT_URL_HINT = "Send a media URL, or use me inline: @BotName <url>"
 DIRECT_DOWNLOADING = "Downloading…"
 DIRECT_DONE = "Done."
-DIRECT_DOWNLOAD_FAILED = "Could not download: {error}"
+DIRECT_DOWNLOAD_FAILED = "Could not download that media."
 DIRECT_SEND_FAILED = "Something went wrong while sending the media."
 
 # --- Inline query (fast answer) ----------------------------------------------
@@ -55,7 +58,7 @@ INLINE_CANCEL_ANSWER = "Cancelled"
 
 INLINE_CHOSEN_NO_URL = "No URL found in the query."
 INLINE_CHOSEN_DOWNLOADING = "Downloading…\n{url}"
-INLINE_CHOSEN_DOWNLOAD_FAILED = "Download failed\n\n{error}"
+INLINE_CHOSEN_DOWNLOAD_FAILED = "Download failed."
 INLINE_CHOSEN_PREPARE_FAILED = "Something went wrong while preparing the media."
 
 # --- Download errors (shown to users) ----------------------------------------
@@ -69,7 +72,6 @@ DOWNLOAD_TOO_LARGE = (
 )
 DOWNLOAD_EXCEEDS_LIMIT = "File exceeds the {max_mb} MB limit."
 DOWNLOAD_FAILED_GENERIC = "Download failed."
-DOWNLOAD_FAILED_WITH_DETAIL = "Download failed: {error}"
 DOWNLOAD_TIMED_OUT = "Download timed out after {timeout_seconds} seconds."
 DOWNLOAD_UNSAFE_URL = "Unsafe or internal URLs are not allowed."
 DOWNLOAD_FAILED_INCOMPLETE = (
@@ -83,10 +85,14 @@ CONFIG_MISSING_BOT_TOKEN = (
     "Set BOT_TOKEN in .env (create a bot with @BotFather, then /setinline)."
 )
 CONFIG_MISSING_STORAGE_CHAT_ID = (
-    "Set STORAGE_CHAT_ID in .env to a chat the bot can write to "
-    "(your user id after /start works)."
+    "Set STORAGE_CHAT_ID in .env to a private chat the bot can write to "
+    "(your user id after /start works). Do not use a shared group/channel."
 )
 CONFIG_STORAGE_CHAT_ID_NOT_INT = "STORAGE_CHAT_ID must be an integer."
+CONFIG_MISSING_ACCESS_CONTROL = (
+    "Set ALLOWED_USER_IDS to a comma-separated list of Telegram user ids, "
+    "or set ALLOW_PUBLIC=true to intentionally allow everyone."
+)
 STARTUP_POLLING = "Starting telegram-share-bot (polling)"
 
 # --- Internal errors that may surface to users -------------------------------

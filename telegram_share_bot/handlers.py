@@ -37,6 +37,7 @@ from telegram_share_bot.downloader import (
     extract_url,
     get_direct_stream,
 )
+from telegram_share_bot.normalizer import safe_url_for_log
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +50,8 @@ _CALLBACK_PREFIX = "cancel:"
 _PENDING_KEY = "pending_inline"
 _TASKS_KEY = "inline_prepare_tasks"
 _CANCELLED_KEY = "cancelled_inline"
+_USER_DOWNLOADS_KEY = "user_download_counts"
+_USER_DOWNLOADS_LOCK_KEY = "user_download_lock"
 _EMPTY_KEYBOARD = InlineKeyboardMarkup([])
 
 _MAX_PENDING_INLINE = 1000
@@ -65,11 +68,11 @@ def _settings(context: ContextTypes.DEFAULT_TYPE) -> Settings:
 def _is_user_allowed(context: ContextTypes.DEFAULT_TYPE, user_id: int | None) -> bool:
     settings = context.application.bot_data.get("settings")
     if not isinstance(settings, Settings):
-        return True
+        return False
     allowed = settings.allowed_user_ids
-    if not allowed:
-        return True
-    return user_id is not None and user_id in allowed
+    if allowed:
+        return user_id is not None and user_id in allowed
+    return settings.allow_public
 
 
 def _cache(context: ContextTypes.DEFAULT_TYPE) -> MediaCache:
@@ -85,6 +88,50 @@ def _download_semaphore(context: ContextTypes.DEFAULT_TYPE) -> asyncio.Semaphore
         sem = asyncio.Semaphore(3)
         context.application.bot_data["download_semaphore"] = sem
     return sem
+
+
+def _user_download_lock(context: ContextTypes.DEFAULT_TYPE) -> asyncio.Lock:
+    lock = context.application.bot_data.get(_USER_DOWNLOADS_LOCK_KEY)
+    if not isinstance(lock, asyncio.Lock):
+        lock = asyncio.Lock()
+        context.application.bot_data[_USER_DOWNLOADS_LOCK_KEY] = lock
+    return lock
+
+
+def _user_download_counts(context: ContextTypes.DEFAULT_TYPE) -> dict[int, int]:
+    raw = context.application.bot_data.setdefault(_USER_DOWNLOADS_KEY, {})
+    return cast(dict[int, int], raw)
+
+
+async def _try_acquire_user_download_slot(
+    context: ContextTypes.DEFAULT_TYPE, user_id: int | None
+) -> bool:
+    """Reserve a per-user download slot. Anonymous users are denied."""
+    if user_id is None:
+        return False
+    settings = _settings(context)
+    max_per_user = settings.max_downloads_per_user
+    async with _user_download_lock(context):
+        counts = _user_download_counts(context)
+        current = counts.get(user_id, 0)
+        if current >= max_per_user:
+            return False
+        counts[user_id] = current + 1
+        return True
+
+
+async def _release_user_download_slot(
+    context: ContextTypes.DEFAULT_TYPE, user_id: int | None
+) -> None:
+    if user_id is None:
+        return
+    async with _user_download_lock(context):
+        counts = _user_download_counts(context)
+        current = counts.get(user_id, 0)
+        if current <= 1:
+            counts.pop(user_id, None)
+        else:
+            counts[user_id] = current - 1
 
 
 def _pending_map(context: ContextTypes.DEFAULT_TYPE) -> dict[str, str]:
@@ -182,9 +229,8 @@ async def url_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if message is None or not message.text:
         return
 
-    if not _is_user_allowed(
-        context, update.effective_user.id if update.effective_user else None
-    ):
+    user_id = update.effective_user.id if update.effective_user else None
+    if not _is_user_allowed(context, user_id):
         await message.reply_text(strings.ACCESS_DENIED)
         return
 
@@ -193,64 +239,71 @@ async def url_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await message.reply_text(strings.DIRECT_URL_HINT)
         return
 
+    display_url = safe_url_for_log(url)
     cache = _cache(context)
     settings = _settings(context)
 
     # 1. Attempt instant send from cache
     cached = await cache.get(url)
     if cached is not None:
-        logger.info("Cache hit for direct URL: %s", url)
+        logger.info("Cache hit for direct URL: %s", display_url)
         try:
             await _send_cached_media_to_chat(context, message.chat_id, cached)
             return
         except BadRequest as exc:
             logger.warning(
                 "Cached file_id invalid for %s, evicting and falling back to download: %s",
-                url,
+                display_url,
                 exc.message,
             )
             await cache.evict(url)
         except Exception:
-            logger.exception("Failed sending cached media for %s, falling back", url)
+            logger.exception(
+                "Failed sending cached media for %s, falling back", display_url
+            )
             await cache.evict(url)
+
+    if not await _try_acquire_user_download_slot(context, user_id):
+        await message.reply_text(strings.RATE_LIMITED)
+        return
 
     # 2. Try direct URL import via Telegram first
     status = await message.reply_text(strings.DIRECT_DOWNLOADING)
-    direct_stream = await get_direct_stream(
-        url=url,
-        max_file_bytes=settings.max_file_bytes,
-        timeout_seconds=min(15, settings.download_timeout_seconds),
-    )
-    if direct_stream is not None:
-        file_id_info = await _upload_direct_url_for_file_id(
-            context, settings, direct_stream
+    media: DownloadedMedia | None = None
+    try:
+        direct_stream = await get_direct_stream(
+            url=url,
+            max_file_bytes=settings.max_file_bytes,
+            timeout_seconds=min(15, settings.download_timeout_seconds),
         )
-        if file_id_info is not None:
-            file_id, title, kind = file_id_info
-            await cache.set(
-                url=url,
-                file_id=file_id,
-                kind=kind,
-                title=title,
-                duration=direct_stream.duration,
+        if direct_stream is not None:
+            file_id_info = await _upload_direct_url_for_file_id(
+                context, settings, direct_stream
             )
-            await _send_cached_media_to_chat(
-                context,
-                message.chat_id,
-                CachedMedia(
+            if file_id_info is not None:
+                file_id, title, kind = file_id_info
+                await cache.set(
                     url=url,
                     file_id=file_id,
                     kind=kind,
                     title=title,
                     duration=direct_stream.duration,
-                ),
-            )
-            await status.edit_text(strings.DIRECT_DONE)
-            return
+                )
+                await _send_cached_media_to_chat(
+                    context,
+                    message.chat_id,
+                    CachedMedia(
+                        url=url,
+                        file_id=file_id,
+                        kind=kind,
+                        title=title,
+                        duration=direct_stream.duration,
+                    ),
+                )
+                await status.edit_text(strings.DIRECT_DONE)
+                return
 
-    # 3. Fallback to local download and upload
-    media: DownloadedMedia | None = None
-    try:
+        # 3. Fallback to local download and upload
         async with _download_semaphore(context):
             media = await download_media(
                 url=url,
@@ -271,11 +324,13 @@ async def url_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
         await status.edit_text(strings.DIRECT_DONE)
     except DownloadError as exc:
-        await status.edit_text(strings.DIRECT_DOWNLOAD_FAILED.format(error=exc))
+        logger.warning("Direct download failed for %s: %s", display_url, exc)
+        await status.edit_text(strings.DIRECT_DOWNLOAD_FAILED)
     except Exception:
         logger.exception("Failed to handle direct URL message")
         await status.edit_text(strings.DIRECT_SEND_FAILED)
     finally:
+        await _release_user_download_slot(context, user_id)
         if media is not None:
             cleanup_media(media)
 
@@ -349,9 +404,8 @@ async def chosen_inline_result(
     if chosen is None:
         return
 
-    if not _is_user_allowed(
-        context, chosen.from_user.id if chosen.from_user else None
-    ):
+    user_id = chosen.from_user.id if chosen.from_user else None
+    if not _is_user_allowed(context, user_id):
         return
 
     inline_message_id = chosen.inline_message_id
@@ -374,10 +428,20 @@ async def chosen_inline_result(
         )
         return
 
-    logger.info("Chosen inline result; preparing media for %s", url)
+    display_url = safe_url_for_log(url)
+    if not await _try_acquire_user_download_slot(context, user_id):
+        await _edit_inline_text(
+            context,
+            inline_message_id,
+            strings.RATE_LIMITED,
+        )
+        return
+
+    logger.info("Chosen inline result; preparing media for %s", display_url)
     tasks = _task_map(context)
     existing = tasks.get(inline_message_id)
     if existing is not None and not existing.done():
+        await _release_user_download_slot(context, user_id)
         return
 
     task = asyncio.create_task(
@@ -386,6 +450,7 @@ async def chosen_inline_result(
             inline_message_id=inline_message_id,
             url=url,
             result_id=chosen.result_id,
+            user_id=user_id,
         ),
         name=f"prepare-inline-{chosen.result_id}",
     )
@@ -396,6 +461,12 @@ async def cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     """Cancel prepare and clear the inline placeholder immediately."""
     query = update.callback_query
     if query is None or query.data is None:
+        return
+
+    if not _is_user_allowed(
+        context, query.from_user.id if query.from_user else None
+    ):
+        await query.answer(text=strings.ACCESS_DENIED, show_alert=True)
         return
 
     if not query.data.startswith(_CALLBACK_PREFIX):
@@ -429,44 +500,54 @@ async def _prepare_inline_media(
     inline_message_id: str,
     url: str,
     result_id: str,
+    user_id: int | None = None,
 ) -> None:
     settings = _settings(context)
     cache = _cache(context)
-
-    # 1. Attempt instant send from cache
-    cached = await cache.get(url)
-    if cached is not None:
-        logger.info("Cache hit for inline media: %s", url)
-        try:
-            if inline_message_id in _cancelled_set(context):
-                return
-            await context.bot.edit_message_media(
-                media=_input_media(cached.file_id, cached.title, cached.kind),
-                inline_message_id=inline_message_id,
-                reply_markup=_EMPTY_KEYBOARD,
-            )
-            logger.info("Inline media sent from cache for %s (%s)", url, cached.kind.value)
-            return
-        except BadRequest as exc:
-            logger.warning(
-                "Cached file_id invalid in inline edit for %s, evicting and falling back: %s",
-                url,
-                exc.message,
-            )
-            await cache.evict(url)
-        except Exception:
-            logger.exception("Failed editing inline media from cache for %s, falling back", url)
-            await cache.evict(url)
-
-    # 2. Cache miss or fallback to download pipeline
+    display_url = safe_url_for_log(url)
     media: DownloadedMedia | None = None
+
     try:
+        # 1. Attempt instant send from cache
+        cached = await cache.get(url)
+        if cached is not None:
+            logger.info("Cache hit for inline media: %s", display_url)
+            try:
+                if inline_message_id in _cancelled_set(context):
+                    return
+                await context.bot.edit_message_media(
+                    media=_input_media(cached.file_id, cached.title, cached.kind),
+                    inline_message_id=inline_message_id,
+                    reply_markup=_EMPTY_KEYBOARD,
+                )
+                logger.info(
+                    "Inline media sent from cache for %s (%s)",
+                    display_url,
+                    cached.kind.value,
+                )
+                return
+            except BadRequest as exc:
+                logger.warning(
+                    "Cached file_id invalid in inline edit for %s, "
+                    "evicting and falling back: %s",
+                    display_url,
+                    exc.message,
+                )
+                await cache.evict(url)
+            except Exception:
+                logger.exception(
+                    "Failed editing inline media from cache for %s, falling back",
+                    display_url,
+                )
+                await cache.evict(url)
+
+        # 2. Cache miss or fallback to download pipeline
         if inline_message_id in _cancelled_set(context):
             return
         await _edit_inline_text(
             context,
             inline_message_id,
-            strings.INLINE_CHOSEN_DOWNLOADING.format(url=url),
+            strings.INLINE_CHOSEN_DOWNLOADING.format(url=display_url),
             reply_markup=_cancel_keyboard(result_id),
         )
         # Try direct URL import via Telegram first (fastest, zero local upload bandwidth)
@@ -498,7 +579,9 @@ async def _prepare_inline_media(
                     reply_markup=_EMPTY_KEYBOARD,
                 )
                 logger.info(
-                    "Inline media ready via direct URL for %s (%s)", url, kind.value
+                    "Inline media ready via direct URL for %s (%s)",
+                    display_url,
+                    kind.value,
                 )
                 return
 
@@ -528,24 +611,24 @@ async def _prepare_inline_media(
             inline_message_id=inline_message_id,
             reply_markup=_EMPTY_KEYBOARD,
         )
-        logger.info("Inline media ready for %s (%s)", url, kind.value)
+        logger.info("Inline media ready for %s (%s)", display_url, kind.value)
     except asyncio.CancelledError:
-        logger.info("Inline prepare cancelled for %s", url)
+        logger.info("Inline prepare cancelled for %s", display_url)
         raise
     except DownloadError as exc:
         if inline_message_id in _cancelled_set(context):
             return
-        logger.warning("Inline download failed for %s: %s", url, exc)
+        logger.warning("Inline download failed for %s: %s", display_url, exc)
         await _edit_inline_text(
             context,
             inline_message_id,
-            strings.INLINE_CHOSEN_DOWNLOAD_FAILED.format(error=exc),
+            strings.INLINE_CHOSEN_DOWNLOAD_FAILED,
             reply_markup=_cancel_keyboard(result_id),
         )
     except Exception:
         if inline_message_id in _cancelled_set(context):
             return
-        logger.exception("Inline prepare failed for %s", url)
+        logger.exception("Inline prepare failed for %s", display_url)
         await _edit_inline_text(
             context,
             inline_message_id,
@@ -557,6 +640,7 @@ async def _prepare_inline_media(
         _cancelled_set(context).discard(inline_message_id)
         if media is not None:
             cleanup_media(media)
+        await _release_user_download_slot(context, user_id)
 
 
 def _cancel_keyboard(result_id: str) -> InlineKeyboardMarkup:
@@ -586,6 +670,7 @@ def _error_article(title: str, description: str) -> InlineQueryResultArticle:
 def _pending_media_article(
     result_id: str, url: str, *, is_cached: bool = False
 ) -> InlineQueryResultArticle:
+    display_url = safe_url_for_log(url)
     title = (
         f"⚡ {strings.INLINE_PENDING_TITLE} (cached)"
         if is_cached
@@ -594,9 +679,9 @@ def _pending_media_article(
     return InlineQueryResultArticle(
         id=result_id,
         title=title,
-        description=url[:120],
+        description=display_url[:120],
         input_message_content=InputTextMessageContent(
-            message_text=strings.INLINE_PENDING_MESSAGE.format(url=url)[:4096]
+            message_text=strings.INLINE_PENDING_MESSAGE.format(url=display_url)[:4096]
         ),
         # Keyboard is required so Telegram gives us inline_message_id on choose.
         reply_markup=_cancel_keyboard(result_id),
@@ -679,7 +764,7 @@ async def _upload_direct_url_for_file_id(
     except TelegramError as exc:
         logger.info(
             "Telegram direct URL fetch not supported or failed for %s: %s",
-            stream.direct_url,
+            safe_url_for_log(stream.direct_url),
             exc,
         )
         return None

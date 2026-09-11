@@ -9,18 +9,30 @@ import re
 from pathlib import Path
 from typing import Any
 
+from telegram_share_bot.normalizer import safe_url_for_log
+
 # httpx logs: HTTP Request: POST https://api.telegram.org/bot<TOKEN>/<method> "..."
 # request.url is an httpx.URL object, not a str — redact via str(value).
 _TELEGRAM_BOT_URL_RE = re.compile(
     r"https://api\.telegram\.org/bot[^/\s]+/([A-Za-z0-9_]+)"
 )
 _TELEGRAM_BOT_TOKEN_RE = re.compile(r"\b\d{6,}:[A-Za-z0-9_-]{20,}\b")
+# Any http(s) URL with a query string — scrub via safe_url_for_log.
+_HTTP_URL_WITH_QUERY_RE = re.compile(
+    r"https?://[^\s<>\"']+\?[^\s<>\"']+",
+    re.IGNORECASE,
+)
+
+
+def _strip_url_query(match: re.Match[str]) -> str:
+    return safe_url_for_log(match.group(0)) or match.group(0)
 
 
 def _redact_telegram_secrets(value: str) -> str:
-    """Replace Bot API URLs with the method name; mask bare tokens."""
+    """Replace Bot API URLs with the method name; mask bare tokens; strip URL queries."""
     text = _TELEGRAM_BOT_URL_RE.sub(r"\1", value)
-    return _TELEGRAM_BOT_TOKEN_RE.sub("<redacted-bot-token>", text)
+    text = _TELEGRAM_BOT_TOKEN_RE.sub("<redacted-bot-token>", text)
+    return _HTTP_URL_WITH_QUERY_RE.sub(_strip_url_query, text)
 
 
 def _redact_value(value: Any) -> Any:

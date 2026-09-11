@@ -9,8 +9,19 @@ services:
     volumes:
       - ./downloads:/app/downloads
       - ./logs:/app/logs
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     healthcheck:
-      test: ["CMD-SHELL", "kill -0 1"]
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import os,signal; os.kill(1,0)\"",
+        ]
       interval: 30s
       timeout: 5s
       retries: 3

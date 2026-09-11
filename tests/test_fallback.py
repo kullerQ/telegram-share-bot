@@ -28,6 +28,8 @@ class TestCacheFallback(unittest.IsolatedAsyncioTestCase):
             download_dir=Path(self.temp_dir.name) / "downloads",
             cache_db_path=self.db_path,
             delete_storage_messages=False,
+            allow_public=True,
+            max_downloads_per_user=3,
         )
 
     async def asyncTearDown(self) -> None:
@@ -80,7 +82,10 @@ class TestCacheFallback(unittest.IsolatedAsyncioTestCase):
         fresh_media.path.write_bytes(b"dummy video data")
 
         download_mock = AsyncMock(return_value=fresh_media)
-        with patch("telegram_share_bot.handlers.download_media", download_mock):
+        with (
+            patch("telegram_share_bot.handlers.get_direct_stream", AsyncMock(return_value=None)),
+            patch("telegram_share_bot.handlers.download_media", download_mock),
+        ):
             await url_message(update, context)
 
         # Verify:
@@ -136,6 +141,7 @@ class TestCacheFallback(unittest.IsolatedAsyncioTestCase):
             return_value=("FRESH_INLINE_FILE_ID", "Fresh Inline", MediaKind.VIDEO)
         )
         with (
+            patch("telegram_share_bot.handlers.get_direct_stream", AsyncMock(return_value=None)),
             patch("telegram_share_bot.handlers.download_media", download_mock),
             patch("telegram_share_bot.handlers._upload_for_file_id", upload_mock),
         ):

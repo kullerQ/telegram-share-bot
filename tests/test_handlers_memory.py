@@ -43,8 +43,21 @@ class TestHandlersMemory(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(cancelled), _MAX_CANCELLED_INLINE)
 
     async def test_chosen_inline_result_evicts_pending_entry(self) -> None:
+        from telegram_share_bot.config import Settings
+
         context = MagicMock()
-        context.application.bot_data = {}
+        context.application.bot_data = {
+            "settings": Settings(
+                bot_token="test:token",
+                storage_chat_id=1,
+                max_file_bytes=1024,
+                download_timeout_seconds=10,
+                download_dir=MagicMock(),
+                cache_db_path=MagicMock(),
+                delete_storage_messages=False,
+                allow_public=True,
+            )
+        }
 
         result_id = "chosen_123"
         url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
@@ -55,6 +68,8 @@ class TestHandlersMemory(unittest.IsolatedAsyncioTestCase):
         chosen.result_id = result_id
         chosen.inline_message_id = "inline_msg_999"
         chosen.query = url
+        chosen.from_user = MagicMock()
+        chosen.from_user.id = 99
         update.chosen_inline_result = chosen
 
         with patch("telegram_share_bot.handlers._prepare_inline_media", AsyncMock()):

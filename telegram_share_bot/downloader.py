@@ -11,6 +11,7 @@ import socket
 import threading
 import time
 import uuid
+from collections.abc import Generator, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -20,6 +21,7 @@ from urllib.parse import urlsplit
 import yt_dlp
 
 from telegram_share_bot import strings
+from telegram_share_bot.normalizer import safe_url_for_log
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +30,15 @@ URL_RE = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
 VIDEO_EXTENSIONS = {".mp4", ".webm", ".mkv", ".mov", ".m4v"}
 AUDIO_EXTENSIONS = {".mp3", ".m4a", ".opus", ".ogg", ".wav", ".flac", ".aac"}
 INCOMPLETE_SUFFIXES = {".part", ".ytdl", ".temp", ".aria2"}
+
+# Shared address space (CGNAT / some VPN overlays) — not covered by is_private.
+_BLOCKED_NETWORKS: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...] = (
+    ipaddress.ip_network("100.64.0.0/10"),
+    ipaddress.ip_network("192.0.0.0/24"),
+    ipaddress.ip_network("192.0.2.0/24"),
+    ipaddress.ip_network("198.51.100.0/24"),
+    ipaddress.ip_network("203.0.113.0/24"),
+)
 
 
 def _is_safe_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
@@ -46,6 +57,10 @@ def _is_safe_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
 
     if str(ip) == "169.254.169.254":
         return False
+
+    for network in _BLOCKED_NETWORKS:
+        if ip in network:
+            return False
 
     return True
 
@@ -91,9 +106,40 @@ def is_safe_media_url(url: str) -> bool:
 
         return True
     except Exception as exc:
-        logger.warning("URL security check rejected %s: %s", url, exc)
+        logger.warning(
+            "URL security check rejected %s: %s", safe_url_for_log(url), exc
+        )
         return False
 
+
+@contextlib.contextmanager
+def _safe_dns_resolution() -> Generator[None, None, None]:
+    """Re-validate every DNS lookup during download (redirects / rebinding)."""
+    original_getaddrinfo = socket.getaddrinfo
+
+    def _guarded_getaddrinfo(
+        host: str | bytes | None,
+        port: str | bytes | int | None,
+        family: int = 0,
+        type: int = 0,
+        proto: int = 0,
+        flags: int = 0,
+    ) -> list[tuple[Any, ...]]:
+        results = original_getaddrinfo(host, port, family, type, proto, flags)
+        for res in results:
+            sockaddr = res[4]
+            if not isinstance(sockaddr, Sequence) or not sockaddr:
+                continue
+            ip = ipaddress.ip_address(sockaddr[0])
+            if not _is_safe_ip(ip):
+                raise OSError(f"Blocked unsafe address for host {host!r}: {ip}")
+        return list(results)
+
+    socket.getaddrinfo = _guarded_getaddrinfo
+    try:
+        yield
+    finally:
+        socket.getaddrinfo = original_getaddrinfo
 
 
 class MediaKind(str, Enum):
@@ -230,6 +276,7 @@ def _download_sync(
                 )
             )
 
+    # Size-bounded formats only — no unbounded "bv*+ba/b" fallback.
     ydl_opts: dict[str, Any] = {
         "outtmpl": outtmpl,
         "noplaylist": True,
@@ -242,88 +289,99 @@ def _download_sync(
             f"bv*[filesize<{max_file_bytes}]+ba/"
             f"b[filesize<{max_file_bytes}]/"
             f"bv*[filesize_approx<{max_file_bytes}]+ba/"
-            f"b[filesize_approx<{max_file_bytes}]/"
-            "bv*+ba/b"
+            f"b[filesize_approx<{max_file_bytes}]"
         ),
         "merge_output_format": "mp4",
         "progress_hooks": [_progress_hook],
     }
 
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:  # type: ignore[arg-type]
-            if abort_event is not None and abort_event.is_set():
-                raise DownloadError(
-                    strings.DOWNLOAD_TIMED_OUT.format(timeout_seconds=timeout_seconds)
-                )
-
-            # Probe metadata first so live streams abort before any media bytes land.
-            extracted = ydl.extract_info(url, download=False)
-            if not isinstance(extracted, dict):
-                raise DownloadError(strings.DOWNLOAD_EXTRACT_FAILED)
-
-            info = _pick_info(extracted)
-
-            if abort_event is not None and abort_event.is_set():
-                raise DownloadError(
-                    strings.DOWNLOAD_TIMED_OUT.format(timeout_seconds=timeout_seconds)
-                )
-
-            processed = ydl.process_ie_result(extracted, download=True)
-            if isinstance(processed, dict):
-                info = _pick_info(processed)
-
-            path = _resolve_downloaded_path(info, work_dir, ydl)
-            if not path.exists():
-                raise DownloadError(strings.DOWNLOAD_NO_FILE)
-
-            size = path.stat().st_size
-            if size <= 0:
-                raise DownloadError(strings.DOWNLOAD_EMPTY_FILE)
-            if size > max_file_bytes:
-                path.unlink(missing_ok=True)
-                raise DownloadError(
-                    strings.DOWNLOAD_TOO_LARGE.format(
-                        size_mb=size // (1024 * 1024),
-                        max_mb=max_file_bytes // (1024 * 1024),
+        with _safe_dns_resolution():
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:  # type: ignore[arg-type]
+                if abort_event is not None and abort_event.is_set():
+                    raise DownloadError(
+                        strings.DOWNLOAD_TIMED_OUT.format(
+                            timeout_seconds=timeout_seconds
+                        )
                     )
+
+                # Probe metadata first so live streams abort before any media bytes land.
+                extracted = ydl.extract_info(url, download=False)
+                if not isinstance(extracted, dict):
+                    raise DownloadError(strings.DOWNLOAD_EXTRACT_FAILED)
+
+                info = _pick_info(extracted)
+
+                if abort_event is not None and abort_event.is_set():
+                    raise DownloadError(
+                        strings.DOWNLOAD_TIMED_OUT.format(
+                            timeout_seconds=timeout_seconds
+                        )
+                    )
+
+                processed = ydl.process_ie_result(extracted, download=True)
+                if isinstance(processed, dict):
+                    info = _pick_info(processed)
+
+                path = _resolve_downloaded_path(info, work_dir, ydl)
+                if not path.exists():
+                    raise DownloadError(strings.DOWNLOAD_NO_FILE)
+
+                size = path.stat().st_size
+                if size <= 0:
+                    raise DownloadError(strings.DOWNLOAD_EMPTY_FILE)
+                if size > max_file_bytes:
+                    path.unlink(missing_ok=True)
+                    raise DownloadError(
+                        strings.DOWNLOAD_TOO_LARGE.format(
+                            size_mb=size // (1024 * 1024),
+                            max_mb=max_file_bytes // (1024 * 1024),
+                        )
+                    )
+
+                title = str(info.get("title") or path.stem)[:64]
+                duration_raw = info.get("duration")
+                duration = (
+                    int(duration_raw)
+                    if isinstance(duration_raw, (int, float))
+                    else None
                 )
 
-            title = str(info.get("title") or path.stem)[:64]
-            duration_raw = info.get("duration")
-            duration = (
-                int(duration_raw) if isinstance(duration_raw, (int, float)) else None
-            )
+                if abort_event is not None and abort_event.is_set():
+                    raise DownloadError(
+                        strings.DOWNLOAD_TIMED_OUT.format(
+                            timeout_seconds=timeout_seconds
+                        )
+                    )
 
-            if abort_event is not None and abort_event.is_set():
-                raise DownloadError(
-                    strings.DOWNLOAD_TIMED_OUT.format(timeout_seconds=timeout_seconds)
+                return DownloadedMedia(
+                    path=path,
+                    title=title,
+                    kind=_classify(path),
+                    duration=duration,
                 )
-
-            return DownloadedMedia(
-                path=path,
-                title=title,
-                kind=_classify(path),
-                duration=duration,
-            )
     except DownloadError:
         _cleanup_dir(work_dir)
         raise
     except yt_dlp.utils.DownloadError as exc:
         _cleanup_dir(work_dir)
         message = str(exc).split("\n")[-1].strip() or strings.DOWNLOAD_FAILED_GENERIC
+        logger.warning(
+            "yt-dlp download error for %s: %s", safe_url_for_log(url), message
+        )
         if "File is larger than max-filesize" in message or "filesize" in message.lower():
             raise DownloadError(
                 strings.DOWNLOAD_EXCEEDS_LIMIT.format(
                     max_mb=max_file_bytes // (1024 * 1024)
                 )
             ) from exc
-        raise DownloadError(message) from exc
+        raise DownloadError(strings.DOWNLOAD_FAILED_GENERIC) from exc
     except Exception as exc:
         _cleanup_dir(work_dir)
-        raise DownloadError(
-            strings.DOWNLOAD_FAILED_WITH_DETAIL.format(error=exc)
-        ) from exc
-
+        logger.warning(
+            "Download failed for %s: %s", safe_url_for_log(url), exc
+        )
+        raise DownloadError(strings.DOWNLOAD_FAILED_GENERIC) from exc
 
 def _cleanup_dir(directory: Path) -> None:
     if not directory.exists():
@@ -428,69 +486,77 @@ def _extract_direct_stream_sync(
         "socket_timeout": 10,
     }
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:  # type: ignore[arg-type]
-            extracted = ydl.extract_info(url, download=False)
-            if not isinstance(extracted, dict):
-                return None
-            info = _pick_info(extracted)
+        with _safe_dns_resolution():
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:  # type: ignore[arg-type]
+                extracted = ydl.extract_info(url, download=False)
+                if not isinstance(extracted, dict):
+                    return None
+                info = _pick_info(extracted)
 
-            title = str(info.get("title") or "")[:64]
-            duration_raw = info.get("duration")
-            duration = int(duration_raw) if isinstance(duration_raw, (int, float)) else None
+                title = str(info.get("title") or "")[:64]
+                duration_raw = info.get("duration")
+                duration = (
+                    int(duration_raw)
+                    if isinstance(duration_raw, (int, float))
+                    else None
+                )
 
-            direct = info.get("url")
-            if (
-                isinstance(direct, str)
-                and direct.startswith("http")
-                and is_safe_media_url(direct)
-                and ".m3u8" not in direct
-                and ".mpd" not in direct
-            ):
-                ext = str(info.get("ext") or "mp4")
-                kind = _classify_ext(ext)
-                if kind is not MediaKind.DOCUMENT:
+                direct = info.get("url")
+                if (
+                    isinstance(direct, str)
+                    and direct.startswith("http")
+                    and is_safe_media_url(direct)
+                    and ".m3u8" not in direct
+                    and ".mpd" not in direct
+                ):
+                    ext = str(info.get("ext") or "mp4")
+                    kind = _classify_ext(ext)
+                    if kind is not MediaKind.DOCUMENT:
+                        return DirectMediaStream(
+                            direct_url=direct,
+                            title=title,
+                            kind=kind,
+                            duration=duration,
+                        )
+
+                formats = info.get("formats") or []
+                for f in reversed(formats):
+                    if not isinstance(f, dict):
+                        continue
+                    u = f.get("url")
+                    if (
+                        not isinstance(u, str)
+                        or not u.startswith("http")
+                        or not is_safe_media_url(u)
+                    ):
+                        continue
+                    if ".m3u8" in u or ".mpd" in u:
+                        continue
+                    proto = f.get("protocol")
+                    if proto not in ("http", "https"):
+                        continue
+                    ext = str(f.get("ext") or "")
+                    kind = _classify_ext(ext)
+                    if kind is MediaKind.DOCUMENT:
+                        continue
+                    if f.get("vcodec") == "none" or f.get("acodec") == "none":
+                        continue
+                    size = f.get("filesize") or f.get("filesize_approx")
+                    if size and isinstance(size, (int, float)) and size > max_file_bytes:
+                        continue
                     return DirectMediaStream(
-                        direct_url=direct,
+                        direct_url=u,
                         title=title,
                         kind=kind,
                         duration=duration,
                     )
-
-            formats = info.get("formats") or []
-            for f in reversed(formats):
-                if not isinstance(f, dict):
-                    continue
-                u = f.get("url")
-                if (
-                    not isinstance(u, str)
-                    or not u.startswith("http")
-                    or not is_safe_media_url(u)
-                ):
-                    continue
-                if ".m3u8" in u or ".mpd" in u:
-                    continue
-                proto = f.get("protocol")
-                if proto not in ("http", "https"):
-                    continue
-                ext = str(f.get("ext") or "")
-                kind = _classify_ext(ext)
-                if kind is MediaKind.DOCUMENT:
-                    continue
-                if f.get("vcodec") == "none" or f.get("acodec") == "none":
-                    continue
-                size = f.get("filesize") or f.get("filesize_approx")
-                if size and isinstance(size, (int, float)) and size > max_file_bytes:
-                    continue
-                return DirectMediaStream(
-                    direct_url=u,
-                    title=title,
-                    kind=kind,
-                    duration=duration,
-                )
     except Exception as exc:
-        logger.debug("Direct stream extraction skipped or failed for %s: %s", url, exc)
+        logger.debug(
+            "Direct stream extraction skipped or failed for %s: %s",
+            safe_url_for_log(url),
+            exc,
+        )
     return None
-
 
 async def get_direct_stream(
     url: str,
