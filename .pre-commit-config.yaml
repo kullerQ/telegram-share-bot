@@ -1,0 +1,18 @@
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.7
+    hooks:
+      - id: ruff-check
+
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v2.3.1
+    hooks:
+      - id: mypy
+        # Match [tool.mypy] packages = ["telegram_share_bot"]
+        args: [--strict, -p, telegram_share_bot]
+        pass_filenames: false
+        additional_dependencies:
+          - python-telegram-bot==22.5
+          - yt-dlp>=2025.1.15
+          - python-dotenv==1.1.1
+          - types-yt-dlp

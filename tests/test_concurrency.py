@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from telegram_share_bot.config import DEFAULT_MAX_CONCURRENT_DOWNLOADS, load_settings
 from telegram_share_bot.downloader import DownloadedMedia, MediaKind
-from telegram_share_bot.handlers import _download_semaphore, url_message
+from telegram_share_bot.handlers import url_message
 
 
 class TestConcurrencyLimiter(unittest.IsolatedAsyncioTestCase):

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import tempfile
 import threading
 import time
@@ -10,7 +9,6 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from telegram_share_bot import strings
 from telegram_share_bot.downloader import (
     DownloadError,
     _download_sync,

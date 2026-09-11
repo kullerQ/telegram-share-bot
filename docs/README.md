@@ -59,9 +59,12 @@ Without `/setinlinefeedback`, the bot cannot learn which result you chose, so th
 # from the project root
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
+pip install -r requirements-dev.txt
+pre-commit install
 copy .env.example .env
 ```
+
+`pre-commit install` wires a git hook that runs **ruff** and **mypy --strict** (same as CI) before each commit. Run `pre-commit run --all-files` to check everything without committing.
 
 Edit `.env`:
 

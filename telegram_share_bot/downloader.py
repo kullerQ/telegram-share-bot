@@ -51,7 +51,7 @@ def _is_safe_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
 
 
 def is_safe_media_url(url: str) -> bool:
-    """Validate that a URL uses http(s) and does not point to internal/private/loopback/cloud-metadata networks."""
+    """Validate http(s) URL is not internal/private/loopback/cloud-metadata."""
     try:
         parsed = urlsplit(url)
         scheme = parsed.scheme.lower()
