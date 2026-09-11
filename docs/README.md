@@ -53,6 +53,14 @@ Without `/setinlinefeedback`, the bot cannot learn which result you chose, so th
    docker compose restart
    docker compose down
    ```
+
+6. Update to the latest image:
+   ```bash
+   docker compose pull
+   docker compose up -d
+   ```
+   `pull` fetches the new image; `up -d` recreates the container if the image changed. To apply `.env` changes without pulling, use `docker compose up -d --force-recreate --pull never`.
+
 ## Local setup
 
 ```powershell
@@ -65,8 +73,6 @@ copy .env.example .env
 ```
 
 `core.hooksPath` points Git at the repo’s `.githooks/pre-commit` script (LF line endings — required on Windows). That hook runs **ruff** and **mypy --strict -p telegram_share_bot** (same as CI) before each commit. Run `pre-commit run --all-files` to check everything without committing.
-
-If a commit seems to skip checks, make sure Cursor’s commit UI does **not** have “Skip hook verification” / `--no-verify` enabled.
 
 Edit `.env`:
 
