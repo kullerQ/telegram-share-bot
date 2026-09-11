@@ -347,7 +347,7 @@ def load_settings(env_file: Path = _ENV_PATH) -> Settings:
         "MAX_CONCURRENT_DOWNLOADS",
         os.getenv("MAX_CONCURRENT_DOWNLOADS"),
         default=DEFAULT_MAX_CONCURRENT_DOWNLOADS,
-        min_value=1,
+        min_value=0,
         max_value=20,
         env_file=env_file,
     )
@@ -356,7 +356,7 @@ def load_settings(env_file: Path = _ENV_PATH) -> Settings:
         "MAX_DOWNLOADS_PER_USER",
         os.getenv("MAX_DOWNLOADS_PER_USER"),
         default=DEFAULT_MAX_DOWNLOADS_PER_USER,
-        min_value=1,
+        min_value=0,
         max_value=5,
         env_file=env_file,
     )

@@ -120,7 +120,10 @@ def build_application() -> App:
         concurrency = int(raw_concurrency)
     except (TypeError, ValueError):
         concurrency = 3
-    application.bot_data["download_semaphore"] = asyncio.Semaphore(concurrency)
+    # 0 disables the global download semaphore (unlimited parallel downloads).
+    application.bot_data["download_semaphore"] = (
+        None if concurrency <= 0 else asyncio.Semaphore(concurrency)
+    )
 
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))

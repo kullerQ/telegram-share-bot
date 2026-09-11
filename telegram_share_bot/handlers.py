@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import time
+from collections.abc import AsyncIterator
 from typing import Any, cast
 from uuid import uuid4
 
@@ -86,12 +88,19 @@ def _cache(context: ContextTypes.DEFAULT_TYPE) -> MediaCache:
     return cache
 
 
-def _download_semaphore(context: ContextTypes.DEFAULT_TYPE) -> asyncio.Semaphore:
+@contextlib.asynccontextmanager
+async def _unlimited_download_slot() -> AsyncIterator[None]:
+    yield
+
+
+def _download_slot(
+    context: ContextTypes.DEFAULT_TYPE,
+) -> asyncio.Semaphore | contextlib.AbstractAsyncContextManager[None]:
+    """Global download limiter; unlimited when semaphore is unset/disabled."""
     sem = context.application.bot_data.get("download_semaphore")
-    if not isinstance(sem, asyncio.Semaphore):
-        sem = asyncio.Semaphore(3)
-        context.application.bot_data["download_semaphore"] = sem
-    return sem
+    if isinstance(sem, asyncio.Semaphore):
+        return sem
+    return _unlimited_download_slot()
 
 
 def _user_download_lock(context: ContextTypes.DEFAULT_TYPE) -> asyncio.Lock:
@@ -118,6 +127,7 @@ async def _try_acquire_user_download_slot(
     """Reserve a per-user download slot.
 
     Returns None on success, or a user-facing error string on denial.
+    ``max_downloads_per_user == 0`` disables the per-user in-flight cap.
     """
     if user_id is None:
         return strings.ACCESS_DENIED
@@ -132,7 +142,7 @@ async def _try_acquire_user_download_slot(
         if cooldown > 0 and last_started is not None and now - last_started < cooldown:
             return strings.COOLDOWN_LIMITED
         current = counts.get(user_id, 0)
-        if current >= max_per_user:
+        if max_per_user > 0 and current >= max_per_user:
             return strings.RATE_LIMITED
         counts[user_id] = current + 1
         cooldowns[user_id] = now
@@ -334,7 +344,7 @@ async def url_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 return
 
         # 3. Fallback to local download and upload
-        async with _download_semaphore(context):
+        async with _download_slot(context):
             media = await download_media(
                 url=url,
                 download_dir=settings.download_dir,
@@ -649,7 +659,7 @@ async def _prepare_inline_media(
                 )
                 return
 
-        async with _download_semaphore(context):
+        async with _download_slot(context):
             if inline_message_id in _cancelled_set(context):
                 return
             media = await download_media(

@@ -35,6 +35,19 @@ class TestConcurrencyLimiter(unittest.IsolatedAsyncioTestCase):
                 settings.max_concurrent_downloads, DEFAULT_MAX_CONCURRENT_DOWNLOADS
             )
 
+    def test_settings_zero_disables_limits(self) -> None:
+        env = {
+            "BOT_TOKEN": "123456789:ABCdefGHIjklMNOpqrsTUVwxyz",
+            "STORAGE_CHAT_ID": "1234567890",
+            "ALLOW_PUBLIC": "true",
+            "MAX_CONCURRENT_DOWNLOADS": "0",
+            "MAX_DOWNLOADS_PER_USER": "0",
+        }
+        with patch.dict("os.environ", env, clear=True):
+            settings = load_settings()
+            self.assertEqual(settings.max_concurrent_downloads, 0)
+            self.assertEqual(settings.max_downloads_per_user, 0)
+
     async def test_semaphore_limits_parallel_downloads(self) -> None:
         semaphore_limit = 2
         sem = asyncio.Semaphore(semaphore_limit)
