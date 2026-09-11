@@ -1,1 +1,1 @@
-"""Test suite for sendmedia_bot."""
+"""Test suite for telegram_share_bot."""

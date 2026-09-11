@@ -9,10 +9,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from telegram.error import BadRequest
 
-from sendmedia_bot.cache import MediaCache
-from sendmedia_bot.config import Settings
-from sendmedia_bot.downloader import DirectMediaStream, DownloadedMedia, MediaKind
-from sendmedia_bot.handlers import _prepare_inline_media, url_message
+from telegram_share_bot.cache import MediaCache
+from telegram_share_bot.config import Settings
+from telegram_share_bot.downloader import DirectMediaStream, DownloadedMedia, MediaKind
+from telegram_share_bot.handlers import _prepare_inline_media, url_message
 
 
 class TestCacheFallback(unittest.IsolatedAsyncioTestCase):
@@ -79,7 +79,7 @@ class TestCacheFallback(unittest.IsolatedAsyncioTestCase):
         )
         fresh_media.path.write_bytes(b"dummy video data")
 
-        with patch("sendmedia_bot.handlers.download_media", AsyncMock(return_value=fresh_media)):
+        with patch("telegram_share_bot.handlers.download_media", AsyncMock(return_value=fresh_media)):
             await url_message(update, context)
 
         # Verify:
@@ -131,9 +131,9 @@ class TestCacheFallback(unittest.IsolatedAsyncioTestCase):
         fresh_media.path.write_bytes(b"dummy inline data")
 
         with (
-            patch("sendmedia_bot.handlers.download_media", AsyncMock(return_value=fresh_media)),
+            patch("telegram_share_bot.handlers.download_media", AsyncMock(return_value=fresh_media)),
             patch(
-                "sendmedia_bot.handlers._upload_for_file_id",
+                "telegram_share_bot.handlers._upload_for_file_id",
                 AsyncMock(return_value=("FRESH_INLINE_FILE_ID", "Fresh Inline", MediaKind.VIDEO)),
             ),
         ):
@@ -170,12 +170,12 @@ class TestCacheFallback(unittest.IsolatedAsyncioTestCase):
         )
 
         with (
-            patch("sendmedia_bot.handlers.get_direct_stream", AsyncMock(return_value=mock_stream)),
+            patch("telegram_share_bot.handlers.get_direct_stream", AsyncMock(return_value=mock_stream)),
             patch(
-                "sendmedia_bot.handlers._upload_direct_url_for_file_id",
+                "telegram_share_bot.handlers._upload_direct_url_for_file_id",
                 AsyncMock(return_value=("DIRECT_FILE_ID_789", "Twitter Video", MediaKind.VIDEO)),
             ) as mock_direct_upload,
-            patch("sendmedia_bot.handlers.download_media") as mock_download,
+            patch("telegram_share_bot.handlers.download_media") as mock_download,
         ):
             await _prepare_inline_media(
                 context,
@@ -222,14 +222,14 @@ class TestCacheFallback(unittest.IsolatedAsyncioTestCase):
         fresh_media.path.write_bytes(b"dummy")
 
         with (
-            patch("sendmedia_bot.handlers.get_direct_stream", AsyncMock(return_value=mock_stream)),
+            patch("telegram_share_bot.handlers.get_direct_stream", AsyncMock(return_value=mock_stream)),
             patch(
-                "sendmedia_bot.handlers._upload_direct_url_for_file_id",
+                "telegram_share_bot.handlers._upload_direct_url_for_file_id",
                 AsyncMock(return_value=None),  # Direct upload failed
             ),
-            patch("sendmedia_bot.handlers.download_media", AsyncMock(return_value=fresh_media)),
+            patch("telegram_share_bot.handlers.download_media", AsyncMock(return_value=fresh_media)),
             patch(
-                "sendmedia_bot.handlers._upload_for_file_id",
+                "telegram_share_bot.handlers._upload_for_file_id",
                 AsyncMock(
                     return_value=("LOCAL_FALLBACK_FILE_ID", "Fallback Video", MediaKind.VIDEO)
                 ),

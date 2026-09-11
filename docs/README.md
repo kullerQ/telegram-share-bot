@@ -1,4 +1,4 @@
-# SendMedia Bot
+# telegram-share-bot
 
 Lightweight Telegram **inline** bot: type `@YourBot <media-url>` in any chat and send the downloaded media as the result.
 
@@ -56,7 +56,7 @@ Without `/setinlinefeedback`, the bot cannot learn which result you chose, so th
 ## Local setup
 
 ```powershell
-cd f:\dev\projects\sendmedia_bot
+# from the project root
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
@@ -71,7 +71,7 @@ Edit `.env`:
 Run:
 
 ```powershell
-python -m sendmedia_bot
+python -m telegram_share_bot
 ```
 
 Open a private chat with the bot, send `/start`, then in any other chat type:

@@ -10,8 +10,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from sendmedia_bot import strings
-from sendmedia_bot.downloader import (
+from telegram_share_bot import strings
+from telegram_share_bot.downloader import (
     DownloadError,
     _download_sync,
     download_media,
@@ -42,7 +42,7 @@ class TestDownloadTimeout(unittest.IsolatedAsyncioTestCase):
                 time.sleep(0.3)
                 return MagicMock()
 
-            with patch("sendmedia_bot.downloader._download_sync", side_effect=slow_download):
+            with patch("telegram_share_bot.downloader._download_sync", side_effect=slow_download):
                 with self.assertRaises(DownloadError) as ctx:
                     await download_media(
                         url="https://www.youtube.com/watch?v=dQw4w9WgXcQ",

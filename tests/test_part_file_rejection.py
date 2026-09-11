@@ -7,8 +7,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from sendmedia_bot import strings
-from sendmedia_bot.downloader import (
+from telegram_share_bot import strings
+from telegram_share_bot.downloader import (
     DownloadError,
     _resolve_downloaded_path,
 )

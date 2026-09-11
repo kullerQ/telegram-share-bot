@@ -5,7 +5,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from sendmedia_bot.app import _post_init, build_application
+from telegram_share_bot.app import _post_init, build_application
 
 
 class TestAppInitialization(unittest.TestCase):
@@ -19,7 +19,7 @@ class TestAppInitialization(unittest.TestCase):
                 cache_db_path=Path(tmp_dir) / "test.db",
                 upload_timeout_seconds=180,
             )
-            with patch("sendmedia_bot.app.load_settings", return_value=mock_settings):
+            with patch("telegram_share_bot.app.load_settings", return_value=mock_settings):
                 app = build_application()
                 self.assertIsNotNone(app)
                 self.assertEqual(app.bot_data["settings"], mock_settings)

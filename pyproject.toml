@@ -10,7 +10,7 @@ ignore = ["UP042", "BLE001"]
 python_version = "3.11"
 strict = true
 warn_unused_ignores = true
-packages = ["sendmedia_bot"]
+packages = ["telegram_share_bot"]
 
 [[tool.mypy.overrides]]
 module = ["yt_dlp.*"]

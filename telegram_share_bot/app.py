@@ -19,11 +19,11 @@ from telegram.ext import (
     filters,
 )
 
-from sendmedia_bot import strings
-from sendmedia_bot.cache import MediaCache
-from sendmedia_bot.config import DEFAULT_UPLOAD_TIMEOUT_SECONDS, load_settings
-from sendmedia_bot.downloader import cleanup_stale_downloads
-from sendmedia_bot.handlers import (
+from telegram_share_bot import strings
+from telegram_share_bot.cache import MediaCache
+from telegram_share_bot.config import DEFAULT_UPLOAD_TIMEOUT_SECONDS, load_settings
+from telegram_share_bot.downloader import cleanup_stale_downloads
+from telegram_share_bot.handlers import (
     cancel_callback,
     chosen_inline_result,
     help_command,
@@ -31,7 +31,7 @@ from sendmedia_bot.handlers import (
     start_command,
     url_message,
 )
-from sendmedia_bot.logging_filters import configure_logging
+from telegram_share_bot.logging_filters import configure_logging
 
 App = Application[
     ExtBot[None],

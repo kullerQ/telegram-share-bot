@@ -8,7 +8,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: sendmedia_bot:local
-    container_name: sendmedia_bot_local
+    image: telegram-share-bot:local
+    container_name: telegram-share-bot-local
     # Prefer a clean exit during local debugging over auto-restart loops.
     restart: "no"

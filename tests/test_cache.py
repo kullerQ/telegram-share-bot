@@ -6,8 +6,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from sendmedia_bot.cache import MediaCache
-from sendmedia_bot.downloader import MediaKind
+from telegram_share_bot.cache import MediaCache
+from telegram_share_bot.downloader import MediaKind
 
 
 class TestMediaCache(unittest.IsolatedAsyncioTestCase):

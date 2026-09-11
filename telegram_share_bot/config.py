@@ -12,7 +12,7 @@ from typing import TypeVar
 
 from dotenv import load_dotenv
 
-from sendmedia_bot import strings
+from telegram_share_bot import strings
 
 logger = logging.getLogger(__name__)
 

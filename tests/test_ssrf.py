@@ -6,8 +6,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from sendmedia_bot import strings
-from sendmedia_bot.downloader import (
+from telegram_share_bot import strings
+from telegram_share_bot.downloader import (
     DownloadError,
     download_media,
     get_direct_stream,

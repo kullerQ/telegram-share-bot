@@ -10,8 +10,8 @@ from collections.abc import Generator
 from dataclasses import dataclass
 from pathlib import Path
 
-from sendmedia_bot.downloader import MediaKind
-from sendmedia_bot.normalizer import normalize_url
+from telegram_share_bot.downloader import MediaKind
+from telegram_share_bot.normalizer import normalize_url
 
 logger = logging.getLogger(__name__)
 

@@ -24,10 +24,10 @@ from telegram.constants import ParseMode
 from telegram.error import BadRequest, TelegramError
 from telegram.ext import ContextTypes
 
-from sendmedia_bot import strings
-from sendmedia_bot.cache import CachedMedia, MediaCache
-from sendmedia_bot.config import DEFAULT_UPLOAD_TIMEOUT_SECONDS, Settings
-from sendmedia_bot.downloader import (
+from telegram_share_bot import strings
+from telegram_share_bot.cache import CachedMedia, MediaCache
+from telegram_share_bot.config import DEFAULT_UPLOAD_TIMEOUT_SECONDS, Settings
+from telegram_share_bot.downloader import (
     DirectMediaStream,
     DownloadedMedia,
     DownloadError,

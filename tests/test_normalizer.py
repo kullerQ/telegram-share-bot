@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import unittest
 
-from sendmedia_bot.normalizer import normalize_url
+from telegram_share_bot.normalizer import normalize_url
 
 
 class TestNormalizeUrl(unittest.TestCase):

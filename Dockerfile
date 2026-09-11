@@ -25,10 +25,10 @@ COPY requirements.txt /app/
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application source code
-COPY sendmedia_bot /app/sendmedia_bot
+COPY telegram_share_bot /app/telegram_share_bot
 RUN chown -R appuser:appgroup /app
 
 USER appuser
 
 # Run the bot module
-CMD ["python", "-m", "sendmedia_bot"]
+CMD ["python", "-m", "telegram_share_bot"]

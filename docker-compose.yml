@@ -1,7 +1,7 @@
 services:
   bot:
     image: ghcr.io/kullerq/telegram-share-bot:latest
-    container_name: sendmedia_bot
+    container_name: telegram-share-bot
     restart: unless-stopped
     env_file:
       - .env

@@ -5,7 +5,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from sendmedia_bot.handlers import (
+from telegram_share_bot.handlers import (
     _MAX_CANCELLED_INLINE,
     _MAX_PENDING_INLINE,
     _cancelled_set,
@@ -57,7 +57,7 @@ class TestHandlersMemory(unittest.IsolatedAsyncioTestCase):
         chosen.query = url
         update.chosen_inline_result = chosen
 
-        with patch("sendmedia_bot.handlers._prepare_inline_media", AsyncMock()):
+        with patch("telegram_share_bot.handlers._prepare_inline_media", AsyncMock()):
             await chosen_inline_result(update, context)
 
         # Ensure the chosen result was popped from the pending map

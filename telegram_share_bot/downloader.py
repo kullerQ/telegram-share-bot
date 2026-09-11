@@ -19,7 +19,7 @@ from urllib.parse import urlsplit
 
 import yt_dlp
 
-from sendmedia_bot import strings
+from telegram_share_bot import strings
 
 logger = logging.getLogger(__name__)
 

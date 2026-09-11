@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from sendmedia_bot.config import (
+from telegram_share_bot.config import (
     DEFAULT_DOWNLOAD_TIMEOUT_SECONDS,
     DEFAULT_MAX_FILE_BYTES,
     DEFAULT_UPLOAD_TIMEOUT_SECONDS,

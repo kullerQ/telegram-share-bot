@@ -8,7 +8,7 @@ from __future__ import annotations
 
 # --- Branding / defaults -----------------------------------------------------
 
-BOT_DISPLAY_NAME = "SendMedia Bot"
+BOT_DISPLAY_NAME = "telegram-share-bot"
 FALLBACK_BOT_USERNAME = "YourBot"
 EXAMPLE_MEDIA_URL = "https://example.com/video"
 
@@ -91,7 +91,7 @@ CONFIG_MISSING_STORAGE_CHAT_ID = (
     "(your user id after /start works)."
 )
 CONFIG_STORAGE_CHAT_ID_NOT_INT = "STORAGE_CHAT_ID must be an integer."
-STARTUP_POLLING = "Starting SendMedia bot (polling)"
+STARTUP_POLLING = "Starting telegram-share-bot (polling)"
 
 # --- Internal errors that may surface to users -------------------------------
 
