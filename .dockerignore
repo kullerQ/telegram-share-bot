@@ -1,6 +1,10 @@
 # Git & Version Control
 .git
 .gitignore
+.gitattributes
+.githooks
+.github
+.pre-commit-config.yaml
 
 # Virtual Environments & Caching
 .venv/
@@ -13,9 +17,16 @@ __pycache__/
 .ruff_cache/
 .pytest_cache/
 
-# Tests & Documentation
+# Tests, docs, tooling (not needed in the image)
 tests/
+docs/
 *.md
+pyproject.toml
+requirements-dev.txt
+
+# Legacy / alternate package trees (runtime uses telegram_share_bot only)
+sendmedia_bot/
+poplink/
 
 # Local runtime data & secrets
 downloads/
@@ -24,6 +35,9 @@ logs/
 .env.*
 !.env.example
 
-# Docker configuration
+# Docker / IDE
 Dockerfile*
 docker-compose*.yml
+.cursor/
+.vscode/
+.idea/
