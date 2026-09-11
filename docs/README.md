@@ -27,25 +27,32 @@ Without `/setinlinefeedback`, the bot cannot learn which result you chose, so th
    # Edit .env and set BOT_TOKEN and STORAGE_CHAT_ID
    ```
 
-2. Start the container in the background:
+2. Create host dirs and fix ownership (container runs as uid/gid `1000`):
+   ```bash
+   mkdir -p downloads logs
+   sudo chown -R 1000:1000 ./downloads ./logs
+   ```
+   On Windows this step is usually unnecessary; on Linux bind mounts owned by `root` will cause `PermissionDenied` when the bot writes downloads or logs.
+
+3. Start the container in the background:
    ```bash
    docker compose up -d
    ```
 
-3. **Accessing logs**:
+4. **Accessing logs**:
    - Live stream in console:
      ```bash
      docker compose logs -f
      ```
    - Direct file access on host:
      Open `./logs/bot.log` in your editor. Sensitive bot tokens are automatically redacted.
+   - Health: `docker compose ps` should show the bot as `healthy` after startup.
 
-4. Stop or restart:
+5. Stop or restart:
    ```bash
    docker compose restart
    docker compose down
    ```
-
 ## Local setup
 
 ```powershell
