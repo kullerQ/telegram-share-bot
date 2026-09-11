@@ -45,6 +45,40 @@ class Settings:
     delete_storage_messages: bool
     upload_timeout_seconds: int = DEFAULT_UPLOAD_TIMEOUT_SECONDS
     max_concurrent_downloads: int = DEFAULT_MAX_CONCURRENT_DOWNLOADS
+    allowed_user_ids: frozenset[int] = frozenset()
+
+
+def parse_user_ids(
+    param_name: str,
+    raw_value: str | None,
+    env_file: Path = _ENV_PATH,
+) -> frozenset[int]:
+    """Parse a comma-separated list of Telegram user ids.
+
+    Empty / unset means all users are allowed.
+    """
+    if raw_value is None or not raw_value.strip():
+        return frozenset()
+
+    stripped = raw_value.strip()
+    ids: set[int] = set()
+    for part in stripped.split(","):
+        token = part.strip()
+        if not token:
+            continue
+        try:
+            ids.add(int(token))
+        except ValueError:
+            # Reset to empty (allow everyone) when the operator confirms.
+            _handle_invalid_param(
+                param_name=param_name,
+                raw_value=stripped,
+                default_value="",
+                reason="Expected a comma-separated list of integers",
+                env_file=env_file,
+            )
+            return frozenset()
+    return frozenset(ids)
 
 
 def _update_env_file(env_file: Path, key: str, new_value: str) -> None:
@@ -250,6 +284,12 @@ def load_settings(env_file: Path = _ENV_PATH) -> Settings:
         env_file=env_file,
     )
 
+    allowed_user_ids = parse_user_ids(
+        "ALLOWED_USER_IDS",
+        os.getenv("ALLOWED_USER_IDS"),
+        env_file=env_file,
+    )
+
     return Settings(
         bot_token=token,
         storage_chat_id=storage_chat_id,
@@ -260,4 +300,5 @@ def load_settings(env_file: Path = _ENV_PATH) -> Settings:
         delete_storage_messages=delete_storage_messages,
         upload_timeout_seconds=upload_timeout,
         max_concurrent_downloads=max_concurrent_downloads,
+        allowed_user_ids=allowed_user_ids,
     )

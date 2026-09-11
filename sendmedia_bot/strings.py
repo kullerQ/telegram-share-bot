@@ -12,7 +12,11 @@ BOT_DISPLAY_NAME = "SendMedia Bot"
 FALLBACK_BOT_USERNAME = "YourBot"
 EXAMPLE_MEDIA_URL = "https://example.com/video"
 
-# --- /start & /help ----------------------------------------------------------
+# --- Access control ----------------------------------------------------------
+
+ACCESS_DENIED = "You are not authorized to use this bot."
+INLINE_ACCESS_DENIED_TITLE = "Access denied"
+INLINE_ACCESS_DENIED_DESCRIPTION = "You are not authorized to use this bot."
 
 START_MESSAGE = (
     "{bot_name}\n\n"

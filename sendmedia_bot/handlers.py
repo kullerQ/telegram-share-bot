@@ -62,6 +62,16 @@ def _settings(context: ContextTypes.DEFAULT_TYPE) -> Settings:
     return settings
 
 
+def _is_user_allowed(context: ContextTypes.DEFAULT_TYPE, user_id: int | None) -> bool:
+    settings = context.application.bot_data.get("settings")
+    if not isinstance(settings, Settings):
+        return True
+    allowed = settings.allowed_user_ids
+    if not allowed:
+        return True
+    return user_id is not None and user_id in allowed
+
+
 def _cache(context: ContextTypes.DEFAULT_TYPE) -> MediaCache:
     cache = context.application.bot_data.get("media_cache")
     if not isinstance(cache, MediaCache):
@@ -146,6 +156,12 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if update.effective_message is None or update.effective_chat is None:
         return
 
+    if not _is_user_allowed(
+        context, update.effective_user.id if update.effective_user else None
+    ):
+        await update.effective_message.reply_text(strings.ACCESS_DENIED)
+        return
+
     bot_username = context.bot.username or strings.FALLBACK_BOT_USERNAME
     chat_id = update.effective_chat.id
     text = strings.START_MESSAGE.format(
@@ -165,6 +181,12 @@ async def url_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     """Download or send cached media when a URL is sent directly in private chat."""
     message = update.effective_message
     if message is None or not message.text:
+        return
+
+    if not _is_user_allowed(
+        context, update.effective_user.id if update.effective_user else None
+    ):
+        await message.reply_text(strings.ACCESS_DENIED)
         return
 
     url = extract_url(message.text)
@@ -265,6 +287,20 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if query is None:
         return
 
+    if not _is_user_allowed(context, query.from_user.id if query.from_user else None):
+        await _answer_inline_query(
+            query,
+            results=[
+                _error_article(
+                    strings.INLINE_ACCESS_DENIED_TITLE,
+                    strings.INLINE_ACCESS_DENIED_DESCRIPTION,
+                )
+            ],
+            cache_time=1,
+            is_personal=True,
+        )
+        return
+
     text = (query.query or "").strip()
     if not text:
         await _answer_inline_query(
@@ -312,6 +348,11 @@ async def chosen_inline_result(
     """Download after the user picks a result, then edit the inline message."""
     chosen = update.chosen_inline_result
     if chosen is None:
+        return
+
+    if not _is_user_allowed(
+        context, chosen.from_user.id if chosen.from_user else None
+    ):
         return
 
     inline_message_id = chosen.inline_message_id
