@@ -35,8 +35,6 @@ class MediaCache:
     @contextlib.contextmanager
     def _connection(self) -> Generator[sqlite3.Connection, None, None]:
         conn = sqlite3.connect(self.db_path, timeout=10.0)
-        conn.execute("PRAGMA journal_mode = WAL;")
-        conn.execute("PRAGMA synchronous = NORMAL;")
         conn.execute("PRAGMA busy_timeout = 5000;")
         try:
             with conn:
@@ -46,26 +44,33 @@ class MediaCache:
 
     def _init_db(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        with self._connection() as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS media_cache (
-                    url TEXT PRIMARY KEY,
-                    file_id TEXT NOT NULL,
-                    media_kind TEXT NOT NULL,
-                    title TEXT NOT NULL,
-                    duration INTEGER,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    last_used_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                );
-                """
-            )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_media_cache_last_used
-                ON media_cache(last_used_at);
-                """
-            )
+        conn = sqlite3.connect(self.db_path, timeout=10.0)
+        try:
+            conn.execute("PRAGMA journal_mode = WAL;")
+            conn.execute("PRAGMA synchronous = NORMAL;")
+            conn.execute("PRAGMA busy_timeout = 5000;")
+            with conn:
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS media_cache (
+                        url TEXT PRIMARY KEY,
+                        file_id TEXT NOT NULL,
+                        media_kind TEXT NOT NULL,
+                        title TEXT NOT NULL,
+                        duration INTEGER,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        last_used_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    );
+                    """
+                )
+                conn.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_media_cache_last_used
+                    ON media_cache(last_used_at);
+                    """
+                )
+        finally:
+            conn.close()
 
     def _get_sync(self, norm_url: str) -> CachedMedia | None:
         with self._connection() as conn:
