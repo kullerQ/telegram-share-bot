@@ -170,7 +170,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         example_url=strings.EXAMPLE_MEDIA_URL,
         chat_id=chat_id,
     )
-    await update.effective_message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+    await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

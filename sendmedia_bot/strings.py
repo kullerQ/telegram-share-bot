@@ -19,16 +19,16 @@ INLINE_ACCESS_DENIED_TITLE = "Access denied"
 INLINE_ACCESS_DENIED_DESCRIPTION = "You are not authorized to use this bot."
 
 START_MESSAGE = (
-    "{bot_name}\n\n"
-    "Use me *inline* in any chat:\n"
-    "`@{bot_username} {example_url}`\n\n"
+    "<b>{bot_name}</b>\n\n"
+    "Use me <b>inline</b> in any chat:\n"
+    "<code>@{bot_username} {example_url}</code>\n\n"
     "Tap the result to send a placeholder, then wait while I download "
-    "and replace it with the media. Tap *Cancel* to stop and clear it.\n\n"
+    "and replace it with the media. Tap <b>Cancel</b> to stop and clear it.\n\n"
     "You can also paste a media URL here and I will send the file back.\n\n"
-    "Your chat id (for `STORAGE_CHAT_ID`): `{chat_id}`\n\n"
+    "Your chat id (for <code>STORAGE_CHAT_ID</code>): <code>{chat_id}</code>\n\n"
     "BotFather setup:\n"
-    "• `/setinline` — enable inline mode\n"
-    "• `/setinlinefeedback` — required so I can finish the download after you tap"
+    "• <code>/setinline</code> — enable inline mode\n"
+    "• <code>/setinlinefeedback</code> — required so I can finish the download after you tap"
 )
 
 # --- Direct private-chat URL handling ----------------------------------------
