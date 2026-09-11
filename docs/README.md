@@ -43,6 +43,8 @@ Without `/setinlinefeedback`, the bot cannot learn which result you chose, so th
    docker compose up -d
    ```
 
+   Compose drops Linux capabilities, runs a read-only root filesystem (with writable `downloads`/`logs` mounts and `/tmp`), and health-checks reachability of `api.telegram.org`. For stronger SSRF defense, also restrict the host/container egress firewall to HTTPS destinations you trust (Telegram API + media CDNs).
+
 4. **Accessing logs**:
    - Live stream in console:
      ```bash

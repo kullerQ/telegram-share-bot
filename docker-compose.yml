@@ -16,14 +16,16 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    # Prefer host firewall / reverse-proxy egress allowlists in production:
+    # allow outbound HTTPS to api.telegram.org and media CDNs only.
     healthcheck:
       test:
         [
           "CMD-SHELL",
-          "python -c \"import os,signal; os.kill(1,0)\"",
+          "python -c \"import urllib.request; urllib.request.urlopen('https://api.telegram.org', timeout=5)\"",
         ]
       interval: 30s
-      timeout: 5s
+      timeout: 10s
       retries: 3
       start_period: 20s
     logging:
