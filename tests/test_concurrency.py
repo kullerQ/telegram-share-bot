@@ -49,6 +49,9 @@ class TestConcurrencyLimiter(unittest.IsolatedAsyncioTestCase):
         mock_settings.download_timeout_seconds = 10
         mock_settings.download_dir = MagicMock()
         mock_settings.upload_timeout_seconds = 10
+        # Empty allowlist = everyone allowed. An unset MagicMock is truthy and
+        # would make _is_user_allowed deny all users (download never runs).
+        mock_settings.allowed_user_ids = frozenset()
 
         context = MagicMock()
         context.application.bot_data = {
