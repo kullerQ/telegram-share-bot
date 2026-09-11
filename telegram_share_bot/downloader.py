@@ -114,8 +114,28 @@ def is_safe_media_url(url: str) -> bool:
 
 @contextlib.contextmanager
 def _safe_dns_resolution() -> Generator[None, None, None]:
-    """Re-validate every DNS lookup during download (redirects / rebinding)."""
+    """Re-validate DNS lookups and pin each host to its first safe IP.
+
+    Blocks private/CGNAT addresses and mitigates DNS rebinding by forcing
+    subsequent lookups for the same hostname to reuse the first validated IP
+    for the duration of the download/extract context.
+    """
     original_getaddrinfo = socket.getaddrinfo
+    pinned_ips: dict[str, str] = {}
+
+    def _host_key(host: str | bytes | None) -> str | None:
+        if host is None:
+            return None
+        text: str
+        if isinstance(host, bytes):
+            try:
+                text = host.decode("idna")
+            except UnicodeError:
+                text = host.decode("utf-8", errors="replace")
+        else:
+            text = host
+        cleaned = text.strip().lower().rstrip(".")
+        return cleaned or None
 
     def _guarded_getaddrinfo(
         host: str | bytes | None,
@@ -125,7 +145,9 @@ def _safe_dns_resolution() -> Generator[None, None, None]:
         proto: int = 0,
         flags: int = 0,
     ) -> list[tuple[Any, ...]]:
+        key = _host_key(host)
         results = original_getaddrinfo(host, port, family, type, proto, flags)
+        safe_results: list[tuple[Any, ...]] = []
         for res in results:
             sockaddr = res[4]
             if not isinstance(sockaddr, Sequence) or not sockaddr:
@@ -133,7 +155,30 @@ def _safe_dns_resolution() -> Generator[None, None, None]:
             ip = ipaddress.ip_address(sockaddr[0])
             if not _is_safe_ip(ip):
                 raise OSError(f"Blocked unsafe address for host {host!r}: {ip}")
-        return list(results)
+            safe_results.append(res)
+
+        if not safe_results:
+            raise OSError(f"No safe addresses for host {host!r}")
+
+        if key is None:
+            return safe_results
+
+        pinned = pinned_ips.get(key)
+        if pinned is None:
+            pinned = str(ipaddress.ip_address(safe_results[0][4][0]))
+            pinned_ips[key] = pinned
+
+        pinned_results = [
+            res
+            for res in safe_results
+            if str(ipaddress.ip_address(res[4][0])) == pinned
+        ]
+        if not pinned_results:
+            raise OSError(
+                f"DNS rebinding blocked for host {host!r}: "
+                f"pinned {pinned} no longer present"
+            )
+        return pinned_results
 
     socket.getaddrinfo = _guarded_getaddrinfo
     try:

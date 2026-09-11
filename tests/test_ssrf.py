@@ -74,6 +74,45 @@ class TestSsrfProtection(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(OSError):
                     socket.getaddrinfo("evil.example", 80)
 
+    def test_dns_guard_pins_first_safe_ip(self) -> None:
+        calls = {"n": 0}
+        first = [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", 0)),
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("1.1.1.1", 0)),
+        ]
+        rebound = [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("1.1.1.1", 0)),
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", 0)),
+        ]
+
+        def fake_getaddrinfo(*_args: object, **_kwargs: object) -> list[tuple[object, ...]]:
+            calls["n"] += 1
+            return first if calls["n"] == 1 else rebound
+
+        with patch("socket.getaddrinfo", side_effect=fake_getaddrinfo):
+            with _safe_dns_resolution():
+                first_lookup = socket.getaddrinfo("cdn.example", 443)
+                self.assertEqual(first_lookup[0][4][0], "8.8.8.8")
+                self.assertEqual(len(first_lookup), 1)
+                second_lookup = socket.getaddrinfo("cdn.example", 443)
+                self.assertEqual(second_lookup[0][4][0], "8.8.8.8")
+                self.assertEqual(len(second_lookup), 1)
+
+    def test_dns_guard_blocks_when_pinned_ip_disappears(self) -> None:
+        calls = {"n": 0}
+        first = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", 0))]
+        rebound = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("1.1.1.1", 0))]
+
+        def fake_getaddrinfo(*_args: object, **_kwargs: object) -> list[tuple[object, ...]]:
+            calls["n"] += 1
+            return first if calls["n"] == 1 else rebound
+
+        with patch("socket.getaddrinfo", side_effect=fake_getaddrinfo):
+            with _safe_dns_resolution():
+                socket.getaddrinfo("cdn.example", 443)
+                with self.assertRaises(OSError):
+                    socket.getaddrinfo("cdn.example", 443)
+
     async def test_download_media_blocks_ssrf(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             with self.assertRaises(DownloadError) as ctx:
