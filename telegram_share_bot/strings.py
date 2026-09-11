@@ -95,6 +95,15 @@ CONFIG_MISSING_ACCESS_CONTROL = (
     "Set ALLOWED_USER_IDS to a comma-separated list of Telegram user ids, "
     "or set ALLOW_PUBLIC=true to intentionally allow everyone."
 )
+CONFIG_STORAGE_CHAT_NOT_PRIVATE = (
+    "STORAGE_CHAT_ID must be a private chat (your user id). "
+    "For a shared group/channel set ALLOW_SHARED_STORAGE=true "
+    "(not recommended — downloaded media is visible there)."
+)
+CONFIG_STORAGE_CHAT_UNREACHABLE = (
+    "Bot cannot access STORAGE_CHAT_ID. Open a private chat with the bot "
+    "and /start, or fix the id."
+)
 STARTUP_POLLING = "Starting telegram-share-bot (polling)"
 
 # --- Internal errors that may surface to users -------------------------------

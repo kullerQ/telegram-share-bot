@@ -29,7 +29,7 @@ Without `/setinlinefeedback`, the bot cannot learn which result you chose, so th
 
    **Access control is mandatory.** Set `ALLOWED_USER_IDS` to your Telegram user id(s), or explicitly set `ALLOW_PUBLIC=true` if you intend to run an open downloader.
 
-   **Storage chat privacy:** set `STORAGE_CHAT_ID` to your private user id (or a private channel only you can read). Do not use a shared group — every downloaded file is briefly uploaded there.
+   **Storage chat privacy:** set `STORAGE_CHAT_ID` to your private user id (or a private channel only you can read). Do not use a shared group — every downloaded file is briefly uploaded there. The bot refuses non-private storage chats unless `ALLOW_SHARED_STORAGE=true`.
 
 2. Create host dirs and fix ownership (container runs as uid/gid `1000`):
    ```bash

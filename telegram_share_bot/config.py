@@ -30,6 +30,7 @@ DEFAULT_MAX_CONCURRENT_DOWNLOADS = 3
 DEFAULT_MAX_DOWNLOADS_PER_USER = 3
 DEFAULT_DOWNLOAD_COOLDOWN_SECONDS = 2
 DEFAULT_ALLOW_PUBLIC = False
+DEFAULT_ALLOW_SHARED_STORAGE = False
 DEFAULT_ALLOWED_MEDIA_HOSTS = frozenset(
     {
         "youtube.com",
@@ -66,6 +67,7 @@ class Settings:
     download_cooldown_seconds: int = DEFAULT_DOWNLOAD_COOLDOWN_SECONDS
     allowed_user_ids: frozenset[int] = frozenset()
     allow_public: bool = DEFAULT_ALLOW_PUBLIC
+    allow_shared_storage: bool = DEFAULT_ALLOW_SHARED_STORAGE
     # None means allow any host (`ALLOWED_MEDIA_HOSTS=*`).
     allowed_media_hosts: frozenset[str] | None = DEFAULT_ALLOWED_MEDIA_HOSTS
 
@@ -379,6 +381,13 @@ def load_settings(env_file: Path = _ENV_PATH) -> Settings:
         env_file=env_file,
     )
 
+    allow_shared_storage = parse_bool(
+        "ALLOW_SHARED_STORAGE",
+        os.getenv("ALLOW_SHARED_STORAGE"),
+        default=DEFAULT_ALLOW_SHARED_STORAGE,
+        env_file=env_file,
+    )
+
     if not allowed_user_ids and not allow_public:
         raise RuntimeError(strings.CONFIG_MISSING_ACCESS_CONTROL)
 
@@ -401,5 +410,6 @@ def load_settings(env_file: Path = _ENV_PATH) -> Settings:
         download_cooldown_seconds=download_cooldown_seconds,
         allowed_user_ids=allowed_user_ids,
         allow_public=allow_public,
+        allow_shared_storage=allow_shared_storage,
         allowed_media_hosts=allowed_media_hosts,
     )

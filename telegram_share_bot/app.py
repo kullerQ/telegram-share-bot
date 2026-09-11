@@ -6,6 +6,8 @@ import asyncio
 import logging
 from pathlib import Path
 
+from telegram.constants import ChatType
+from telegram.error import TelegramError
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -21,7 +23,11 @@ from telegram.ext import (
 
 from telegram_share_bot import strings
 from telegram_share_bot.cache import MediaCache
-from telegram_share_bot.config import DEFAULT_UPLOAD_TIMEOUT_SECONDS, load_settings
+from telegram_share_bot.config import (
+    DEFAULT_UPLOAD_TIMEOUT_SECONDS,
+    Settings,
+    load_settings,
+)
 from telegram_share_bot.downloader import cleanup_stale_downloads
 from telegram_share_bot.handlers import (
     cancel_callback,
@@ -41,6 +47,19 @@ App = Application[
     dict[str, object],
     JobQueue[ContextTypes.DEFAULT_TYPE],
 ]
+
+
+async def _validate_storage_chat(application: App, settings: Settings) -> None:
+    """Ensure STORAGE_CHAT_ID is reachable and private unless opted out."""
+    try:
+        chat = await application.bot.get_chat(settings.storage_chat_id)
+    except TelegramError as exc:
+        raise RuntimeError(strings.CONFIG_STORAGE_CHAT_UNREACHABLE) from exc
+
+    if settings.allow_shared_storage:
+        return
+    if chat.type != ChatType.PRIVATE:
+        raise RuntimeError(strings.CONFIG_STORAGE_CHAT_NOT_PRIVATE)
 
 
 async def _post_init(application: App) -> None:
@@ -65,6 +84,9 @@ async def _post_init(application: App) -> None:
                 if attempt == 3:
                     raise
                 await asyncio.sleep(1.0)
+
+    if isinstance(settings, Settings):
+        await _validate_storage_chat(application, settings)
 
 
 def build_application() -> App:
