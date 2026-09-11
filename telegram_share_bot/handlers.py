@@ -163,12 +163,11 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     bot_username = context.bot.username or strings.FALLBACK_BOT_USERNAME
-    chat_id = update.effective_chat.id
+    bot_name = context.bot.first_name or strings.BOT_DISPLAY_NAME
     text = strings.START_MESSAGE.format(
-        bot_name=strings.BOT_DISPLAY_NAME,
+        bot_name=bot_name,
         bot_username=bot_username,
         example_url=strings.EXAMPLE_MEDIA_URL,
-        chat_id=chat_id,
     )
     await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
 
