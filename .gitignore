@@ -9,5 +9,6 @@ __pycache__/
 .ruff_cache/
 .pytest_cache/
 downloads/
+logs/
 *.log
 .DS_Store
