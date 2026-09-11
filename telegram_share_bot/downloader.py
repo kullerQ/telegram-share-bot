@@ -112,6 +112,31 @@ def is_safe_media_url(url: str) -> bool:
         return False
 
 
+def is_allowed_media_host(
+    url: str, allowed_hosts: frozenset[str] | None
+) -> bool:
+    """Return True if the URL hostname matches the configured host allowlist.
+
+    ``allowed_hosts is None`` means any host is permitted.
+    Matching is suffix-based (``video.tiktok.com`` matches ``tiktok.com``).
+    """
+    if allowed_hosts is None:
+        return True
+    try:
+        hostname = urlsplit(url).hostname
+        if not hostname:
+            return False
+        host = hostname.strip().lower().rstrip(".").removeprefix("www.")
+        if not host:
+            return False
+        for allowed in allowed_hosts:
+            if host == allowed or host.endswith("." + allowed):
+                return True
+        return False
+    except Exception:
+        return False
+
+
 @contextlib.contextmanager
 def _safe_dns_resolution() -> Generator[None, None, None]:
     """Re-validate DNS lookups and pin each host to its first safe IP.
@@ -447,7 +472,10 @@ async def download_media(
     download_dir: Path,
     max_file_bytes: int,
     timeout_seconds: int,
+    allowed_hosts: frozenset[str] | None = None,
 ) -> DownloadedMedia:
+    if not is_allowed_media_host(url, allowed_hosts):
+        raise DownloadError(strings.DOWNLOAD_HOST_NOT_ALLOWED)
     if not is_safe_media_url(url):
         raise DownloadError(strings.DOWNLOAD_UNSAFE_URL)
 
@@ -607,7 +635,10 @@ async def get_direct_stream(
     url: str,
     max_file_bytes: int,
     timeout_seconds: int = 15,
+    allowed_hosts: frozenset[str] | None = None,
 ) -> DirectMediaStream | None:
+    if not is_allowed_media_host(url, allowed_hosts):
+        return None
     if not is_safe_media_url(url):
         return None
 

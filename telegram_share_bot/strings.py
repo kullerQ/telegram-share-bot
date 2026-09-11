@@ -74,6 +74,7 @@ DOWNLOAD_EXCEEDS_LIMIT = "File exceeds the {max_mb} MB limit."
 DOWNLOAD_FAILED_GENERIC = "Download failed."
 DOWNLOAD_TIMED_OUT = "Download timed out after {timeout_seconds} seconds."
 DOWNLOAD_UNSAFE_URL = "Unsafe or internal URLs are not allowed."
+DOWNLOAD_HOST_NOT_ALLOWED = "That media host is not allowed."
 DOWNLOAD_FAILED_INCOMPLETE = (
     "Download was aborted or incomplete (file may exceed limits)."
 )

@@ -55,6 +55,7 @@ class TestConcurrencyLimiter(unittest.IsolatedAsyncioTestCase):
         # Explicit public mode for the concurrency stress test.
         mock_settings.allowed_user_ids = frozenset()
         mock_settings.allow_public = True
+        mock_settings.allowed_media_hosts = None
 
         context = MagicMock()
         context.application.bot_data = {

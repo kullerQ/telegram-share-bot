@@ -14,6 +14,7 @@ from telegram_share_bot.downloader import (
     _safe_dns_resolution,
     download_media,
     get_direct_stream,
+    is_allowed_media_host,
     is_safe_media_url,
 )
 
@@ -131,6 +132,23 @@ class TestSsrfProtection(unittest.IsolatedAsyncioTestCase):
             timeout_seconds=5,
         )
         self.assertIsNone(stream)
+
+    def test_media_host_allowlist(self) -> None:
+        allowed = frozenset({"youtube.com", "tiktok.com"})
+        self.assertTrue(
+            is_allowed_media_host(
+                "https://www.youtube.com/watch?v=dQw4w9WgXcQ", allowed
+            )
+        )
+        self.assertTrue(
+            is_allowed_media_host("https://m.tiktok.com/@u/video/1", allowed)
+        )
+        self.assertFalse(
+            is_allowed_media_host("https://example.com/video.mp4", allowed)
+        )
+        self.assertTrue(
+            is_allowed_media_host("https://example.com/video.mp4", None)
+        )
 
 
 if __name__ == "__main__":

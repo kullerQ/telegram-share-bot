@@ -195,6 +195,22 @@ class TestConfigValidation(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             parse_user_ids("ALLOWED_USER_IDS", "not-an-id")
 
+    def test_parse_media_hosts_default_and_star(self) -> None:
+        from telegram_share_bot.config import (
+            DEFAULT_ALLOWED_MEDIA_HOSTS,
+            parse_media_hosts,
+        )
+
+        self.assertEqual(
+            parse_media_hosts("ALLOWED_MEDIA_HOSTS", None),
+            DEFAULT_ALLOWED_MEDIA_HOSTS,
+        )
+        self.assertIsNone(parse_media_hosts("ALLOWED_MEDIA_HOSTS", "*"))
+        self.assertEqual(
+            parse_media_hosts("ALLOWED_MEDIA_HOSTS", "Example.COM, youtube.com"),
+            frozenset({"example.com", "youtube.com"}),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

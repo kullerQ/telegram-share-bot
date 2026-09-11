@@ -29,6 +29,20 @@ DEFAULT_DELETE_STORAGE_MESSAGES = True
 DEFAULT_MAX_CONCURRENT_DOWNLOADS = 3
 DEFAULT_MAX_DOWNLOADS_PER_USER = 3
 DEFAULT_ALLOW_PUBLIC = False
+DEFAULT_ALLOWED_MEDIA_HOSTS = frozenset(
+    {
+        "youtube.com",
+        "youtu.be",
+        "youtube-nocookie.com",
+        "x.com",
+        "twitter.com",
+        "vxtwitter.com",
+        "fxtwitter.com",
+        "fixupx.com",
+        "instagram.com",
+        "tiktok.com",
+    }
+)
 
 _TRUE_VALUES = frozenset({"true", "1", "yes", "y", "on"})
 _FALSE_VALUES = frozenset({"false", "0", "no", "n", "off"})
@@ -50,6 +64,38 @@ class Settings:
     max_downloads_per_user: int = DEFAULT_MAX_DOWNLOADS_PER_USER
     allowed_user_ids: frozenset[int] = frozenset()
     allow_public: bool = DEFAULT_ALLOW_PUBLIC
+    # None means allow any host (`ALLOWED_MEDIA_HOSTS=*`).
+    allowed_media_hosts: frozenset[str] | None = DEFAULT_ALLOWED_MEDIA_HOSTS
+
+
+def parse_media_hosts(
+    param_name: str,
+    raw_value: str | None,
+) -> frozenset[str] | None:
+    """Parse ALLOWED_MEDIA_HOSTS.
+
+    - unset/empty → default platform allowlist
+    - ``*`` → allow any host (None)
+    - comma-separated host suffixes otherwise
+    """
+    _ = param_name
+    if raw_value is None or not raw_value.strip():
+        return DEFAULT_ALLOWED_MEDIA_HOSTS
+    stripped = raw_value.strip()
+    if stripped == "*":
+        return None
+    hosts: set[str] = set()
+    for part in stripped.split(","):
+        host = part.strip().lower().removeprefix("www.").rstrip(".")
+        if not host or "/" in host or "://" in host:
+            raise RuntimeError(
+                f"Invalid configuration for {param_name}='{stripped}': "
+                "Expected comma-separated hostnames or '*'."
+            )
+        hosts.add(host)
+    if not hosts:
+        return DEFAULT_ALLOWED_MEDIA_HOSTS
+    return frozenset(hosts)
 
 
 def parse_user_ids(
@@ -325,6 +371,11 @@ def load_settings(env_file: Path = _ENV_PATH) -> Settings:
     if not allowed_user_ids and not allow_public:
         raise RuntimeError(strings.CONFIG_MISSING_ACCESS_CONTROL)
 
+    allowed_media_hosts = parse_media_hosts(
+        "ALLOWED_MEDIA_HOSTS",
+        os.getenv("ALLOWED_MEDIA_HOSTS"),
+    )
+
     return Settings(
         bot_token=token,
         storage_chat_id=storage_chat_id,
@@ -338,4 +389,5 @@ def load_settings(env_file: Path = _ENV_PATH) -> Settings:
         max_downloads_per_user=max_downloads_per_user,
         allowed_user_ids=allowed_user_ids,
         allow_public=allow_public,
+        allowed_media_hosts=allowed_media_hosts,
     )
