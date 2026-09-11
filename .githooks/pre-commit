@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Runs the pre-commit framework (ruff + mypy). Keep this file LF-only.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+HOOK_DIR="$(cd "$(dirname "$0")" && pwd)"
+CONFIG="$ROOT/.pre-commit-config.yaml"
+ARGS=(hook-impl --config="$CONFIG" --hook-type=pre-commit --hook-dir="$HOOK_DIR" -- "$@")
+
+if [ -x "$ROOT/.venv/Scripts/python.exe" ]; then
+  exec "$ROOT/.venv/Scripts/python.exe" -m pre_commit "${ARGS[@]}"
+elif [ -x "$ROOT/.venv/bin/python" ]; then
+  exec "$ROOT/.venv/bin/python" -m pre_commit "${ARGS[@]}"
+elif command -v pre-commit >/dev/null 2>&1; then
+  exec pre-commit "${ARGS[@]}"
+fi
+
+echo "pre-commit not found. Run: pip install -r requirements-dev.txt" >&2
+exit 1

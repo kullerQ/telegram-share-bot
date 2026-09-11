@@ -60,11 +60,13 @@ Without `/setinlinefeedback`, the bot cannot learn which result you chose, so th
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements-dev.txt
-pre-commit install
+git config core.hooksPath .githooks
 copy .env.example .env
 ```
 
-`pre-commit install` wires a git hook that runs **ruff** and **mypy --strict** (same as CI) before each commit. Run `pre-commit run --all-files` to check everything without committing.
+`core.hooksPath` points Git at the repo’s `.githooks/pre-commit` script (LF line endings — required on Windows). That hook runs **ruff** and **mypy --strict** before each commit. Run `pre-commit run --all-files` to check everything without committing.
+
+If a commit seems to skip checks, make sure Cursor’s commit UI does **not** have “Skip hook verification” / `--no-verify` enabled.
 
 Edit `.env`:
 
