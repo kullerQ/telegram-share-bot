@@ -1,6 +1,7 @@
 services:
   bot:
     image: ghcr.io/kullerq/telegram-share-bot:latest
+    pull_policy: always
     container_name: telegram-share-bot
     restart: unless-stopped
     env_file:
