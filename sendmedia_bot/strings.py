@@ -75,6 +75,7 @@ DOWNLOAD_UNSAFE_URL = "Unsafe or internal URLs are not allowed."
 DOWNLOAD_FAILED_INCOMPLETE = (
     "Download was aborted or incomplete (file may exceed limits)."
 )
+DOWNLOAD_LIVE_UNSUPPORTED = "Live streams cannot be downloaded."
 
 # --- Config / startup (operator-facing) --------------------------------------
 

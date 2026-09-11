@@ -179,14 +179,19 @@ def _pick_info(info: Any) -> dict[str, Any]:
     if not isinstance(info, dict):
         raise DownloadError(strings.DOWNLOAD_EXTRACT_FAILED)
     if "entries" not in info:
-        return cast(dict[str, Any], info)
-    raw_entries = info.get("entries")
-    if raw_entries is None:
-        raise DownloadError(strings.DOWNLOAD_PLAYLIST_UNSUPPORTED)
-    entries = [entry for entry in list(raw_entries) if isinstance(entry, dict)]
-    if not entries:
-        raise DownloadError(strings.DOWNLOAD_PLAYLIST_UNSUPPORTED)
-    return cast(dict[str, Any], entries[0])
+        picked = cast(dict[str, Any], info)
+    else:
+        raw_entries = info.get("entries")
+        if raw_entries is None:
+            raise DownloadError(strings.DOWNLOAD_PLAYLIST_UNSUPPORTED)
+        entries = [entry for entry in list(raw_entries) if isinstance(entry, dict)]
+        if not entries:
+            raise DownloadError(strings.DOWNLOAD_PLAYLIST_UNSUPPORTED)
+        picked = cast(dict[str, Any], entries[0])
+
+    if picked.get("is_live") or picked.get("live_status") in ("is_live", "is_upcoming"):
+        raise DownloadError(strings.DOWNLOAD_LIVE_UNSUPPORTED)
+    return picked
 
 
 def _download_sync(
@@ -212,8 +217,12 @@ def _download_sync(
             raise DownloadError(
                 strings.DOWNLOAD_TIMED_OUT.format(timeout_seconds=timeout_seconds)
             )
+        total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
         downloaded = d.get("downloaded_bytes") or 0
-        if downloaded > max_file_bytes:
+        if (
+            (isinstance(total, (int, float)) and total > max_file_bytes)
+            or (isinstance(downloaded, (int, float)) and downloaded > max_file_bytes)
+        ):
             raise DownloadError(
                 strings.DOWNLOAD_EXCEEDS_LIMIT.format(
                     max_mb=max_file_bytes // (1024 * 1024)
@@ -246,18 +255,21 @@ def _download_sync(
                     strings.DOWNLOAD_TIMED_OUT.format(timeout_seconds=timeout_seconds)
                 )
 
-            extracted = ydl.extract_info(url, download=True)
+            # Probe metadata first so live streams abort before any media bytes land.
+            extracted = ydl.extract_info(url, download=False)
             if not isinstance(extracted, dict):
                 raise DownloadError(strings.DOWNLOAD_EXTRACT_FAILED)
+
+            info = _pick_info(extracted)
 
             if abort_event is not None and abort_event.is_set():
                 raise DownloadError(
                     strings.DOWNLOAD_TIMED_OUT.format(timeout_seconds=timeout_seconds)
                 )
 
-            info = _pick_info(extracted)
-            if info.get("is_live"):
-                raise DownloadError("Live streams cannot be downloaded.")
+            processed = ydl.process_ie_result(extracted, download=True)
+            if isinstance(processed, dict):
+                info = _pick_info(processed)
 
             path = _resolve_downloaded_path(info, work_dir, ydl)
             if not path.exists():
