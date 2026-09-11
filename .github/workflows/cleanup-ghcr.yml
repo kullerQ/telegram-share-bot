@@ -20,16 +20,6 @@ jobs:
       packages: write
       contents: read
     steps:
-      # Buildx provenance/SBOM creates extra untagged versions per push.
-      # Remove those first so min-versions-to-keep counts real releases.
-      - name: Delete untagged package versions
-        uses: actions/delete-package-versions@v5
-        with:
-          package-name: ${{ github.event.repository.name }}
-          package-type: container
-          delete-only-untagged-versions: true
-          min-versions-to-keep: 0
-
       - name: Keep only the 3 newest tagged versions
         uses: actions/delete-package-versions@v5
         with:
