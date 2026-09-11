@@ -113,6 +113,7 @@ Tap **Send media**. A placeholder appears first; the bot downloads in the backgr
 - Download timeout defaults to 90 seconds.
 - Global concurrent downloads default to 3; per-user in-flight downloads default to 3. Set either to `0` to disable that limit.
 - User URLs are limited to YouTube / X / Instagram / TikTok by default (`ALLOWED_MEDIA_HOSTS=*` allows any host).
+- TikTok (including `vm.tiktok.com` / `vt.tiktok.com` short links) needs `curl-cffi` for browser impersonation — it is pinned in `requirements.txt`.
 - `HTTPS_ONLY` defaults to true (set `false` to allow plain `http://` media URLs).
 - Unsupported or oversize URLs replace the placeholder with an error message.
 
