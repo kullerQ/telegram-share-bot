@@ -99,6 +99,64 @@ class TestMediaCache(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cached.title, "Song V2")
         self.assertEqual(cached.duration, 185)
 
+    async def test_get_recovers_when_db_file_deleted(self) -> None:
+        url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+        await self.cache.set(
+            url=url,
+            file_id="file_before_delete",
+            kind=MediaKind.VIDEO,
+            title="Before",
+            duration=10,
+        )
+        self.assertTrue(self.db_path.exists())
+        self.db_path.unlink()
+        for suffix in ("-wal", "-shm", "-journal"):
+            Path(f"{self.db_path}{suffix}").unlink(missing_ok=True)
+
+        # Cache miss (recreated empty DB), no exception
+        self.assertIsNone(await self.cache.get(url))
+        self.assertTrue(self.db_path.exists())
+
+        # Writes work again after recovery
+        await self.cache.set(
+            url=url,
+            file_id="file_after_recreate",
+            kind=MediaKind.VIDEO,
+            title="After",
+            duration=11,
+        )
+        cached = await self.cache.get(url)
+        self.assertIsNotNone(cached)
+        assert cached is not None
+        self.assertEqual(cached.file_id, "file_after_recreate")
+
+    async def test_set_recovers_when_db_file_deleted(self) -> None:
+        url = "https://www.youtube.com/watch?v=abc12345678"
+        self.db_path.unlink(missing_ok=True)
+        for suffix in ("-wal", "-shm", "-journal"):
+            Path(f"{self.db_path}{suffix}").unlink(missing_ok=True)
+
+        await self.cache.set(
+            url=url,
+            file_id="recovered_id",
+            kind=MediaKind.VIDEO,
+            title="Recovered",
+            duration=5,
+        )
+        cached = await self.cache.get(url)
+        self.assertIsNotNone(cached)
+        assert cached is not None
+        self.assertEqual(cached.file_id, "recovered_id")
+
+    async def test_evict_when_db_file_deleted(self) -> None:
+        url = "https://x.com/user/status/999"
+        self.db_path.unlink(missing_ok=True)
+        for suffix in ("-wal", "-shm", "-journal"):
+            Path(f"{self.db_path}{suffix}").unlink(missing_ok=True)
+
+        # Must not raise
+        await self.cache.evict(url)
+
 
 if __name__ == "__main__":
     unittest.main()
