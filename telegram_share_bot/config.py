@@ -67,6 +67,7 @@ DEFAULT_CAPTION_MODE = CaptionMode.MEDIA
 TELEGRAM_CAPTION_MAX_LENGTH = 1024
 DEFAULT_SLIDESHOW_SLIDE_MS = 2500
 DEFAULT_SLIDESHOW_MAX_IMAGES = 35
+DEFAULT_SLIDESHOW_IMAGES_LOOP = True
 
 _TRUE_VALUES = frozenset({"true", "1", "yes", "y", "on"})
 _FALSE_VALUES = frozenset({"false", "0", "no", "n", "off"})
@@ -96,6 +97,7 @@ class Settings:
     caption_mode: CaptionMode = DEFAULT_CAPTION_MODE
     slideshow_slide_ms: int = DEFAULT_SLIDESHOW_SLIDE_MS
     slideshow_max_images: int = DEFAULT_SLIDESHOW_MAX_IMAGES
+    slideshow_images_loop: bool = DEFAULT_SLIDESHOW_IMAGES_LOOP
 
 
 def parse_caption_mode(
@@ -478,6 +480,13 @@ def load_settings(env_file: Path = _ENV_PATH) -> Settings:
         env_file=env_file,
     )
 
+    slideshow_images_loop = parse_bool(
+        "SLIDESHOW_IMAGES_LOOP",
+        os.getenv("SLIDESHOW_IMAGES_LOOP"),
+        default=DEFAULT_SLIDESHOW_IMAGES_LOOP,
+        env_file=env_file,
+    )
+
     return Settings(
         bot_token=token,
         storage_chat_id=storage_chat_id,
@@ -498,4 +507,5 @@ def load_settings(env_file: Path = _ENV_PATH) -> Settings:
         caption_mode=caption_mode,
         slideshow_slide_ms=slideshow_slide_ms,
         slideshow_max_images=slideshow_max_images,
+        slideshow_images_loop=slideshow_images_loop,
     )

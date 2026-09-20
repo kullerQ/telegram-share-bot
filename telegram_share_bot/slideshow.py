@@ -23,6 +23,7 @@ from yt_dlp.networking.impersonate import ImpersonateTarget
 
 from telegram_share_bot import strings
 from telegram_share_bot.config import (
+    DEFAULT_SLIDESHOW_IMAGES_LOOP,
     DEFAULT_SLIDESHOW_MAX_IMAGES,
     DEFAULT_SLIDESHOW_SLIDE_MS,
 )
@@ -363,20 +364,33 @@ def plan_slideshow_timeline(
     per_slide: float,
     audio_duration: float | None,
     *,
+    images_loop: bool = DEFAULT_SLIDESHOW_IMAGES_LOOP,
     max_slots: int = 120,
 ) -> tuple[float, list[float]]:
     """Plan total length and per-slot durations.
 
-    When audio is present the video matches the full audio length. Images are
-    shown at ``per_slide`` when that covers the audio (looping as needed); if
-    there are more images than the preferred cadence allows, slide duration is
+    When ``images_loop`` is true (default): if audio is present the video matches
+    the full audio length. Images are shown at ``per_slide`` (looping as needed);
+    if there are more images than the preferred cadence allows, slide duration is
     shortened so every image appears at least once within the audio.
+
+    When ``images_loop`` is false: one pass through the images at ``per_slide``,
+    then trim the audio to that length. A single-image post still uses the full
+    audio (same as looping for ``image_count == 1``).
     """
     if image_count < 1:
         raise ValueError("image_count must be >= 1")
     per_slide = max(0.5, per_slide)
 
-    if audio_duration is not None and audio_duration > 0:
+    # Single-image posts always fit the full audio when available.
+    fit_full_audio = (
+        audio_duration is not None
+        and audio_duration > 0
+        and (images_loop or image_count == 1)
+    )
+
+    if fit_full_audio:
+        assert audio_duration is not None
         total = float(audio_duration)
         if image_count * per_slide > total:
             # Fit every unique image into the audio window.
@@ -399,6 +413,7 @@ def plan_slideshow_timeline(
             durations.append(last)
         return total, durations
 
+    # images_loop=false with 2+ images (or no audio): one pass, trim audio.
     total = image_count * per_slide
     return total, [per_slide] * image_count
 
@@ -689,6 +704,7 @@ def build_slideshow_video(
     max_file_bytes: int,
     timeout_seconds: int,
     slide_ms: int = DEFAULT_SLIDESHOW_SLIDE_MS,
+    images_loop: bool = DEFAULT_SLIDESHOW_IMAGES_LOOP,
     abort_event: threading.Event | None = None,
     https_only: bool = False,
 ) -> DownloadedMedia:
@@ -768,6 +784,7 @@ def build_slideshow_video(
         len(image_paths),
         per_slide,
         audio_duration if audio_path is not None else None,
+        images_loop=images_loop,
     )
     sequenced_images = _cycle_images(image_paths, len(slide_durations))
     unique_count = len(image_paths)
@@ -854,6 +871,7 @@ def download_tiktok_slideshow(
     timeout_seconds: int,
     slide_ms: int = DEFAULT_SLIDESHOW_SLIDE_MS,
     max_images: int = DEFAULT_SLIDESHOW_MAX_IMAGES,
+    images_loop: bool = DEFAULT_SLIDESHOW_IMAGES_LOOP,
     abort_event: threading.Event | None = None,
     https_only: bool = False,
     allowed_hosts: frozenset[str] | None = None,
@@ -878,6 +896,7 @@ def download_tiktok_slideshow(
         max_file_bytes=max_file_bytes,
         timeout_seconds=timeout_seconds,
         slide_ms=slide_ms,
+        images_loop=images_loop,
         abort_event=abort_event,
         https_only=https_only,
     )

@@ -21,7 +21,11 @@ from urllib.parse import urlsplit
 import yt_dlp
 
 from telegram_share_bot import strings
-from telegram_share_bot.config import TELEGRAM_CAPTION_MAX_LENGTH, CaptionMode
+from telegram_share_bot.config import (
+    DEFAULT_SLIDESHOW_IMAGES_LOOP,
+    TELEGRAM_CAPTION_MAX_LENGTH,
+    CaptionMode,
+)
 from telegram_share_bot.normalizer import safe_url_for_log
 
 logger = logging.getLogger(__name__)
@@ -375,6 +379,7 @@ def _download_sync(
     allowed_hosts: frozenset[str] | None = None,
     slideshow_slide_ms: int = 2500,
     slideshow_max_images: int = 35,
+    slideshow_images_loop: bool = DEFAULT_SLIDESHOW_IMAGES_LOOP,
 ) -> DownloadedMedia:
     if https_only and not is_https_url(url):
         raise DownloadError(strings.DOWNLOAD_HTTPS_REQUIRED)
@@ -397,6 +402,7 @@ def _download_sync(
             timeout_seconds=timeout_seconds,
             slide_ms=slideshow_slide_ms,
             max_images=slideshow_max_images,
+            images_loop=slideshow_images_loop,
             abort_event=abort_event,
             https_only=https_only,
             allowed_hosts=allowed_hosts,
@@ -563,6 +569,7 @@ async def download_media(
     https_only: bool = False,
     slideshow_slide_ms: int = 2500,
     slideshow_max_images: int = 35,
+    slideshow_images_loop: bool = DEFAULT_SLIDESHOW_IMAGES_LOOP,
 ) -> DownloadedMedia:
     if not is_allowed_media_host(url, allowed_hosts):
         raise DownloadError(strings.DOWNLOAD_HOST_NOT_ALLOWED)
@@ -587,6 +594,7 @@ async def download_media(
                 allowed_hosts=allowed_hosts,
                 slideshow_slide_ms=slideshow_slide_ms,
                 slideshow_max_images=slideshow_max_images,
+                slideshow_images_loop=slideshow_images_loop,
             ),
             timeout=timeout_seconds,
         )

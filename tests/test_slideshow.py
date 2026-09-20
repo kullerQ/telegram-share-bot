@@ -179,6 +179,21 @@ class TestPlanSlideshowTimeline(unittest.TestCase):
         self.assertAlmostEqual(sum(durs), 27.0, places=5)
         self.assertAlmostEqual(durs[0], 27.0 / 20, places=5)
 
+    def test_once_mode_trims_audio_after_one_pass(self) -> None:
+        total, durs = plan_slideshow_timeline(
+            4, 2.5, 27.0, images_loop=False
+        )
+        self.assertEqual(total, 10.0)
+        self.assertEqual(durs, [2.5, 2.5, 2.5, 2.5])
+
+    def test_once_mode_single_image_still_fits_full_audio(self) -> None:
+        total, durs = plan_slideshow_timeline(
+            1, 2.5, 27.0, images_loop=False
+        )
+        self.assertEqual(total, 27.0)
+        self.assertEqual(len(durs), 11)
+        self.assertAlmostEqual(sum(durs), 27.0, places=3)
+
     def test_cycle_images(self) -> None:
         paths = [Path("a.jpg"), Path("b.jpg")]
         cycled = _cycle_images(paths, 5)

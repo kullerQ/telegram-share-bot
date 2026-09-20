@@ -387,6 +387,7 @@ async def url_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 https_only=settings.https_only,
                 slideshow_slide_ms=settings.slideshow_slide_ms,
                 slideshow_max_images=settings.slideshow_max_images,
+                slideshow_images_loop=settings.slideshow_images_loop,
             )
             sent_msg = await _send_media_to_chat(
                 context,
@@ -732,6 +733,7 @@ async def _prepare_inline_media(
                 https_only=settings.https_only,
                 slideshow_slide_ms=settings.slideshow_slide_ms,
                 slideshow_max_images=settings.slideshow_max_images,
+                slideshow_images_loop=settings.slideshow_images_loop,
             )
             if inline_message_id in _cancelled_set(context):
                 return
