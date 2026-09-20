@@ -65,6 +65,8 @@ class CaptionMode(str, Enum):
 DEFAULT_CAPTION_MODE = CaptionMode.MEDIA
 # Telegram Bot API caption limit for most media types.
 TELEGRAM_CAPTION_MAX_LENGTH = 1024
+DEFAULT_SLIDESHOW_SLIDE_MS = 2500
+DEFAULT_SLIDESHOW_MAX_IMAGES = 35
 
 _TRUE_VALUES = frozenset({"true", "1", "yes", "y", "on"})
 _FALSE_VALUES = frozenset({"false", "0", "no", "n", "off"})
@@ -92,6 +94,8 @@ class Settings:
     # None means allow any host (`ALLOWED_MEDIA_HOSTS=*`).
     allowed_media_hosts: frozenset[str] | None = DEFAULT_ALLOWED_MEDIA_HOSTS
     caption_mode: CaptionMode = DEFAULT_CAPTION_MODE
+    slideshow_slide_ms: int = DEFAULT_SLIDESHOW_SLIDE_MS
+    slideshow_max_images: int = DEFAULT_SLIDESHOW_MAX_IMAGES
 
 
 def parse_caption_mode(
@@ -456,6 +460,24 @@ def load_settings(env_file: Path = _ENV_PATH) -> Settings:
         env_file=env_file,
     )
 
+    slideshow_slide_ms = parse_int(
+        "SLIDESHOW_SLIDE_MS",
+        os.getenv("SLIDESHOW_SLIDE_MS"),
+        default=DEFAULT_SLIDESHOW_SLIDE_MS,
+        min_value=500,
+        max_value=10000,
+        env_file=env_file,
+    )
+
+    slideshow_max_images = parse_int(
+        "SLIDESHOW_MAX_IMAGES",
+        os.getenv("SLIDESHOW_MAX_IMAGES"),
+        default=DEFAULT_SLIDESHOW_MAX_IMAGES,
+        min_value=1,
+        max_value=100,
+        env_file=env_file,
+    )
+
     return Settings(
         bot_token=token,
         storage_chat_id=storage_chat_id,
@@ -474,4 +496,6 @@ def load_settings(env_file: Path = _ENV_PATH) -> Settings:
         https_only=https_only,
         allowed_media_hosts=allowed_media_hosts,
         caption_mode=caption_mode,
+        slideshow_slide_ms=slideshow_slide_ms,
+        slideshow_max_images=slideshow_max_images,
     )

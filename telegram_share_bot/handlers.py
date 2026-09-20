@@ -383,6 +383,8 @@ async def url_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 timeout_seconds=settings.download_timeout_seconds,
                 allowed_hosts=settings.allowed_media_hosts,
                 https_only=settings.https_only,
+                slideshow_slide_ms=settings.slideshow_slide_ms,
+                slideshow_max_images=settings.slideshow_max_images,
             )
             sent_msg = await _send_media_to_chat(
                 context,
@@ -723,6 +725,8 @@ async def _prepare_inline_media(
                 timeout_seconds=settings.download_timeout_seconds,
                 allowed_hosts=settings.allowed_media_hosts,
                 https_only=settings.https_only,
+                slideshow_slide_ms=settings.slideshow_slide_ms,
+                slideshow_max_images=settings.slideshow_max_images,
             )
             if inline_message_id in _cancelled_set(context):
                 return

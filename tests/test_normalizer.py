@@ -68,6 +68,20 @@ class TestNormalizeUrl(unittest.TestCase):
         )
         self.assertEqual(normalize_url(url), expected)
 
+    def test_tiktok_photo_variants(self) -> None:
+        expected = "https://www.tiktok.com/@szia25.2/photo/7687274479570980128"
+        variants = [
+            "https://www.tiktok.com/@szia25.2/photo/7687274479570980128",
+            "https://tiktok.com/@szia25.2/photo/7687274479570980128",
+            (
+                "https://www.tiktok.com/@szia25.2/photo/7687274479570980128"
+                "?_r=1&_t=ZS-99tPcMTMiKW"
+            ),
+        ]
+        for url in variants:
+            with self.subTest(url=url):
+                self.assertEqual(normalize_url(url), expected)
+
     def test_generic_url_strips_tracking(self) -> None:
         url = (
             "https://example.com/video.mp4"

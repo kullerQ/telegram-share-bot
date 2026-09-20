@@ -54,8 +54,9 @@ _YT_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{11}$")
 _TWITTER_STATUS_RE = re.compile(r"^/([^/]+)/status/(\d+)")
 # Instagram post/reel pattern.
 _INSTAGRAM_POST_RE = re.compile(r"^/(reel|reels|p)/([a-zA-Z0-9_-]+)")
-# TikTok video pattern.
+# TikTok video / photo patterns.
 _TIKTOK_VIDEO_RE = re.compile(r"^/(@[^/]+)/video/(\d+)")
+_TIKTOK_PHOTO_RE = re.compile(r"^/(@[^/]+)/photo/(\d+)")
 
 # Domains whose normalized forms are public content ids (safe to share-cache).
 _PUBLIC_CACHE_HOSTS = frozenset(
@@ -254,4 +255,8 @@ def _normalize_tiktok(netloc: str, path: str) -> str | None:
         if match:
             user, video_id = match.group(1), match.group(2)
             return f"https://www.tiktok.com/{user}/video/{video_id}"
+        photo_match = _TIKTOK_PHOTO_RE.match(path)
+        if photo_match:
+            user, photo_id = photo_match.group(1), photo_match.group(2)
+            return f"https://www.tiktok.com/{user}/photo/{photo_id}"
     return None

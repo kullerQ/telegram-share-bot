@@ -372,6 +372,9 @@ def _download_sync(
     work_dir_holder: list[Path] | None = None,
     *,
     https_only: bool = False,
+    allowed_hosts: frozenset[str] | None = None,
+    slideshow_slide_ms: int = 2500,
+    slideshow_max_images: int = 35,
 ) -> DownloadedMedia:
     if https_only and not is_https_url(url):
         raise DownloadError(strings.DOWNLOAD_HTTPS_REQUIRED)
@@ -382,6 +385,33 @@ def _download_sync(
     work_dir.mkdir(parents=True, exist_ok=True)
     if work_dir_holder is not None:
         work_dir_holder.append(work_dir)
+
+    # TikTok photo posts: yt-dlp has no slideshow formats — compile images + sound.
+    from telegram_share_bot.slideshow import download_tiktok_slideshow
+
+    try:
+        slideshow = download_tiktok_slideshow(
+            url,
+            work_dir,
+            max_file_bytes=max_file_bytes,
+            timeout_seconds=timeout_seconds,
+            slide_ms=slideshow_slide_ms,
+            max_images=slideshow_max_images,
+            abort_event=abort_event,
+            https_only=https_only,
+            allowed_hosts=allowed_hosts,
+        )
+        if slideshow is not None:
+            return slideshow
+    except DownloadError:
+        _cleanup_dir(work_dir)
+        raise
+    except Exception as exc:
+        _cleanup_dir(work_dir)
+        logger.warning(
+            "Slideshow path failed for %s: %s", safe_url_for_log(url), exc
+        )
+        raise DownloadError(strings.DOWNLOAD_FAILED_GENERIC) from exc
 
     outtmpl = str(work_dir / "%(title).80B [%(id)s].%(ext)s")
 
@@ -531,6 +561,8 @@ async def download_media(
     allowed_hosts: frozenset[str] | None = None,
     *,
     https_only: bool = False,
+    slideshow_slide_ms: int = 2500,
+    slideshow_max_images: int = 35,
 ) -> DownloadedMedia:
     if not is_allowed_media_host(url, allowed_hosts):
         raise DownloadError(strings.DOWNLOAD_HOST_NOT_ALLOWED)
@@ -552,6 +584,9 @@ async def download_media(
                 abort_event,
                 work_dir_holder,
                 https_only=https_only,
+                allowed_hosts=allowed_hosts,
+                slideshow_slide_ms=slideshow_slide_ms,
+                slideshow_max_images=slideshow_max_images,
             ),
             timeout=timeout_seconds,
         )
@@ -617,6 +652,13 @@ def _extract_direct_stream_sync(
     if not is_safe_media_url(url, https_only=https_only):
         return None
 
+    # Photo posts have no playable video stream — skip so callers fall back to
+    # the slideshow compiler in download_media.
+    from telegram_share_bot.slideshow import detect_tiktok_photo_post
+
+    if detect_tiktok_photo_post(url) is not None:
+        return None
+
     ydl_opts: dict[str, Any] = {
         "noplaylist": True,
         "quiet": True,
@@ -646,6 +688,7 @@ def _extract_direct_stream_sync(
                     and is_safe_media_url(direct, https_only=https_only)
                     and ".m3u8" not in direct
                     and ".mpd" not in direct
+                    and info.get("vcodec") != "none"
                 ):
                     ext = str(info.get("ext") or "mp4")
                     kind = _classify_ext(ext)

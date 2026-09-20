@@ -89,6 +89,11 @@ DOWNLOAD_FAILED_INCOMPLETE = (
     "Download was aborted or incomplete (file may exceed limits)."
 )
 DOWNLOAD_LIVE_UNSUPPORTED = "Live streams cannot be downloaded."
+SLIDESHOW_FFMPEG_MISSING = (
+    "ffmpeg is required to compile TikTok photo posts into video."
+)
+SLIDESHOW_NO_IMAGES = "No images found in that TikTok photo post."
+SLIDESHOW_BUILD_FAILED = "Could not build a slideshow video from that photo post."
 
 # --- Config / startup (operator-facing) --------------------------------------
 
