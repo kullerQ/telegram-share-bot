@@ -7,8 +7,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from telegram.error import BadRequest
+from telegram.error import BadRequest, NetworkError
 
+from telegram_share_bot import strings
 from telegram_share_bot.cache import MediaCache
 from telegram_share_bot.config import Settings
 from telegram_share_bot.downloader import DirectMediaStream, DownloadedMedia, MediaKind
@@ -259,6 +260,84 @@ class TestCacheFallback(unittest.IsolatedAsyncioTestCase):
             self.assertIsNotNone(cached)
             assert cached is not None
             self.assertEqual(cached.file_id, "LOCAL_FALLBACK_FILE_ID")
+
+    async def test_inline_prepare_handles_network_error_on_upload(self) -> None:
+        url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+        context = MagicMock()
+        context.application.bot_data = {
+            "settings": self.settings,
+            "media_cache": self.cache,
+            "inline_prepare_tasks": {},
+            "cancelled_inline": set(),
+        }
+        context.bot.edit_message_media = AsyncMock()
+        context.bot.edit_message_text = AsyncMock()
+
+        work_dir = Path(self.temp_dir.name) / "work_net"
+        work_dir.mkdir(parents=True, exist_ok=True)
+        fresh_media = DownloadedMedia(
+            path=work_dir / "video.mp4",
+            title="Net Fail",
+            kind=MediaKind.VIDEO,
+            duration=10,
+        )
+        fresh_media.path.write_bytes(b"dummy")
+
+        with (
+            patch("telegram_share_bot.handlers.get_direct_stream", AsyncMock(return_value=None)),
+            patch(
+                "telegram_share_bot.handlers.download_media",
+                AsyncMock(return_value=fresh_media),
+            ),
+            patch(
+                "telegram_share_bot.handlers._upload_for_file_id",
+                AsyncMock(side_effect=NetworkError("httpx.ReadError: ")),
+            ),
+        ):
+            await _prepare_inline_media(
+                context,
+                inline_message_id="msg_net",
+                url=url,
+                result_id="res_net",
+            )
+
+        context.bot.edit_message_media.assert_not_awaited()
+        edit_calls = context.bot.edit_message_text.await_args_list
+        self.assertTrue(edit_calls)
+        last_text = edit_calls[-1].kwargs.get("text") or ""
+        self.assertEqual(last_text, strings.INLINE_CHOSEN_UPLOAD_FAILED)
+
+    async def test_send_media_retries_transient_network_error(self) -> None:
+        from telegram_share_bot.handlers import _send_media_to_chat
+
+        work_dir = Path(self.temp_dir.name) / "work_retry"
+        work_dir.mkdir(parents=True, exist_ok=True)
+        media = DownloadedMedia(
+            path=work_dir / "video.mp4",
+            title="Retry",
+            kind=MediaKind.VIDEO,
+            duration=5,
+        )
+        media.path.write_bytes(b"video-bytes")
+
+        context = MagicMock()
+        context.application.bot_data = {"settings": self.settings}
+        ok_msg = MagicMock(video=MagicMock(file_id="OK_AFTER_RETRY"))
+        context.bot.send_video = AsyncMock(
+            side_effect=[NetworkError("httpx.ReadError: "), ok_msg]
+        )
+
+        with patch("telegram_share_bot.handlers.asyncio.sleep", AsyncMock()):
+            result = await _send_media_to_chat(
+                context,
+                chat_id=self.settings.storage_chat_id,
+                media=media,
+                settings=self.settings,
+                force_storage_caption=True,
+            )
+
+        self.assertEqual(result, ok_msg)
+        self.assertEqual(context.bot.send_video.await_count, 2)
 
 
 if __name__ == "__main__":

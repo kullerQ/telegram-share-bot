@@ -25,7 +25,7 @@ from telegram import (
     Update,
 )
 from telegram.constants import ParseMode
-from telegram.error import BadRequest, TelegramError
+from telegram.error import BadRequest, NetworkError, TelegramError, TimedOut
 from telegram.ext import ContextTypes
 
 from telegram_share_bot import strings
@@ -68,6 +68,8 @@ _EMPTY_KEYBOARD = InlineKeyboardMarkup([])
 
 _MAX_PENDING_INLINE = 1000
 _MAX_CANCELLED_INLINE = 500
+_UPLOAD_MAX_ATTEMPTS = 3
+_UPLOAD_RETRY_BASE_DELAY_SECONDS = 1.5
 
 
 @dataclass(frozen=True, slots=True)
@@ -405,6 +407,9 @@ async def url_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     except DownloadError as exc:
         logger.warning("Direct download failed for %s: %s", display_url, exc)
         await status.edit_text(strings.DIRECT_DOWNLOAD_FAILED)
+    except (NetworkError, TimedOut) as exc:
+        logger.warning("Direct upload failed for %s: %s", display_url, exc)
+        await status.edit_text(strings.DIRECT_UPLOAD_FAILED)
     except Exception:
         logger.exception("Failed to handle direct URL message")
         await status.edit_text(strings.DIRECT_SEND_FAILED)
@@ -764,6 +769,16 @@ async def _prepare_inline_media(
             strings.INLINE_CHOSEN_DOWNLOAD_FAILED,
             reply_markup=_cancel_keyboard(result_id),
         )
+    except (NetworkError, TimedOut) as exc:
+        if inline_message_id in _cancelled_set(context):
+            return
+        logger.warning("Inline upload failed for %s: %s", display_url, exc)
+        await _edit_inline_text(
+            context,
+            inline_message_id,
+            strings.INLINE_CHOSEN_UPLOAD_FAILED,
+            reply_markup=_cancel_keyboard(result_id),
+        )
     except Exception:
         if inline_message_id in _cancelled_set(context):
             return
@@ -979,38 +994,57 @@ async def _send_media_to_chat(
             custom_caption=custom_caption,
         )
 
-    with path.open("rb") as file_obj:
-        upload = InputFile(file_obj, filename=path.name)
-        if media.kind is MediaKind.VIDEO:
-            return await context.bot.send_video(
-                chat_id=chat_id,
-                video=upload,
-                caption=caption,
-                duration=media.duration,
-                supports_streaming=True,
-                disable_notification=True,
-                read_timeout=timeout,
-                write_timeout=timeout,
+    last_error: NetworkError | None = None
+    for attempt in range(1, _UPLOAD_MAX_ATTEMPTS + 1):
+        try:
+            with path.open("rb") as file_obj:
+                upload = InputFile(file_obj, filename=path.name)
+                if media.kind is MediaKind.VIDEO:
+                    return await context.bot.send_video(
+                        chat_id=chat_id,
+                        video=upload,
+                        caption=caption,
+                        duration=media.duration,
+                        supports_streaming=True,
+                        disable_notification=True,
+                        read_timeout=timeout,
+                        write_timeout=timeout,
+                    )
+                if media.kind is MediaKind.AUDIO:
+                    return await context.bot.send_audio(
+                        chat_id=chat_id,
+                        audio=upload,
+                        caption=caption,
+                        duration=media.duration,
+                        title=media.title,
+                        disable_notification=True,
+                        read_timeout=timeout,
+                        write_timeout=timeout,
+                    )
+                return await context.bot.send_document(
+                    chat_id=chat_id,
+                    document=upload,
+                    caption=caption,
+                    disable_notification=True,
+                    read_timeout=timeout,
+                    write_timeout=timeout,
+                )
+        except NetworkError as exc:
+            last_error = exc
+            if attempt >= _UPLOAD_MAX_ATTEMPTS:
+                break
+            delay = _UPLOAD_RETRY_BASE_DELAY_SECONDS * attempt
+            logger.warning(
+                "Telegram upload attempt %s/%s failed (%s); retrying in %.1fs",
+                attempt,
+                _UPLOAD_MAX_ATTEMPTS,
+                exc,
+                delay,
             )
-        if media.kind is MediaKind.AUDIO:
-            return await context.bot.send_audio(
-                chat_id=chat_id,
-                audio=upload,
-                caption=caption,
-                duration=media.duration,
-                title=media.title,
-                disable_notification=True,
-                read_timeout=timeout,
-                write_timeout=timeout,
-            )
-        return await context.bot.send_document(
-            chat_id=chat_id,
-            document=upload,
-            caption=caption,
-            disable_notification=True,
-            read_timeout=timeout,
-            write_timeout=timeout,
-        )
+            await asyncio.sleep(delay)
+
+    assert last_error is not None
+    raise last_error
 
 
 async def _send_cached_media_to_chat(

@@ -46,6 +46,9 @@ DIRECT_DOWNLOADING = "Downloading…"
 DIRECT_DONE = "Done."
 DIRECT_DOWNLOAD_FAILED = "Could not download that media."
 DIRECT_SEND_FAILED = "Something went wrong while sending the media."
+DIRECT_UPLOAD_FAILED = (
+    "Could not upload the media to Telegram (network error). Please try again."
+)
 
 # --- Inline query (fast answer) ----------------------------------------------
 
@@ -68,6 +71,9 @@ INLINE_CANCEL_ANSWER = "Cancelled"
 INLINE_CHOSEN_NO_URL = "No URL found in the query."
 INLINE_CHOSEN_DOWNLOADING = "Downloading…\n{url}"
 INLINE_CHOSEN_DOWNLOAD_FAILED = "Download failed."
+INLINE_CHOSEN_UPLOAD_FAILED = (
+    "Could not upload the media to Telegram (network error). Please try again."
+)
 INLINE_CHOSEN_PREPARE_FAILED = "Something went wrong while preparing the media."
 
 # --- Download errors (shown to users) ----------------------------------------
