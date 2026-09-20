@@ -6,9 +6,11 @@ import logging
 import math
 import re
 import shutil
+import struct
 import subprocess
 import threading
 import time
+import zlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -408,6 +410,136 @@ def _cycle_images(image_paths: list[Path], slot_count: int) -> list[Path]:
     return [image_paths[i % n] for i in range(slot_count)]
 
 
+def _png_chunk(tag: bytes, data: bytes) -> bytes:
+    return (
+        struct.pack(">I", len(data))
+        + tag
+        + data
+        + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+    )
+
+
+def _write_rgba_png(path: Path, width: int, height: int, rgba: bytes) -> None:
+    """Write a minimal 8-bit RGBA PNG (stdlib only — no Pillow)."""
+    if len(rgba) != width * height * 4:
+        raise ValueError("rgba buffer size mismatch")
+    rows = bytearray()
+    stride = width * 4
+    for y in range(height):
+        rows.append(0)  # filter: None
+        rows.extend(rgba[y * stride : (y + 1) * stride])
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0)
+    png = (
+        b"\x89PNG\r\n\x1a\n"
+        + _png_chunk(b"IHDR", ihdr)
+        + _png_chunk(b"IDAT", zlib.compress(bytes(rows), 9))
+        + _png_chunk(b"IEND", b"")
+    )
+    path.write_bytes(png)
+
+
+def _fill_circle(
+    buf: bytearray,
+    *,
+    width: int,
+    height: int,
+    cx: int,
+    cy: int,
+    radius: int,
+    rgba: tuple[int, int, int, int],
+) -> None:
+    r2 = radius * radius
+    r, g, b, a = rgba
+    for y in range(max(0, cy - radius), min(height, cy + radius + 1)):
+        dy = y - cy
+        for x in range(max(0, cx - radius), min(width, cx + radius + 1)):
+            dx = x - cx
+            if dx * dx + dy * dy <= r2:
+                i = (y * width + x) * 4
+                buf[i] = r
+                buf[i + 1] = g
+                buf[i + 2] = b
+                buf[i + 3] = a
+
+
+def _nav_dot_radius(unique_count: int, frame_width: int) -> int:
+    """Scale dots to TikTok-like size; shrink when many slides."""
+    base = max(4, frame_width // 135)  # ~8px at 1080
+    if unique_count <= 8:
+        return base
+    if unique_count <= 15:
+        return max(3, base - 1)
+    return max(3, base - 2)
+
+
+def render_nav_dot_png(
+    path: Path,
+    *,
+    unique_count: int,
+    active_index: int,
+    frame_width: int,
+) -> None:
+    """Render a transparent strip of page dots (active = solid white).
+
+    Matches TikTok photo-post pagination: inactive dots are soft white,
+    the current slide's dot is bright solid white.
+    """
+    if unique_count < 2:
+        raise ValueError("nav dots require at least 2 images")
+    active = active_index % unique_count
+    radius = _nav_dot_radius(unique_count, frame_width)
+    gap = max(radius * 2 + 4, int(radius * 3.2))  # center-to-center
+    pad_x = radius + 4
+    pad_y = radius + 6
+    width = pad_x * 2 + gap * (unique_count - 1) + 1
+    height = pad_y * 2 + 1
+    # Cap strip width; if too wide, tighten gap.
+    max_w = int(frame_width * 0.85)
+    if width > max_w and unique_count > 1:
+        gap = max(radius * 2 + 2, (max_w - pad_x * 2) // (unique_count - 1))
+        width = pad_x * 2 + gap * (unique_count - 1) + 1
+
+    buf = bytearray(width * height * 4)  # transparent
+    cy = height // 2
+    start_x = pad_x
+    inactive = (255, 255, 255, 115)
+    active_rgba = (255, 255, 255, 255)
+    for i in range(unique_count):
+        cx = start_x + i * gap
+        _fill_circle(
+            buf,
+            width=width,
+            height=height,
+            cx=cx,
+            cy=cy,
+            radius=radius,
+            rgba=active_rgba if i == active else inactive,
+        )
+    _write_rgba_png(path, width, height, bytes(buf))
+
+
+def _build_nav_overlays(
+    work_dir: Path,
+    *,
+    unique_count: int,
+    frame_width: int,
+) -> list[Path]:
+    """Create one nav PNG per unique slide index (active highlight differs)."""
+    if unique_count < 2:
+        return []
+    paths: list[Path] = []
+    for active in range(unique_count):
+        dest = work_dir / f"nav_dots_{active:02d}.png"
+        render_nav_dot_png(
+            dest,
+            unique_count=unique_count,
+            active_index=active,
+            frame_width=frame_width,
+        )
+        paths.append(dest)
+    return paths
+
+
 def _probe_media_duration(path: Path) -> float | None:
     """Return media duration in seconds via ffprobe, or None on failure."""
     ffprobe = shutil.which("ffprobe")
@@ -452,14 +584,23 @@ def _build_ffmpeg_argv(
     width: int,
     height: int,
     crf: int,
+    unique_image_count: int | None = None,
+    nav_overlay_paths: list[Path] | None = None,
 ) -> list[str]:
     if len(image_paths) != len(slide_durations):
         raise ValueError("image_paths and slide_durations length mismatch")
+
+    unique_n = unique_image_count if unique_image_count is not None else len(image_paths)
+    nav_paths = nav_overlay_paths or []
+    use_nav = unique_n >= 2 and len(nav_paths) == unique_n
 
     argv: list[str] = [ffmpeg_bin, "-nostdin", "-y", "-hide_banner", "-loglevel", "error"]
     n = len(image_paths)
     for path, slide_t in zip(image_paths, slide_durations, strict=True):
         argv.extend(["-loop", "1", "-t", f"{slide_t:.3f}", "-i", str(path)])
+    for nav_path in nav_paths if use_nav else []:
+        # Loop still overlays for the full slide duration.
+        argv.extend(["-loop", "1", "-i", str(nav_path)])
     if audio_path is not None:
         # Play the full audio once (video length is planned to match).
         argv.extend(["-i", str(audio_path)])
@@ -468,17 +609,29 @@ def _build_ffmpeg_argv(
         f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
         f"pad={width}:{height}:-1:-1:color=black,setsar=1,fps=30"
     )
+    # TikTok places page dots just above the bottom UI chrome.
+    nav_bottom_margin = max(36, height // 28)
     filter_parts: list[str] = []
     concat_inputs: list[str] = []
+    nav_input_base = n  # first nav overlay input index
     for idx in range(n):
-        filter_parts.append(f"[{idx}:v]{scale}[v{idx}]")
+        if use_nav:
+            active = idx % unique_n
+            nav_in = nav_input_base + active
+            filter_parts.append(
+                f"[{idx}:v]{scale}[b{idx}];"
+                f"[b{idx}][{nav_in}:v]overlay=(W-w)/2:H-h-{nav_bottom_margin}:shortest=1[v{idx}]"
+            )
+        else:
+            filter_parts.append(f"[{idx}:v]{scale}[v{idx}]")
         concat_inputs.append(f"[v{idx}]")
     filter_parts.append(f"{''.join(concat_inputs)}concat=n={n}:v=1:a=0[v]")
     filter_complex = ";".join(filter_parts)
 
     argv.extend(["-filter_complex", filter_complex, "-map", "[v]"])
+    audio_input_index = n + (unique_n if use_nav else 0)
     if audio_path is not None:
-        argv.extend(["-map", f"{n}:a", "-c:a", "aac", "-b:a", "128k"])
+        argv.extend(["-map", f"{audio_input_index}:a", "-c:a", "aac", "-b:a", "128k"])
     else:
         argv.extend(["-an"])
     argv.extend(
@@ -617,6 +770,7 @@ def build_slideshow_video(
         audio_duration if audio_path is not None else None,
     )
     sequenced_images = _cycle_images(image_paths, len(slide_durations))
+    unique_count = len(image_paths)
     # Half-up so fractional seconds round sensibly for Telegram's int duration.
     duration = max(1, math.floor(total + 0.5))
 
@@ -631,6 +785,15 @@ def build_slideshow_video(
         if abort_event is not None and abort_event.is_set():
             raise DownloadError(strings.DOWNLOAD_FAILED_GENERIC)
         output_path.unlink(missing_ok=True)
+        try:
+            nav_overlays = _build_nav_overlays(
+                work_dir,
+                unique_count=unique_count,
+                frame_width=width,
+            )
+        except Exception as exc:
+            logger.warning("Could not build slideshow nav dots: %s", exc)
+            nav_overlays = []
         argv = _build_ffmpeg_argv(
             ffmpeg_bin=ffmpeg_bin,
             image_paths=sequenced_images,
@@ -641,6 +804,8 @@ def build_slideshow_video(
             width=width,
             height=height,
             crf=crf,
+            unique_image_count=unique_count,
+            nav_overlay_paths=nav_overlays,
         )
         try:
             _run_ffmpeg(

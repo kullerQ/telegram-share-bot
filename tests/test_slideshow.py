@@ -215,6 +215,67 @@ class TestBuildFfmpegArgv(unittest.TestCase):
         self.assertIn("7.000", t_values)
         self.assertIn(str(out), argv)
 
+    def test_argv_overlays_nav_dots_for_multi_image(self) -> None:
+        images = [Path(f"img{i}.jpg") for i in range(3)]
+        nav = [Path(f"nav_{i}.png") for i in range(3)]
+        argv = _build_ffmpeg_argv(
+            ffmpeg_bin="ffmpeg",
+            image_paths=images,
+            audio_path=None,
+            output_path=Path("out.mp4"),
+            slide_durations=[2.5, 2.5, 2.5],
+            total=7.5,
+            width=1080,
+            height=1920,
+            crf=24,
+            unique_image_count=3,
+            nav_overlay_paths=nav,
+        )
+        # 3 slides + 3 nav overlays
+        self.assertEqual(argv.count("-i"), 6)
+        fc = argv[argv.index("-filter_complex") + 1]
+        self.assertIn("overlay=", fc)
+        self.assertIn("shortest=1", fc)
+        # Active nav index cycles with slot index
+        self.assertIn("[b0][3:v]overlay", fc)
+        self.assertIn("[b1][4:v]overlay", fc)
+        self.assertIn("[b2][5:v]overlay", fc)
+
+    def test_argv_skips_nav_for_single_image(self) -> None:
+        argv = _build_ffmpeg_argv(
+            ffmpeg_bin="ffmpeg",
+            image_paths=[Path("img0.jpg")],
+            audio_path=None,
+            output_path=Path("out.mp4"),
+            slide_durations=[2.5],
+            total=2.5,
+            width=1080,
+            height=1920,
+            crf=24,
+            unique_image_count=1,
+            nav_overlay_paths=[],
+        )
+        fc = argv[argv.index("-filter_complex") + 1]
+        self.assertNotIn("overlay=", fc)
+
+
+class TestNavDots(unittest.TestCase):
+    def test_render_nav_dot_png(self) -> None:
+        from telegram_share_bot.slideshow import render_nav_dot_png
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "nav.png"
+            render_nav_dot_png(
+                path,
+                unique_count=5,
+                active_index=2,
+                frame_width=1080,
+            )
+            self.assertTrue(path.exists())
+            data = path.read_bytes()
+            self.assertTrue(data.startswith(b"\x89PNG\r\n\x1a\n"))
+            self.assertGreater(len(data), 100)
+
 
 class TestBuildSlideshowVideo(unittest.TestCase):
     def test_missing_ffmpeg_raises(self) -> None:
