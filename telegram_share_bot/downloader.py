@@ -16,10 +16,13 @@ from collections.abc import Generator, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import urlsplit
 
 import yt_dlp
+
+if TYPE_CHECKING:
+    from yt_dlp.extractor.common import _InfoDict
 
 from telegram_share_bot import strings
 from telegram_share_bot.config import (
@@ -263,7 +266,7 @@ def _safe_dns_resolution() -> Generator[None, None, None]:
 # because process_ie_result mutates the info dict.
 _EXTRACT_INFO_TTL_SECONDS = 120
 _EXTRACT_INFO_CACHE_MAX = 64
-_extract_info_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+_extract_info_cache: dict[str, tuple[float, _InfoDict]] = {}
 _extract_info_cache_lock = threading.Lock()
 
 # CDN signed-URL / auth failures that mean a cached extract is stale.
@@ -307,7 +310,7 @@ def _extract_info_cached(
     url: str,
     *,
     force_refresh: bool = False,
-) -> tuple[dict[str, Any], bool]:
+) -> tuple[_InfoDict, bool]:
     """Return ``(info_dict, from_cache)`` for ``url``.
 
     Cache hits return a deep copy so callers (``process_ie_result``) can mutate

@@ -11,9 +11,9 @@ from unittest.mock import MagicMock, patch
 import yt_dlp
 
 from telegram_share_bot.downloader import (
-    DownloadError,
     _EXTRACT_INFO_CACHE_MAX,
     _EXTRACT_INFO_TTL_SECONDS,
+    DownloadError,
     _download_sync,
     _extract_info_cache,
     _extract_info_cached,

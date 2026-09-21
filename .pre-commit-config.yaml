@@ -3,14 +3,21 @@ repos:
     rev: v0.16.7
     hooks:
       - id: ruff-check
+        # CI runs `ruff check .` on every commit, not only staged Python files.
+        args: ["."]
+        pass_filenames: false
+        always_run: true
 
   - repo: https://github.com/pre-commit/mirrors-mypy
     rev: v2.3.1
     hooks:
       - id: mypy
-        # Match [tool.mypy] packages = ["telegram_share_bot"]
+        # Match [tool.mypy] packages = ["telegram_share_bot"] and CI's
+        # `mypy --strict -p telegram_share_bot`. pass_filenames alone still
+        # skips the hook when the commit contains no Python files.
         args: [--strict, -p, telegram_share_bot]
         pass_filenames: false
+        always_run: true
         additional_dependencies:
           - python-telegram-bot==22.5
           - yt-dlp>=2025.1.15
