@@ -203,6 +203,68 @@ class TestPlanSlideshowTimeline(unittest.TestCase):
         )
 
 
+class TestProbeMediaDuration(unittest.TestCase):
+    def test_prefers_mutagen(self) -> None:
+        with (
+            patch(
+                "telegram_share_bot.slideshow._duration_from_mutagen",
+                return_value=12.5,
+            ) as mutagen_probe,
+            patch(
+                "telegram_share_bot.slideshow._duration_from_ffmpeg",
+            ) as ffmpeg_probe,
+        ):
+            from telegram_share_bot.slideshow import _probe_media_duration
+
+            result = _probe_media_duration(Path("audio.mp3"))
+        self.assertEqual(result, 12.5)
+        mutagen_probe.assert_called_once()
+        ffmpeg_probe.assert_not_called()
+
+    def test_falls_back_to_ffmpeg_stderr(self) -> None:
+        completed = MagicMock()
+        completed.stderr = (
+            b"Input #0, mp3, from 'audio.mp3':\n"
+            b"  Duration: 00:00:27.40, start: 0.000000, bitrate: 128 kb/s\n"
+        )
+        completed.returncode = 1
+
+        with (
+            patch(
+                "telegram_share_bot.slideshow._duration_from_mutagen",
+                return_value=None,
+            ),
+            patch("telegram_share_bot.slideshow.shutil.which", return_value="ffmpeg"),
+            patch(
+                "telegram_share_bot.slideshow.subprocess.run",
+                return_value=completed,
+            ) as run_mock,
+        ):
+            from telegram_share_bot.slideshow import _probe_media_duration
+
+            result = _probe_media_duration(Path("audio.mp3"))
+        self.assertAlmostEqual(result or 0.0, 27.4, places=2)
+        run_mock.assert_called_once()
+        argv = run_mock.call_args.args[0]
+        self.assertEqual(argv[0], "ffmpeg")
+        self.assertIn("-i", argv)
+
+    def test_returns_none_when_both_fail(self) -> None:
+        with (
+            patch(
+                "telegram_share_bot.slideshow._duration_from_mutagen",
+                return_value=None,
+            ),
+            patch(
+                "telegram_share_bot.slideshow._duration_from_ffmpeg",
+                return_value=None,
+            ),
+        ):
+            from telegram_share_bot.slideshow import _probe_media_duration
+
+            self.assertIsNone(_probe_media_duration(Path("missing.mp3")))
+
+
 class TestBuildFfmpegArgv(unittest.TestCase):
     def test_argv_plays_audio_once_with_per_slot_durations(self) -> None:
         images = [Path(f"img{i}.jpg") for i in range(3)]

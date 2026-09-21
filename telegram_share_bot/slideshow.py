@@ -555,37 +555,64 @@ def _build_nav_overlays(
     return paths
 
 
-def _probe_media_duration(path: Path) -> float | None:
-    """Return media duration in seconds via ffprobe, or None on failure."""
-    ffprobe = shutil.which("ffprobe")
-    if not ffprobe:
+_FFMPEG_DURATION_RE = re.compile(
+    r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)",
+    re.IGNORECASE,
+)
+
+
+def _duration_from_mutagen(path: Path) -> float | None:
+    """Return media duration via mutagen, or None on failure."""
+    try:
+        from mutagen import File as MutagenFile
+    except ImportError:
+        return None
+    try:
+        audio = MutagenFile(str(path))
+    except Exception:
+        return None
+    if audio is None:
+        return None
+    info = getattr(audio, "info", None)
+    length = getattr(info, "length", None) if info is not None else None
+    if isinstance(length, (int, float)) and length > 0:
+        return float(length)
+    return None
+
+
+def _duration_from_ffmpeg(path: Path) -> float | None:
+    """Parse duration from ``ffmpeg -i`` stderr (no ffprobe required)."""
+    ffmpeg_bin = shutil.which("ffmpeg")
+    if not ffmpeg_bin:
         return None
     try:
         completed = subprocess.run(
-            [
-                ffprobe,
-                "-v",
-                "error",
-                "-show_entries",
-                "format=duration",
-                "-of",
-                "default=noprint_wrappers=1:nokey=1",
-                str(path),
-            ],
+            [ffmpeg_bin, "-hide_banner", "-i", str(path)],
             check=False,
             capture_output=True,
             timeout=30,
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
-    if completed.returncode != 0:
+    stderr = (completed.stderr or b"").decode("utf-8", errors="replace")
+    match = _FFMPEG_DURATION_RE.search(stderr)
+    if match is None:
         return None
-    text = (completed.stdout or b"").decode("utf-8", errors="replace").strip()
+    hours, minutes, seconds = match.groups()
     try:
-        value = float(text)
+        value = int(hours) * 3600 + int(minutes) * 60 + float(seconds)
     except ValueError:
         return None
     return value if value > 0 else None
+
+
+def _probe_media_duration(path: Path) -> float | None:
+    """Return media duration in seconds, or None on failure.
+
+    Prefers mutagen (already a yt-dlp[default] dep); falls back to parsing
+    ``ffmpeg -i`` stderr so the image need not ship ffprobe.
+    """
+    return _duration_from_mutagen(path) or _duration_from_ffmpeg(path)
 
 
 def _build_ffmpeg_argv(

@@ -4,7 +4,7 @@
 # Builder: install Python deps into an isolated venv (kept out of the final
 # image's build tooling / pip caches).
 # ---------------------------------------------------------------------------
-FROM python:3.11-slim-bookworm AS builder
+FROM python:3.11-alpine AS builder
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
@@ -12,31 +12,33 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /build
 
-RUN python -m venv /opt/venv
+RUN apk add --no-cache binutils \
+    && python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt \
-    && find /opt/venv -type d -name "__pycache__" -prune -exec rm -rf {} + \
-    && find /opt/venv -type f \( -name "*.pyc" -o -name "*.pyo" \) -delete
+    && pip uninstall -y pip setuptools wheel \
+    && find /opt/venv -type d \( -name "__pycache__" -o -name "tests" -o -name "test" \) -prune -exec rm -rf {} + \
+    && find /opt/venv -type f \( -name "*.pyc" -o -name "*.pyo" \) -delete \
+    && find /opt/venv -type f -name "*.so" -exec strip --strip-unneeded {} + || true
 
 # ---------------------------------------------------------------------------
-# Compress static ffmpeg/ffprobe with UPX (~4x smaller; same codecs).
+# Compress static ffmpeg with UPX (~4x smaller; same codecs).
 # Source: mwader/static-ffmpeg (hardened static PIE, multi-arch).
+# ffprobe is omitted: yt-dlp and slideshow probing fall back to ffmpeg.
 # ---------------------------------------------------------------------------
 FROM mwader/static-ffmpeg:9.0.1 AS ffmpeg-src
 FROM alpine:3.21 AS ffmpeg
 
 COPY --from=ffmpeg-src /ffmpeg /ffmpeg
-COPY --from=ffmpeg-src /ffprobe /ffprobe
 RUN apk add --no-cache upx \
-    && upx --best --lzma /ffmpeg /ffprobe
+    && upx --best --lzma /ffmpeg
 
 # ---------------------------------------------------------------------------
-# Runtime: slim Python + compressed static ffmpeg (no apt multimedia stack).
-# apt ffmpeg alone was ~464 MB.
+# Runtime: Alpine Python + compressed static ffmpeg (no apt multimedia stack).
 # ---------------------------------------------------------------------------
-FROM python:3.11-slim-bookworm
+FROM python:3.11-alpine
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -44,12 +46,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PATH="/opt/venv/bin:$PATH"
 
 COPY --from=ffmpeg /ffmpeg /usr/local/bin/ffmpeg
-COPY --from=ffmpeg /ffprobe /usr/local/bin/ffprobe
 
 WORKDIR /app
 
-RUN groupadd --gid 1000 appgroup \
-    && useradd --uid 1000 --gid appgroup --shell /usr/sbin/nologin --create-home appuser \
+RUN addgroup -g 1000 appgroup \
+    && adduser -u 1000 -G appgroup -s /sbin/nologin -D appuser \
     && mkdir -p /app/downloads /app/logs \
     && chown -R appuser:appgroup /app
 
