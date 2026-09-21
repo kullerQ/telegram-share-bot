@@ -18,6 +18,10 @@ from telegram_share_bot.downloader import (
     is_safe_media_url,
 )
 
+# Patch the resolver the DNS guard calls — not socket.getaddrinfo itself,
+# which is permanently wrapped once the guard is installed.
+_RESOLVER = "telegram_share_bot.downloader._REAL_GETADDRINFO"
+
 
 class TestSsrfProtection(unittest.IsolatedAsyncioTestCase):
     def test_unsafe_urls_rejected(self) -> None:
@@ -80,7 +84,7 @@ class TestSsrfProtection(unittest.IsolatedAsyncioTestCase):
         def fake_getaddrinfo(*_args: object, **_kwargs: object) -> list[tuple[object, ...]]:
             return private_result
 
-        with patch("socket.getaddrinfo", side_effect=fake_getaddrinfo):
+        with patch(_RESOLVER, side_effect=fake_getaddrinfo):
             with _safe_dns_resolution():
                 with self.assertRaises(OSError):
                     socket.getaddrinfo("evil.example", 80)
@@ -100,7 +104,7 @@ class TestSsrfProtection(unittest.IsolatedAsyncioTestCase):
             calls["n"] += 1
             return first if calls["n"] == 1 else rebound
 
-        with patch("socket.getaddrinfo", side_effect=fake_getaddrinfo):
+        with patch(_RESOLVER, side_effect=fake_getaddrinfo):
             with _safe_dns_resolution():
                 first_lookup = socket.getaddrinfo("cdn.example", 443)
                 self.assertEqual(first_lookup[0][4][0], "8.8.8.8")
@@ -109,7 +113,8 @@ class TestSsrfProtection(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(second_lookup[0][4][0], "8.8.8.8")
                 self.assertEqual(len(second_lookup), 1)
 
-    def test_dns_guard_blocks_when_pinned_ip_disappears(self) -> None:
+    def test_dns_guard_repins_when_pinned_ip_disappears(self) -> None:
+        """CDN rotation must re-pin, not abort (TikTok/Akamai return rotating sets)."""
         calls = {"n": 0}
         first = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", 0))]
         rebound = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("1.1.1.1", 0))]
@@ -118,11 +123,14 @@ class TestSsrfProtection(unittest.IsolatedAsyncioTestCase):
             calls["n"] += 1
             return first if calls["n"] == 1 else rebound
 
-        with patch("socket.getaddrinfo", side_effect=fake_getaddrinfo):
+        with patch(_RESOLVER, side_effect=fake_getaddrinfo):
             with _safe_dns_resolution():
-                socket.getaddrinfo("cdn.example", 443)
-                with self.assertRaises(OSError):
-                    socket.getaddrinfo("cdn.example", 443)
+                first_lookup = socket.getaddrinfo("cdn.example", 443)
+                self.assertEqual(first_lookup[0][4][0], "8.8.8.8")
+                second_lookup = socket.getaddrinfo("cdn.example", 443)
+                self.assertEqual(second_lookup[0][4][0], "1.1.1.1")
+                third_lookup = socket.getaddrinfo("cdn.example", 443)
+                self.assertEqual(third_lookup[0][4][0], "1.1.1.1")
 
     async def test_download_media_blocks_ssrf(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

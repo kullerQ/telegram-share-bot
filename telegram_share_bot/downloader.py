@@ -145,79 +145,115 @@ def is_allowed_media_host(
         return False
 
 
-@contextlib.contextmanager
-def _safe_dns_resolution() -> Generator[None, None, None]:
-    """Re-validate DNS lookups and pin each host to its first safe IP.
+# True libc/resolver getaddrinfo — captured once so concurrent download threads
+# never nest or uninstall each other's wrappers.
+_REAL_GETADDRINFO = socket.getaddrinfo
+_dns_guard_tls = threading.local()
+_dns_guard_install_lock = threading.Lock()
+_dns_guard_installed = False
 
-    Blocks private/CGNAT addresses and mitigates DNS rebinding by forcing
-    subsequent lookups for the same hostname to reuse the first validated IP
-    for the duration of the download/extract context.
-    """
-    original_getaddrinfo = socket.getaddrinfo
-    pinned_ips: dict[str, str] = {}
 
-    def _host_key(host: str | bytes | None) -> str | None:
-        if host is None:
-            return None
-        text: str
-        if isinstance(host, bytes):
-            try:
-                text = host.decode("idna")
-            except UnicodeError:
-                text = host.decode("utf-8", errors="replace")
-        else:
-            text = host
-        cleaned = text.strip().lower().rstrip(".")
-        return cleaned or None
+def _dns_host_key(host: str | bytes | None) -> str | None:
+    if host is None:
+        return None
+    text: str
+    if isinstance(host, bytes):
+        try:
+            text = host.decode("idna")
+        except UnicodeError:
+            text = host.decode("utf-8", errors="replace")
+    else:
+        text = host
+    cleaned = text.strip().lower().rstrip(".")
+    return cleaned or None
 
-    def _guarded_getaddrinfo(
-        host: str | bytes | None,
-        port: str | bytes | int | None,
-        family: int = 0,
-        type: int = 0,
-        proto: int = 0,
-        flags: int = 0,
-    ) -> list[tuple[Any, ...]]:
-        key = _host_key(host)
-        results = original_getaddrinfo(host, port, family, type, proto, flags)
-        safe_results: list[tuple[Any, ...]] = []
-        for res in results:
-            sockaddr = res[4]
-            if not isinstance(sockaddr, Sequence) or not sockaddr:
-                continue
-            ip = ipaddress.ip_address(sockaddr[0])
-            if not _is_safe_ip(ip):
-                raise OSError(f"Blocked unsafe address for host {host!r}: {ip}")
-            safe_results.append(res)
 
-        if not safe_results:
-            raise OSError(f"No safe addresses for host {host!r}")
+def _guarded_getaddrinfo(
+    host: str | bytes | None,
+    port: str | bytes | int | None,
+    family: int = 0,
+    type: int = 0,
+    proto: int = 0,
+    flags: int = 0,
+) -> list[tuple[Any, ...]]:
+    state: dict[str, Any] | None = getattr(_dns_guard_tls, "state", None)
+    if state is None:
+        return _REAL_GETADDRINFO(host, port, family, type, proto, flags)
 
-        if key is None:
-            return safe_results
+    key = _dns_host_key(host)
+    results = _REAL_GETADDRINFO(host, port, family, type, proto, flags)
+    safe_results: list[tuple[Any, ...]] = []
+    for res in results:
+        sockaddr = res[4]
+        if not isinstance(sockaddr, Sequence) or not sockaddr:
+            continue
+        ip = ipaddress.ip_address(sockaddr[0])
+        if not _is_safe_ip(ip):
+            raise OSError(f"Blocked unsafe address for host {host!r}: {ip}")
+        safe_results.append(res)
 
-        pinned = pinned_ips.get(key)
-        if pinned is None:
-            pinned = str(ipaddress.ip_address(safe_results[0][4][0]))
-            pinned_ips[key] = pinned
+    if not safe_results:
+        raise OSError(f"No safe addresses for host {host!r}")
 
+    if key is None:
+        return safe_results
+
+    pinned_ips: dict[str, str] = state["pinned_ips"]
+    pinned = pinned_ips.get(key)
+    if pinned is not None:
         pinned_results = [
             res
             for res in safe_results
             if str(ipaddress.ip_address(res[4][0])) == pinned
         ]
-        if not pinned_results:
-            raise OSError(
-                f"DNS rebinding blocked for host {host!r}: "
-                f"pinned {pinned} no longer present"
-            )
-        return pinned_results
+        if pinned_results:
+            return pinned_results
+        # CDN / anycast hosts rotate A/AAAA sets within a single download.
+        # Re-pin to a newly observed safe address instead of failing the request.
 
-    socket.getaddrinfo = _guarded_getaddrinfo
+    pinned_ips[key] = str(ipaddress.ip_address(safe_results[0][4][0]))
+    return [safe_results[0]]
+
+
+def _ensure_dns_guard_installed() -> None:
+    global _dns_guard_installed
+    if _dns_guard_installed:
+        return
+    with _dns_guard_install_lock:
+        if _dns_guard_installed:
+            return
+        socket.getaddrinfo = _guarded_getaddrinfo
+        _dns_guard_installed = True
+
+
+@contextlib.contextmanager
+def _safe_dns_resolution() -> Generator[None, None, None]:
+    """Re-validate DNS lookups and prefer a stable safe IP per host.
+
+    Blocks private/CGNAT addresses on every lookup. Prefers the first
+    validated IP for subsequent lookups in the same download context; if a
+    CDN rotates that address out of the answer set, re-pins to a new safe IP
+    rather than aborting (identity pins break TikTok/Akamai and similar CDNs).
+
+    The getaddrinfo wrapper is installed once process-wide; per-download pin
+    state lives in thread-local storage so concurrent ``asyncio.to_thread``
+    downloads neither nest wrappers nor leak pins across hosts.
+    """
+    _ensure_dns_guard_installed()
+    existing: dict[str, Any] | None = getattr(_dns_guard_tls, "state", None)
+    if existing is not None:
+        existing["depth"] = int(existing["depth"]) + 1
+        try:
+            yield
+        finally:
+            existing["depth"] = int(existing["depth"]) - 1
+        return
+
+    _dns_guard_tls.state = {"pinned_ips": {}, "depth": 1}
     try:
         yield
     finally:
-        socket.getaddrinfo = original_getaddrinfo
+        _dns_guard_tls.state = None
 
 
 class MediaKind(str, Enum):
