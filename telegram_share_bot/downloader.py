@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
 import ipaddress
 import logging
 import re
@@ -256,6 +257,86 @@ def _safe_dns_resolution() -> Generator[None, None, None]:
         _dns_guard_tls.state = None
 
 
+# In-process extract_info memoization: covers the get_direct_stream →
+# download_media fallback so a cache miss costs one extraction, not two.
+# Process-local only; short TTL; hard size bound; deep-copied on store/load
+# because process_ie_result mutates the info dict.
+_EXTRACT_INFO_TTL_SECONDS = 120
+_EXTRACT_INFO_CACHE_MAX = 64
+_extract_info_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+_extract_info_cache_lock = threading.Lock()
+
+# CDN signed-URL / auth failures that mean a cached extract is stale.
+_STALE_CDN_MARKERS = (
+    "http error 403",
+    "403: forbidden",
+    "status code 403",
+    "access denied",
+    "forbidden",
+    "url has expired",
+    "expiredtoken",
+    "signaturemismatch",
+    "the downloaded file is empty",
+)
+
+
+def clear_extract_info_cache() -> None:
+    """Test helper: drop memoized extract_info results."""
+    with _extract_info_cache_lock:
+        _extract_info_cache.clear()
+
+
+def _evict_extract_info(url: str) -> None:
+    with _extract_info_cache_lock:
+        _extract_info_cache.pop(url, None)
+
+
+def _looks_like_stale_cdn_url(exc: BaseException) -> bool:
+    spaced = str(exc).lower()
+    if any(marker in spaced for marker in _STALE_CDN_MARKERS):
+        return True
+    compact = spaced.replace(" ", "")
+    # Compact form catches "HTTPError 403" / "ERROR: Unable to download ... 403"
+    return "403" in compact and (
+        "forbid" in compact or "denied" in compact or "http" in compact
+    )
+
+
+def _extract_info_cached(
+    ydl: yt_dlp.YoutubeDL,
+    url: str,
+    *,
+    force_refresh: bool = False,
+) -> tuple[dict[str, Any], bool]:
+    """Return ``(info_dict, from_cache)`` for ``url``.
+
+    Cache hits return a deep copy so callers (``process_ie_result``) can mutate
+    freely. Misses / forced refreshes call ``ydl.extract_info`` once and store a
+    deep copy; the returned object is the fresh extract (safe to mutate).
+    """
+    now = time.monotonic()
+    if not force_refresh:
+        with _extract_info_cache_lock:
+            hit = _extract_info_cache.get(url)
+            if hit is not None:
+                expires_at, cached = hit
+                if now < expires_at:
+                    return copy.deepcopy(cached), True
+                _extract_info_cache.pop(url, None)
+
+    extracted = ydl.extract_info(url, download=False)
+    if not isinstance(extracted, dict):
+        raise DownloadError(strings.DOWNLOAD_EXTRACT_FAILED)
+
+    with _extract_info_cache_lock:
+        _extract_info_cache[url] = (now + _EXTRACT_INFO_TTL_SECONDS, copy.deepcopy(extracted))
+        while len(_extract_info_cache) > _EXTRACT_INFO_CACHE_MAX:
+            oldest_key = next(iter(_extract_info_cache))
+            _extract_info_cache.pop(oldest_key, None)
+
+    return extracted, False
+
+
 class MediaKind(str, Enum):
     VIDEO = "video"
     AUDIO = "audio"
@@ -504,10 +585,8 @@ def _download_sync(
                     )
 
                 # Probe metadata first so live streams abort before any media bytes land.
-                extracted = ydl.extract_info(url, download=False)
-                if not isinstance(extracted, dict):
-                    raise DownloadError(strings.DOWNLOAD_EXTRACT_FAILED)
-
+                # Reuse extract_info from get_direct_stream when still warm.
+                extracted, from_cache = _extract_info_cached(ydl, url)
                 info = _pick_info(extracted)
 
                 if abort_event is not None and abort_event.is_set():
@@ -517,7 +596,31 @@ def _download_sync(
                         )
                     )
 
-                processed = ydl.process_ie_result(extracted, download=True)
+                try:
+                    processed = ydl.process_ie_result(extracted, download=True)
+                except yt_dlp.utils.DownloadError as download_exc:
+                    # Cached extracts carry time-/IP-bound CDN URLs; one fresh
+                    # re-extract recovers from 403/expired signatures.
+                    if not (from_cache and _looks_like_stale_cdn_url(download_exc)):
+                        raise
+                    logger.info(
+                        "Cached extract stale for %s; re-extracting: %s",
+                        safe_url_for_log(url),
+                        str(download_exc).split("\n")[-1].strip(),
+                    )
+                    _evict_extract_info(url)
+                    extracted, _ = _extract_info_cached(
+                        ydl, url, force_refresh=True
+                    )
+                    info = _pick_info(extracted)
+                    if abort_event is not None and abort_event.is_set():
+                        raise DownloadError(
+                            strings.DOWNLOAD_TIMED_OUT.format(
+                                timeout_seconds=timeout_seconds
+                            )
+                        ) from download_exc
+                    processed = ydl.process_ie_result(extracted, download=True)
+
                 if isinstance(processed, dict):
                     info = _pick_info(processed)
 
@@ -712,9 +815,7 @@ def _extract_direct_stream_sync(
     try:
         with _safe_dns_resolution():
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:  # type: ignore[arg-type]
-                extracted = ydl.extract_info(url, download=False)
-                if not isinstance(extracted, dict):
-                    return None
+                extracted, _from_cache = _extract_info_cached(ydl, url)
                 info = _pick_info(extracted)
 
                 title = str(info.get("title") or "")[:64]
