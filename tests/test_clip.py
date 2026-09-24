@@ -14,6 +14,7 @@ from telegram_share_bot.downloader import (
     DownloadError,
     MediaKind,
     TimeRange,
+    _clamp_time_range,
     _download_sync,
     extract_media_request,
     format_time_range,
@@ -59,6 +60,23 @@ class TestParseTimeRangeToken(unittest.TestCase):
     def test_format_label(self) -> None:
         self.assertEqual(format_time_range(TimeRange(80, 125)), "1:20-2:05")
         self.assertEqual(format_time_range(TimeRange(3723, 3900)), "1:02:03-1:05:00")
+        self.assertEqual(format_time_range(TimeRange(2022, None)), "33:42-end")
+
+
+class TestClampOpenEnded(unittest.TestCase):
+    def test_clamp_open_ended_to_duration(self) -> None:
+        resolved = _clamp_time_range(
+            TimeRange(100, None), {"duration": 250}
+        )
+        self.assertEqual(resolved, TimeRange(100, 250))
+
+    def test_clamp_open_ended_over_max_checked_by_resolve(self) -> None:
+        from telegram_share_bot.downloader import _resolve_clip_range
+
+        with self.assertRaises(DownloadError):
+            _resolve_clip_range(
+                TimeRange(0, None), {"duration": MAX_CLIP_SECONDS + 100}
+            )
 
 
 class TestExtractMediaRequest(unittest.TestCase):
@@ -115,10 +133,17 @@ class TestExtractMediaRequest(unittest.TestCase):
         self.assertEqual(req.time_range, TimeRange(2022, 2052))
         self.assertEqual(req.custom_caption, "optional caption")
 
-    def test_youtube_t_alone_no_clip(self) -> None:
+    def test_youtube_t_alone_open_ended(self) -> None:
         req = extract_media_request("https://youtu.be/-gLCzX0WlpY?t=2022")
-        self.assertIsNone(req.time_range)
+        self.assertEqual(req.time_range, TimeRange(2022, None))
         self.assertIsNone(req.custom_caption)
+
+    def test_youtube_t_alone_with_caption(self) -> None:
+        req = extract_media_request(
+            "https://youtu.be/-gLCzX0WlpY?t=2022 hello world"
+        )
+        self.assertEqual(req.time_range, TimeRange(2022, None))
+        self.assertEqual(req.custom_caption, "hello world")
 
     def test_youtube_duration_without_t_is_caption(self) -> None:
         req = extract_media_request(
@@ -200,10 +225,13 @@ class TestCacheKeyWithRange(unittest.IsolatedAsyncioTestCase):
         url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
         full = _cache_key(url, None)
         clip = _cache_key(url, TimeRange(80, 125))
+        open_ended = _cache_key(url, TimeRange(80, None))
         self.assertNotEqual(full, clip)
-        assert full is not None and clip is not None
+        self.assertNotEqual(clip, open_ended)
+        assert full is not None and clip is not None and open_ended is not None
         self.assertTrue(clip.startswith(full))
         self.assertIn("#t=80-125", clip)
+        self.assertIn("#t=80-end", open_ended)
 
     async def test_cache_roundtrip_separate(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -264,6 +292,22 @@ class TestInlineClipChoice(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(results[1].id.startswith("full:"))
         self.assertIn("clip", results[0].title.lower())
         self.assertIn("full", results[1].title.lower())
+
+    async def test_youtube_t_alone_offers_two_results(self) -> None:
+        context = self._context()
+        update = MagicMock()
+        query = MagicMock()
+        query.from_user = MagicMock(id=1)
+        query.query = "https://youtu.be/-gLCzX0WlpY?t=2022"
+        query.answer = AsyncMock()
+        update.inline_query = query
+
+        await inline_query(update, context)
+        results = query.answer.await_args.kwargs["results"]
+        self.assertEqual(len(results), 2)
+        self.assertTrue(results[0].id.startswith("clip:"))
+        self.assertTrue(results[1].id.startswith("full:"))
+        self.assertIn("end", results[0].title.lower())
 
     async def test_youtube_caption_without_range_one_result(self) -> None:
         context = self._context()

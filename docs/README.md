@@ -107,15 +107,17 @@ With `CAPTION_MODE=custom`, append a caption after the link:
 For a YouTube **clip**, either:
 
 - put an absolute time range as the first token after the link (`start-end`, e.g. `1:20-2:05` or `90-150`), or
-- use a share link with `?t=` / `start=` and a following duration in **seconds** (e.g. `?t=2022` + `30` → clip from 33:42 for 30 seconds).
+- use a share link with `?t=` / `start=` and a following duration in **seconds** (e.g. `?t=2022` + `30` → clip from 33:42 for 30 seconds), or
+- use `?t=` / `start=` alone to choose a clip from that start through the end of the video (still offers full video as the other choice).
 
-Inline mode offers **Send clip** and **Send full video**; in a private chat the bot asks with buttons. Captions may follow the range or duration. A caption without a leading range/duration still downloads the whole video. A `t=` link alone (no duration) is the whole video.
+Inline mode offers **Send clip** and **Send full video**; in a private chat the bot asks with buttons. Captions may follow the range or duration. A caption without a leading range/duration on a link without `t=` still downloads the whole video.
 
 ```text
 @YourBot https://youtube.com/watch?v=… 1:20-2:05
 @YourBot https://youtube.com/watch?v=… 1:20-2:05 optional caption
 @YourBot https://youtu.be/…?t=2022 30
 @YourBot https://youtu.be/…?t=2022 30 optional caption
+@YourBot https://youtu.be/…?t=2022
 ```
 
 Tap **Send media** (or a clip / full-video choice). A placeholder appears first; the bot downloads in the background and replaces it with the file. Tap **Cancel** to stop and clear the placeholder.
@@ -137,7 +139,7 @@ Tap **Send media** (or a clip / full-video choice). A placeholder appears first;
 - TikTok **photo posts** (image slideshows with sound) are compiled into an MP4 via `ffmpeg`: each image is shown for about `SLIDESHOW_SLIDE_MS` (default 2500 ms). `SLIDESHOW_IMAGES_LOOP=true` (default) makes the video match the **full** audio track and loops images to fill it; `false` shows each image once then trims the audio (a single-image post still uses the full audio). Multi-image posts get TikTok-style page dots at the bottom. At most `SLIDESHOW_MAX_IMAGES` (default 35) images are included. The Docker image already ships a static `ffmpeg`.
 - `HTTPS_ONLY` defaults to true (set `false` to allow plain `http://` media URLs).
 - Captions: `CAPTION_MODE=media` (default, media title), `custom` (only text after the URL), or `off` (no captions). Custom captions are plain text, max 1024 characters, not stored in the media cache, and not sent to `STORAGE_CHAT_ID`.
-- YouTube clips: optional `start-end` after the link, or `?t=` / `start=` on the URL plus a duration in seconds (max 10 minutes). Requires `ffmpeg` (already in the Docker image).
+- YouTube clips: optional `start-end` after the link, or `?t=` / `start=` on the URL plus a duration in seconds, or `?t=` alone (from start to end). Max clip length 10 minutes. Requires `ffmpeg` (already in the Docker image).
 - Unsupported or oversize URLs replace the placeholder with an error message.
 
 ## Notes

@@ -366,16 +366,24 @@ class DirectMediaStream:
 
 @dataclass(frozen=True, slots=True)
 class TimeRange:
-    """Inclusive start / exclusive-feeling end in whole seconds (end > start)."""
+    """Clip window in whole seconds.
+
+    ``end is None`` means through the end of the video (resolved at download).
+    When ``end`` is set, it must be greater than ``start``.
+    """
 
     start: int
-    end: int
+    end: int | None = None
 
     @property
-    def duration_seconds(self) -> int:
+    def duration_seconds(self) -> int | None:
+        if self.end is None:
+            return None
         return self.end - self.start
 
     def cache_suffix(self) -> str:
+        if self.end is None:
+            return f"#t={self.start}-end"
         return f"#t={self.start}-{self.end}"
 
 
@@ -512,6 +520,8 @@ def format_time_range(time_range: TimeRange) -> str:
             return f"{hours}:{minutes:02d}:{seconds:02d}"
         return f"{minutes}:{seconds:02d}"
 
+    if time_range.end is None:
+        return f"{_fmt(time_range.start)}-end"
     return f"{_fmt(time_range.start)}-{_fmt(time_range.end)}"
 
 
@@ -538,38 +548,47 @@ def extract_url_and_caption(text: str) -> tuple[str | None, str | None]:
 def extract_media_request(text: str) -> MediaRequest:
     """Extract URL, optional YouTube time range (first token only), and caption.
 
-    Clip recognition (YouTube only), first trailing token:
+    Clip recognition (YouTube only):
 
-    - ``start-end`` absolute range (e.g. ``1:20-2:05``)
-    - Positive seconds duration when the URL carries ``t=`` / ``start=``
+    - Leading ``start-end`` absolute range (e.g. ``1:20-2:05``)
+    - ``t=`` / ``start=`` on the URL plus a positive seconds duration token
       (e.g. ``?t=2022`` + ``30`` -> clip 2022-2052)
+    - ``t=`` / ``start=`` alone (or with a non-range/non-duration caption) ->
+      open-ended clip from that start through the video end
 
-    On other hosts the token stays part of the caption. A YouTube link with
-    caption text that is neither a range nor a duration-with-start keeps
-    whole-video + caption behavior. ``t=`` alone (no duration token) is not
-    a clip.
+    On other hosts trailing tokens stay part of the caption. Absolute ranges
+    and duration tokens take precedence over open-ended ``t=``.
     """
     url, caption_raw = extract_url_and_caption(text)
     if url is None:
         return MediaRequest(url=None)
-    if not caption_raw or not is_youtube_url(url):
+    if not is_youtube_url(url):
         return MediaRequest(url=url, custom_caption=caption_raw)
 
-    parts = caption_raw.split(None, 1)
-    first = parts[0]
-    rest = parts[1] if len(parts) > 1 else None
-
-    time_range = parse_time_range_token(first)
-    if time_range is not None:
-        return MediaRequest(url=url, custom_caption=rest, time_range=time_range)
-
     url_start = parse_youtube_start_seconds(url)
-    duration = parse_duration_seconds_token(first)
-    if url_start is not None and duration is not None:
+
+    if caption_raw:
+        parts = caption_raw.split(None, 1)
+        first = parts[0]
+        rest = parts[1] if len(parts) > 1 else None
+
+        time_range = parse_time_range_token(first)
+        if time_range is not None:
+            return MediaRequest(url=url, custom_caption=rest, time_range=time_range)
+
+        duration = parse_duration_seconds_token(first)
+        if url_start is not None and duration is not None:
+            return MediaRequest(
+                url=url,
+                custom_caption=rest,
+                time_range=TimeRange(start=url_start, end=url_start + duration),
+            )
+
+    if url_start is not None:
         return MediaRequest(
             url=url,
-            custom_caption=rest,
-            time_range=TimeRange(start=url_start, end=url_start + duration),
+            custom_caption=caption_raw,
+            time_range=TimeRange(start=url_start, end=None),
         )
 
     return MediaRequest(url=url, custom_caption=caption_raw)
@@ -677,17 +696,49 @@ def is_https_url(url: str) -> bool:
 
 
 def _clamp_time_range(time_range: TimeRange, info: dict[str, Any]) -> TimeRange:
-    """Reject ranges past video end; clamp end to duration when known."""
+    """Resolve open-ended end; clamp to video duration; reject out-of-bounds."""
     duration_raw = info.get("duration")
     if not isinstance(duration_raw, (int, float)) or duration_raw <= 0:
+        if time_range.end is None:
+            raise DownloadError(strings.DOWNLOAD_CLIP_OUT_OF_BOUNDS)
         return time_range
+
     duration = int(duration_raw)
     if time_range.start >= duration:
         raise DownloadError(strings.DOWNLOAD_CLIP_OUT_OF_BOUNDS)
-    end = min(time_range.end, duration)
+    end = duration if time_range.end is None else min(time_range.end, duration)
     if end <= time_range.start:
         raise DownloadError(strings.DOWNLOAD_CLIP_OUT_OF_BOUNDS)
     return TimeRange(start=time_range.start, end=end)
+
+
+def _ensure_clip_within_max(time_range: TimeRange) -> None:
+    """Raise if a closed range exceeds the clip length cap."""
+    duration = time_range.duration_seconds
+    if duration is not None and duration > MAX_CLIP_SECONDS:
+        raise DownloadError(
+            strings.DOWNLOAD_CLIP_TOO_LONG.format(max_minutes=MAX_CLIP_SECONDS // 60)
+        )
+
+
+def _resolve_clip_range(time_range: TimeRange, info: dict[str, Any]) -> TimeRange:
+    """Clamp to video length, enforce max clip, return a closed range."""
+    resolved = _clamp_time_range(time_range, info)
+    _ensure_clip_within_max(resolved)
+    if resolved.end is None:
+        raise DownloadError(strings.DOWNLOAD_CLIP_OUT_OF_BOUNDS)
+    return resolved
+
+
+def _download_ranges_param(time_range: TimeRange) -> Any:
+    """Build yt-dlp download_ranges callback for a closed TimeRange."""
+    end = time_range.end
+    if end is None:
+        raise DownloadError(strings.DOWNLOAD_CLIP_OUT_OF_BOUNDS)
+    return cast(
+        Any,
+        download_range_func([], [(time_range.start, end)]),
+    )
 
 
 def _download_sync(
@@ -711,12 +762,7 @@ def _download_sync(
         raise DownloadError(strings.DOWNLOAD_UNSAFE_URL)
 
     if time_range is not None:
-        if time_range.duration_seconds > MAX_CLIP_SECONDS:
-            raise DownloadError(
-                strings.DOWNLOAD_CLIP_TOO_LONG.format(
-                    max_minutes=MAX_CLIP_SECONDS // 60
-                )
-            )
+        _ensure_clip_within_max(time_range)
         if shutil.which("ffmpeg") is None:
             raise DownloadError(strings.DOWNLOAD_CLIP_FFMPEG_MISSING)
 
@@ -821,13 +867,9 @@ def _download_sync(
                 info = _pick_info(extracted)
 
                 if effective_range is not None:
-                    effective_range = _clamp_time_range(effective_range, info)
-                    ydl.params["download_ranges"] = cast(
-                        Any,
-                        download_range_func(
-                            [],
-                            [(effective_range.start, effective_range.end)],
-                        ),
+                    effective_range = _resolve_clip_range(effective_range, info)
+                    ydl.params["download_ranges"] = _download_ranges_param(
+                        effective_range
                     )
 
                 if abort_event is not None and abort_event.is_set():
@@ -855,13 +897,9 @@ def _download_sync(
                     )
                     info = _pick_info(extracted)
                     if effective_range is not None:
-                        effective_range = _clamp_time_range(effective_range, info)
-                        ydl.params["download_ranges"] = cast(
-                            Any,
-                            download_range_func(
-                                [],
-                                [(effective_range.start, effective_range.end)],
-                            ),
+                        effective_range = _resolve_clip_range(effective_range, info)
+                        ydl.params["download_ranges"] = _download_ranges_param(
+                            effective_range
                         )
                     if abort_event is not None and abort_event.is_set():
                         raise DownloadError(

@@ -40,10 +40,11 @@ START_CAPTION_CUSTOM_HINT = (
 START_CAPTION_OFF_HINT = "\n\nMedia is sent without captions."
 
 START_CLIP_HINT = (
-    "\n\nYouTube clip — absolute range, or link with <code>?t=</code> plus length "
-    "in seconds:\n"
+    "\n\nYouTube clip — absolute range, <code>?t=</code> plus length in seconds, "
+    "or <code>?t=</code> alone (from that point to the end):\n"
     "<code>@{bot_username} {example_url} 1:20-2:05</code>\n"
-    "<code>@{bot_username} https://youtu.be/…?t=2022 30</code>"
+    "<code>@{bot_username} https://youtu.be/…?t=2022 30</code>\n"
+    "<code>@{bot_username} https://youtu.be/…?t=2022</code>"
 )
 
 # --- Direct private-chat URL handling ----------------------------------------

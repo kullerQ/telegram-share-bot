@@ -813,6 +813,7 @@ async def clip_choice_callback(
     if (
         want_clip
         and time_range is not None
+        and time_range.duration_seconds is not None
         and time_range.duration_seconds > MAX_CLIP_SECONDS
     ):
         msg = query.message
