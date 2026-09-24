@@ -8,6 +8,7 @@ import copy
 import ipaddress
 import logging
 import re
+import shutil
 import socket
 import threading
 import time
@@ -20,6 +21,7 @@ from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import urlsplit
 
 import yt_dlp
+from yt_dlp.utils import download_range_func
 
 if TYPE_CHECKING:
     from yt_dlp.extractor.common import _InfoDict
@@ -30,7 +32,7 @@ from telegram_share_bot.config import (
     TELEGRAM_CAPTION_MAX_LENGTH,
     CaptionMode,
 )
-from telegram_share_bot.normalizer import safe_url_for_log
+from telegram_share_bot.normalizer import is_youtube_url, safe_url_for_log
 
 logger = logging.getLogger(__name__)
 
@@ -362,8 +364,95 @@ class DirectMediaStream:
     duration: int | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class TimeRange:
+    """Inclusive start / exclusive-feeling end in whole seconds (end > start)."""
+
+    start: int
+    end: int
+
+    @property
+    def duration_seconds(self) -> int:
+        return self.end - self.start
+
+    def cache_suffix(self) -> str:
+        return f"#t={self.start}-{self.end}"
+
+
+@dataclass(frozen=True, slots=True)
+class MediaRequest:
+    """Parsed inline/direct query: URL, optional caption, optional YouTube clip."""
+
+    url: str | None
+    custom_caption: str | None = None
+    time_range: TimeRange | None = None
+
+
 class DownloadError(Exception):
     """Raised when a URL cannot be downloaded within bot limits."""
+
+
+# YouTube clip length hard cap (still offer both choices; clip path rejects over-long).
+MAX_CLIP_SECONDS = 600
+
+# Whole-token time range: start-end with seconds or h:mm:ss / m:ss forms.
+_TIME_PART_RE = re.compile(r"^(?:(\d+):)?(?:(\d+):)?(\d+)$")
+_RANGE_TOKEN_RE = re.compile(r"^(.+)-(.+)$")
+
+
+def _parse_time_part(part: str) -> int | None:
+    """Parse ``SS``, ``M:SS``, or ``H:MM:SS`` into total seconds.
+
+    ``M:SS`` allows minutes greater than 59 (e.g. ``90:12``).
+    ``H:MM:SS`` requires minutes and seconds in 0-59.
+    """
+    match = _TIME_PART_RE.match(part)
+    if match is None:
+        return None
+    left, mid, right = match.group(1), match.group(2), match.group(3)
+    seconds = int(right)
+    if left is not None and mid is not None:
+        # H:MM:SS
+        hours = int(left)
+        minutes = int(mid)
+        if minutes > 59 or seconds > 59:
+            return None
+        return hours * 3600 + minutes * 60 + seconds
+    if left is not None:
+        # M:SS (minutes may exceed 59)
+        minutes = int(left)
+        if seconds > 59:
+            return None
+        return minutes * 60 + seconds
+    # Plain seconds
+    return seconds
+
+
+def parse_time_range_token(token: str) -> TimeRange | None:
+    """Parse a single token as ``start-end``. Returns None if it is not a range."""
+    match = _RANGE_TOKEN_RE.match(token.strip())
+    if match is None:
+        return None
+    start = _parse_time_part(match.group(1))
+    end = _parse_time_part(match.group(2))
+    if start is None or end is None:
+        return None
+    if end <= start:
+        return None
+    return TimeRange(start=start, end=end)
+
+
+def format_time_range(time_range: TimeRange) -> str:
+    """Human-readable range for buttons and titles."""
+
+    def _fmt(total: int) -> str:
+        hours, rem = divmod(total, 3600)
+        minutes, seconds = divmod(rem, 60)
+        if hours:
+            return f"{hours}:{minutes:02d}:{seconds:02d}"
+        return f"{minutes}:{seconds:02d}"
+
+    return f"{_fmt(time_range.start)}-{_fmt(time_range.end)}"
 
 
 def extract_url(text: str) -> str | None:
@@ -384,6 +473,29 @@ def extract_url_and_caption(text: str) -> tuple[str | None, str | None]:
     url = match.group(0).rstrip(").,]}>'\"")
     caption_raw = stripped[match.end() :].strip()
     return url, caption_raw or None
+
+
+def extract_media_request(text: str) -> MediaRequest:
+    """Extract URL, optional YouTube time range (first token only), and caption.
+
+    A leading ``start-end`` token is treated as a clip only for YouTube URLs.
+    On other hosts the same token stays part of the caption (or is ignored when
+    captions are off). A YouTube link with caption text that is not a range
+    keeps today's whole-video + caption behavior.
+    """
+    url, caption_raw = extract_url_and_caption(text)
+    if url is None:
+        return MediaRequest(url=None)
+    if not caption_raw or not is_youtube_url(url):
+        return MediaRequest(url=url, custom_caption=caption_raw)
+
+    parts = caption_raw.split(None, 1)
+    first = parts[0]
+    rest = parts[1] if len(parts) > 1 else None
+    time_range = parse_time_range_token(first)
+    if time_range is None:
+        return MediaRequest(url=url, custom_caption=caption_raw)
+    return MediaRequest(url=url, custom_caption=rest, time_range=time_range)
 
 
 def sanitize_caption(text: str, *, max_length: int = 1024) -> str | None:
@@ -487,6 +599,20 @@ def is_https_url(url: str) -> bool:
     return urlsplit(url).scheme.lower() == "https"
 
 
+def _clamp_time_range(time_range: TimeRange, info: dict[str, Any]) -> TimeRange:
+    """Reject ranges past video end; clamp end to duration when known."""
+    duration_raw = info.get("duration")
+    if not isinstance(duration_raw, (int, float)) or duration_raw <= 0:
+        return time_range
+    duration = int(duration_raw)
+    if time_range.start >= duration:
+        raise DownloadError(strings.DOWNLOAD_CLIP_OUT_OF_BOUNDS)
+    end = min(time_range.end, duration)
+    if end <= time_range.start:
+        raise DownloadError(strings.DOWNLOAD_CLIP_OUT_OF_BOUNDS)
+    return TimeRange(start=time_range.start, end=end)
+
+
 def _download_sync(
     url: str,
     download_dir: Path,
@@ -500,11 +626,22 @@ def _download_sync(
     slideshow_slide_ms: int = 2500,
     slideshow_max_images: int = 35,
     slideshow_images_loop: bool = DEFAULT_SLIDESHOW_IMAGES_LOOP,
+    time_range: TimeRange | None = None,
 ) -> DownloadedMedia:
     if https_only and not is_https_url(url):
         raise DownloadError(strings.DOWNLOAD_HTTPS_REQUIRED)
     if not is_safe_media_url(url, https_only=https_only):
         raise DownloadError(strings.DOWNLOAD_UNSAFE_URL)
+
+    if time_range is not None:
+        if time_range.duration_seconds > MAX_CLIP_SECONDS:
+            raise DownloadError(
+                strings.DOWNLOAD_CLIP_TOO_LONG.format(
+                    max_minutes=MAX_CLIP_SECONDS // 60
+                )
+            )
+        if shutil.which("ffmpeg") is None:
+            raise DownloadError(strings.DOWNLOAD_CLIP_FFMPEG_MISSING)
 
     work_dir = download_dir / uuid.uuid4().hex
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -512,53 +649,62 @@ def _download_sync(
         work_dir_holder.append(work_dir)
 
     # TikTok photo posts: yt-dlp has no slideshow formats — compile images + sound.
-    from telegram_share_bot.slideshow import download_tiktok_slideshow
+    # Clip ranges only apply to YouTube; skip slideshow for ranged downloads.
+    if time_range is None:
+        from telegram_share_bot.slideshow import download_tiktok_slideshow
 
-    try:
-        slideshow = download_tiktok_slideshow(
-            url,
-            work_dir,
-            max_file_bytes=max_file_bytes,
-            timeout_seconds=timeout_seconds,
-            slide_ms=slideshow_slide_ms,
-            max_images=slideshow_max_images,
-            images_loop=slideshow_images_loop,
-            abort_event=abort_event,
-            https_only=https_only,
-            allowed_hosts=allowed_hosts,
-        )
-        if slideshow is not None:
-            return slideshow
-    except DownloadError:
-        _cleanup_dir(work_dir)
-        raise
-    except Exception as exc:
-        _cleanup_dir(work_dir)
-        logger.warning(
-            "Slideshow path failed for %s: %s", safe_url_for_log(url), exc
-        )
-        raise DownloadError(strings.DOWNLOAD_FAILED_GENERIC) from exc
+        try:
+            slideshow = download_tiktok_slideshow(
+                url,
+                work_dir,
+                max_file_bytes=max_file_bytes,
+                timeout_seconds=timeout_seconds,
+                slide_ms=slideshow_slide_ms,
+                max_images=slideshow_max_images,
+                images_loop=slideshow_images_loop,
+                abort_event=abort_event,
+                https_only=https_only,
+                allowed_hosts=allowed_hosts,
+            )
+            if slideshow is not None:
+                return slideshow
+        except DownloadError:
+            _cleanup_dir(work_dir)
+            raise
+        except Exception as exc:
+            _cleanup_dir(work_dir)
+            logger.warning(
+                "Slideshow path failed for %s: %s", safe_url_for_log(url), exc
+            )
+            raise DownloadError(strings.DOWNLOAD_FAILED_GENERIC) from exc
 
     outtmpl = str(work_dir / "%(title).80B [%(id)s].%(ext)s")
+    is_clip = time_range is not None
 
     def _progress_hook(d: dict[str, Any]) -> None:
         if abort_event is not None and abort_event.is_set():
             raise DownloadError(
                 strings.DOWNLOAD_TIMED_OUT.format(timeout_seconds=timeout_seconds)
             )
-        total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
         downloaded = d.get("downloaded_bytes") or 0
-        if (
-            (isinstance(total, (int, float)) and total > max_file_bytes)
-            or (isinstance(downloaded, (int, float)) and downloaded > max_file_bytes)
-        ):
+        if isinstance(downloaded, (int, float)) and downloaded > max_file_bytes:
+            raise DownloadError(
+                strings.DOWNLOAD_EXCEEDS_LIMIT.format(
+                    max_mb=max_file_bytes // (1024 * 1024)
+                )
+            )
+        if is_clip:
+            return
+        total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
+        if isinstance(total, (int, float)) and total > max_file_bytes:
             raise DownloadError(
                 strings.DOWNLOAD_EXCEEDS_LIMIT.format(
                     max_mb=max_file_bytes // (1024 * 1024)
                 )
             )
 
-    # Size-bounded formats only — no unbounded "bv*+ba/b" fallback.
+    # Size-bounded formats for full downloads; height-capped for clips (full
+    # filesize filters would reject short slices of long videos).
     ydl_opts: dict[str, Any] = {
         "outtmpl": outtmpl,
         "noplaylist": True,
@@ -566,16 +712,21 @@ def _download_sync(
         "no_warnings": True,
         "socket_timeout": min(30, timeout_seconds),
         "retries": 2,
-        "max_filesize": max_file_bytes,
-        "format": (
+        "merge_output_format": "mp4",
+        "progress_hooks": [_progress_hook],
+    }
+    if is_clip:
+        ydl_opts["format"] = "bv*[height<=1080]+ba/bv*[height<=720]+ba/b"
+    else:
+        ydl_opts["max_filesize"] = max_file_bytes
+        ydl_opts["format"] = (
             f"bv*[filesize<{max_file_bytes}]+ba/"
             f"b[filesize<{max_file_bytes}]/"
             f"bv*[filesize_approx<{max_file_bytes}]+ba/"
             f"b[filesize_approx<{max_file_bytes}]"
-        ),
-        "merge_output_format": "mp4",
-        "progress_hooks": [_progress_hook],
-    }
+        )
+
+    effective_range = time_range
 
     try:
         with _safe_dns_resolution():
@@ -591,6 +742,16 @@ def _download_sync(
                 # Reuse extract_info from get_direct_stream when still warm.
                 extracted, from_cache = _extract_info_cached(ydl, url)
                 info = _pick_info(extracted)
+
+                if effective_range is not None:
+                    effective_range = _clamp_time_range(effective_range, info)
+                    ydl.params["download_ranges"] = cast(
+                        Any,
+                        download_range_func(
+                            [],
+                            [(effective_range.start, effective_range.end)],
+                        ),
+                    )
 
                 if abort_event is not None and abort_event.is_set():
                     raise DownloadError(
@@ -616,6 +777,15 @@ def _download_sync(
                         ydl, url, force_refresh=True
                     )
                     info = _pick_info(extracted)
+                    if effective_range is not None:
+                        effective_range = _clamp_time_range(effective_range, info)
+                        ydl.params["download_ranges"] = cast(
+                            Any,
+                            download_range_func(
+                                [],
+                                [(effective_range.start, effective_range.end)],
+                            ),
+                        )
                     if abort_event is not None and abort_event.is_set():
                         raise DownloadError(
                             strings.DOWNLOAD_TIMED_OUT.format(
@@ -644,12 +814,16 @@ def _download_sync(
                     )
 
                 title = str(info.get("title") or path.stem)[:64]
-                duration_raw = info.get("duration")
-                duration = (
-                    int(duration_raw)
-                    if isinstance(duration_raw, (int, float))
-                    else None
-                )
+                duration: int | None
+                if effective_range is not None:
+                    duration = effective_range.duration_seconds
+                else:
+                    duration_raw = info.get("duration")
+                    duration = (
+                        int(duration_raw)
+                        if isinstance(duration_raw, (int, float))
+                        else None
+                    )
 
                 if abort_event is not None and abort_event.is_set():
                     raise DownloadError(
@@ -687,6 +861,7 @@ def _download_sync(
         )
         raise DownloadError(strings.DOWNLOAD_FAILED_GENERIC) from exc
 
+
 def _cleanup_dir(directory: Path) -> None:
     if not directory.exists():
         return
@@ -712,6 +887,7 @@ async def download_media(
     slideshow_slide_ms: int = 2500,
     slideshow_max_images: int = 35,
     slideshow_images_loop: bool = DEFAULT_SLIDESHOW_IMAGES_LOOP,
+    time_range: TimeRange | None = None,
 ) -> DownloadedMedia:
     if not is_allowed_media_host(url, allowed_hosts):
         raise DownloadError(strings.DOWNLOAD_HOST_NOT_ALLOWED)
@@ -737,6 +913,7 @@ async def download_media(
                 slideshow_slide_ms=slideshow_slide_ms,
                 slideshow_max_images=slideshow_max_images,
                 slideshow_images_loop=slideshow_images_loop,
+                time_range=time_range,
             ),
             timeout=timeout_seconds,
         )

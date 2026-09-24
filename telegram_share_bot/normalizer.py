@@ -71,6 +71,32 @@ _PUBLIC_CACHE_HOSTS = frozenset(
     }
 )
 
+_YOUTUBE_HOSTS = frozenset(
+    {
+        "youtube.com",
+        "youtu.be",
+        "youtube-nocookie.com",
+    }
+)
+
+
+def is_youtube_url(raw_url: str) -> bool:
+    """Return True if the URL host is YouTube (including youtu.be / nocookie)."""
+    clean = raw_url.strip()
+    if not clean:
+        return False
+    try:
+        host = (
+            urlsplit(clean)
+            .netloc.lower()
+            .removeprefix("www.")
+            .removeprefix("m.")
+            .removeprefix("music.")
+        )
+    except Exception:
+        return False
+    return host in _YOUTUBE_HOSTS
+
 
 def looks_signed_url(raw_url: str) -> bool:
     """Return True if the URL appears to carry auth / signed query parameters."""

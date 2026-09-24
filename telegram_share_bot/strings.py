@@ -39,6 +39,11 @@ START_CAPTION_CUSTOM_HINT = (
 
 START_CAPTION_OFF_HINT = "\n\nMedia is sent without captions."
 
+START_CLIP_HINT = (
+    "\n\nYouTube clip (optional range after the link):\n"
+    "<code>@{bot_username} {example_url} 1:20-2:05</code>"
+)
+
 # --- Direct private-chat URL handling ----------------------------------------
 
 DIRECT_URL_HINT = "Send a media URL, or use me inline: @BotName <url>"
@@ -49,6 +54,12 @@ DIRECT_SEND_FAILED = "Something went wrong while sending the media."
 DIRECT_UPLOAD_FAILED = (
     "Could not upload the media to Telegram (network error). Please try again."
 )
+DIRECT_CLIP_PROMPT = (
+    "YouTube time range detected ({range_label}).\n"
+    "Choose clip or full video:"
+)
+DIRECT_CLIP_EXPIRED = "That choice expired. Send the link again."
+DIRECT_CLIP_CHOICE_ANSWER = "Got it"
 
 # --- Inline query (fast answer) ----------------------------------------------
 
@@ -61,7 +72,10 @@ INLINE_NO_URL_TITLE = "No URL found"
 INLINE_NO_URL_DESCRIPTION = "Include a full http(s) link in the inline query."
 
 INLINE_PENDING_TITLE = "Send media"
+INLINE_PENDING_CLIP_TITLE = "Send clip {range_label}"
+INLINE_PENDING_FULL_TITLE = "Send full video"
 INLINE_PENDING_MESSAGE = "Preparing media…\n{url}"
+INLINE_PENDING_CLIP_MESSAGE = "Preparing clip {range_label}…\n{url}"
 INLINE_CANCEL_BUTTON = "Cancel"
 INLINE_CANCELLED = "Cancelled."
 INLINE_CANCEL_ANSWER = "Cancelled"
@@ -95,6 +109,14 @@ DOWNLOAD_FAILED_INCOMPLETE = (
     "Download was aborted or incomplete (file may exceed limits)."
 )
 DOWNLOAD_LIVE_UNSUPPORTED = "Live streams cannot be downloaded."
+DOWNLOAD_CLIP_TOO_LONG = (
+    "Clips longer than {max_minutes} minutes are not supported. "
+    "Choose full video, or use a shorter range."
+)
+DOWNLOAD_CLIP_OUT_OF_BOUNDS = "That time range is outside the video length."
+DOWNLOAD_CLIP_FFMPEG_MISSING = (
+    "ffmpeg is required to download YouTube clips."
+)
 SLIDESHOW_FFMPEG_MISSING = (
     "ffmpeg is required to compile TikTok photo posts into video."
 )

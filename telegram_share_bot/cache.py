@@ -11,7 +11,7 @@ from collections.abc import Generator
 from dataclasses import dataclass
 from pathlib import Path
 
-from telegram_share_bot.downloader import MediaKind
+from telegram_share_bot.downloader import MediaKind, TimeRange
 from telegram_share_bot.normalizer import is_public_cacheable_url, normalize_url, safe_url_for_log
 
 logger = logging.getLogger(__name__)
@@ -21,6 +21,16 @@ _RECOVERABLE_DB_ERRORS = (
     sqlite3.OperationalError,
     sqlite3.DatabaseError,
 )
+
+
+def _cache_key(url: str, time_range: TimeRange | None = None) -> str | None:
+    """Normalized URL, with an optional clip suffix so clips do not collide."""
+    norm_url = normalize_url(url)
+    if not norm_url:
+        return None
+    if time_range is None:
+        return norm_url
+    return f"{norm_url}{time_range.cache_suffix()}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -198,18 +208,20 @@ class MediaCache:
                 raise
             return self._evict_sync(norm_url)
 
-    async def get(self, url: str) -> CachedMedia | None:
+    async def get(
+        self, url: str, *, time_range: TimeRange | None = None
+    ) -> CachedMedia | None:
         """Fetch cached media by raw or normalized URL.
 
         If the DB file was deleted mid-run, recreates it and returns a cache miss.
         """
         if not is_public_cacheable_url(url):
             return None
-        norm_url = normalize_url(url)
-        if not norm_url:
+        key = _cache_key(url, time_range)
+        if not key:
             return None
         try:
-            return await asyncio.to_thread(self._get_with_recovery, norm_url)
+            return await asyncio.to_thread(self._get_with_recovery, key)
         except _RECOVERABLE_DB_ERRORS:
             return None
 
@@ -220,6 +232,8 @@ class MediaCache:
         kind: MediaKind,
         title: str,
         duration: int | None,
+        *,
+        time_range: TimeRange | None = None,
     ) -> None:
         """Cache media file_id under the normalized URL.
 
@@ -231,32 +245,34 @@ class MediaCache:
                 "Skipping cache for non-public URL: %s", safe_url_for_log(url)
             )
             return
-        norm_url = normalize_url(url)
-        if not norm_url:
+        key = _cache_key(url, time_range)
+        if not key:
             return
         try:
             await asyncio.to_thread(
-                self._set_with_recovery, norm_url, file_id, kind, title, duration
+                self._set_with_recovery, key, file_id, kind, title, duration
             )
-            logger.debug("Cached file_id for %s (%s)", norm_url, kind.value)
+            logger.debug("Cached file_id for %s (%s)", key, kind.value)
         except _RECOVERABLE_DB_ERRORS as exc:
             logger.warning(
                 "Could not write media cache for %s: %s",
-                safe_url_for_log(norm_url),
+                safe_url_for_log(key),
                 exc,
             )
 
-    async def evict(self, url: str) -> None:
+    async def evict(
+        self, url: str, *, time_range: TimeRange | None = None
+    ) -> None:
         """Evict a URL from the cache (e.g. if file_id is invalid).
 
         Missing/deleted DB is treated as already empty.
         """
-        norm_url = normalize_url(url)
-        if not norm_url:
+        key = _cache_key(url, time_range)
+        if not key:
             return
         try:
-            removed = await asyncio.to_thread(self._evict_with_recovery, norm_url)
+            removed = await asyncio.to_thread(self._evict_with_recovery, key)
         except _RECOVERABLE_DB_ERRORS:
             return
         if removed:
-            logger.info("Evicted %s from media cache", safe_url_for_log(norm_url))
+            logger.info("Evicted %s from media cache", safe_url_for_log(key))

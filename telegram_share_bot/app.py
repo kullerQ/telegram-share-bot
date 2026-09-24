@@ -32,6 +32,7 @@ from telegram_share_bot.downloader import cleanup_stale_downloads
 from telegram_share_bot.handlers import (
     cancel_callback,
     chosen_inline_result,
+    clip_choice_callback,
     help_command,
     inline_query,
     start_command,
@@ -131,6 +132,9 @@ def build_application() -> App:
     application.add_handler(ChosenInlineResultHandler(chosen_inline_result))
     application.add_handler(
         CallbackQueryHandler(cancel_callback, pattern=r"^cancel:")
+    )
+    application.add_handler(
+        CallbackQueryHandler(clip_choice_callback, pattern=r"^(clip|full):")
     )
     application.add_handler(
         MessageHandler(
