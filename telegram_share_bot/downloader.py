@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlsplit
 
 import yt_dlp
 from yt_dlp.utils import download_range_func
@@ -398,6 +398,12 @@ MAX_CLIP_SECONDS = 600
 # Whole-token time range: start-end with seconds or h:mm:ss / m:ss forms.
 _TIME_PART_RE = re.compile(r"^(?:(\d+):)?(?:(\d+):)?(\d+)$")
 _RANGE_TOKEN_RE = re.compile(r"^(.+)-(.+)$")
+_DURATION_SECONDS_RE = re.compile(r"^\d+$")
+# YouTube share clock: ``1h2m3s``, ``33m42s``, ``90s`` (any non-empty combo).
+_YT_CLOCK_RE = re.compile(
+    r"^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?$",
+    re.IGNORECASE,
+)
 
 
 def _parse_time_part(part: str) -> int | None:
@@ -426,6 +432,60 @@ def _parse_time_part(part: str) -> int | None:
         return minutes * 60 + seconds
     # Plain seconds
     return seconds
+
+
+def _parse_youtube_timestamp_value(raw: str) -> int | None:
+    """Parse a YouTube ``t`` / ``start`` value into whole seconds."""
+    value = raw.strip()
+    if not value:
+        return None
+    if _DURATION_SECONDS_RE.match(value):
+        seconds = int(value)
+        return seconds if seconds >= 0 else None
+    match = _YT_CLOCK_RE.match(value)
+    if match is None or not any(match.groups()):
+        return None
+    hours = int(match.group(1) or 0)
+    minutes = int(match.group(2) or 0)
+    secs = int(match.group(3) or 0)
+    return hours * 3600 + minutes * 60 + secs
+
+
+def parse_youtube_start_seconds(url: str) -> int | None:
+    """Return start offset from YouTube ``t`` / ``start`` query or ``#t=`` fragment."""
+    try:
+        parsed = urlsplit(url.strip())
+    except Exception:
+        return None
+
+    for key, value in parse_qsl(parsed.query, keep_blank_values=False):
+        if key.lower() in ("t", "start"):
+            start = _parse_youtube_timestamp_value(value)
+            if start is not None:
+                return start
+
+    fragment = parsed.fragment or ""
+    if fragment.lower().startswith("t="):
+        start = _parse_youtube_timestamp_value(fragment[2:])
+        if start is not None:
+            return start
+    # Rare: fragment is bare ``t=…`` already handled; also ``t=90s`` as sole fragment.
+    if fragment:
+        # ``#t=1h2m3s`` already covered; ``#90`` is not a YouTube convention.
+        for key, value in parse_qsl(fragment, keep_blank_values=False):
+            if key.lower() in ("t", "start"):
+                start = _parse_youtube_timestamp_value(value)
+                if start is not None:
+                    return start
+    return None
+
+
+def parse_duration_seconds_token(token: str) -> int | None:
+    """Parse a whole token as a positive duration in whole seconds."""
+    if not _DURATION_SECONDS_RE.match(token.strip()):
+        return None
+    seconds = int(token.strip())
+    return seconds if seconds >= 1 else None
 
 
 def parse_time_range_token(token: str) -> TimeRange | None:
@@ -478,10 +538,16 @@ def extract_url_and_caption(text: str) -> tuple[str | None, str | None]:
 def extract_media_request(text: str) -> MediaRequest:
     """Extract URL, optional YouTube time range (first token only), and caption.
 
-    A leading ``start-end`` token is treated as a clip only for YouTube URLs.
-    On other hosts the same token stays part of the caption (or is ignored when
-    captions are off). A YouTube link with caption text that is not a range
-    keeps today's whole-video + caption behavior.
+    Clip recognition (YouTube only), first trailing token:
+
+    - ``start-end`` absolute range (e.g. ``1:20-2:05``)
+    - Positive seconds duration when the URL carries ``t=`` / ``start=``
+      (e.g. ``?t=2022`` + ``30`` -> clip 2022-2052)
+
+    On other hosts the token stays part of the caption. A YouTube link with
+    caption text that is neither a range nor a duration-with-start keeps
+    whole-video + caption behavior. ``t=`` alone (no duration token) is not
+    a clip.
     """
     url, caption_raw = extract_url_and_caption(text)
     if url is None:
@@ -492,10 +558,21 @@ def extract_media_request(text: str) -> MediaRequest:
     parts = caption_raw.split(None, 1)
     first = parts[0]
     rest = parts[1] if len(parts) > 1 else None
+
     time_range = parse_time_range_token(first)
-    if time_range is None:
-        return MediaRequest(url=url, custom_caption=caption_raw)
-    return MediaRequest(url=url, custom_caption=rest, time_range=time_range)
+    if time_range is not None:
+        return MediaRequest(url=url, custom_caption=rest, time_range=time_range)
+
+    url_start = parse_youtube_start_seconds(url)
+    duration = parse_duration_seconds_token(first)
+    if url_start is not None and duration is not None:
+        return MediaRequest(
+            url=url,
+            custom_caption=rest,
+            time_range=TimeRange(start=url_start, end=url_start + duration),
+        )
+
+    return MediaRequest(url=url, custom_caption=caption_raw)
 
 
 def sanitize_caption(text: str, *, max_length: int = 1024) -> str | None:

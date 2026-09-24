@@ -17,7 +17,9 @@ from telegram_share_bot.downloader import (
     _download_sync,
     extract_media_request,
     format_time_range,
+    parse_duration_seconds_token,
     parse_time_range_token,
+    parse_youtube_start_seconds,
 )
 from telegram_share_bot.handlers import inline_query
 from telegram_share_bot.normalizer import is_youtube_url
@@ -100,6 +102,89 @@ class TestExtractMediaRequest(unittest.TestCase):
         req = extract_media_request("https://youtu.be/dQw4w9WgXcQ")
         self.assertIsNone(req.time_range)
         self.assertIsNone(req.custom_caption)
+
+    def test_youtube_t_plus_duration(self) -> None:
+        req = extract_media_request("https://youtu.be/-gLCzX0WlpY?t=2022 30")
+        self.assertEqual(req.time_range, TimeRange(2022, 2052))
+        self.assertIsNone(req.custom_caption)
+
+    def test_youtube_t_plus_duration_then_caption(self) -> None:
+        req = extract_media_request(
+            "https://youtu.be/-gLCzX0WlpY?t=2022 30 optional caption"
+        )
+        self.assertEqual(req.time_range, TimeRange(2022, 2052))
+        self.assertEqual(req.custom_caption, "optional caption")
+
+    def test_youtube_t_alone_no_clip(self) -> None:
+        req = extract_media_request("https://youtu.be/-gLCzX0WlpY?t=2022")
+        self.assertIsNone(req.time_range)
+        self.assertIsNone(req.custom_caption)
+
+    def test_youtube_duration_without_t_is_caption(self) -> None:
+        req = extract_media_request(
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ 30"
+        )
+        self.assertIsNone(req.time_range)
+        self.assertEqual(req.custom_caption, "30")
+
+    def test_absolute_range_preferred_over_t(self) -> None:
+        req = extract_media_request(
+            "https://youtu.be/-gLCzX0WlpY?t=2022 1:20-2:05"
+        )
+        self.assertEqual(req.time_range, TimeRange(80, 125))
+
+    def test_youtube_clock_t_plus_duration(self) -> None:
+        req = extract_media_request(
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=1h2m3s 45"
+        )
+        self.assertEqual(req.time_range, TimeRange(3723, 3768))
+
+
+class TestYoutubeStartAndDuration(unittest.TestCase):
+    def test_parse_start_plain_seconds(self) -> None:
+        self.assertEqual(
+            parse_youtube_start_seconds("https://youtu.be/abc?t=2022"),
+            2022,
+        )
+
+    def test_parse_start_clock(self) -> None:
+        self.assertEqual(
+            parse_youtube_start_seconds(
+                "https://www.youtube.com/watch?v=abc&t=33m42s"
+            ),
+            2022,
+        )
+        self.assertEqual(
+            parse_youtube_start_seconds(
+                "https://www.youtube.com/watch?v=abc&t=1h2m3s"
+            ),
+            3723,
+        )
+
+    def test_parse_start_param(self) -> None:
+        self.assertEqual(
+            parse_youtube_start_seconds(
+                "https://www.youtube.com/watch?v=abc&start=90"
+            ),
+            90,
+        )
+
+    def test_parse_start_fragment(self) -> None:
+        self.assertEqual(
+            parse_youtube_start_seconds("https://youtu.be/abc#t=120"),
+            120,
+        )
+
+    def test_parse_start_missing(self) -> None:
+        self.assertIsNone(
+            parse_youtube_start_seconds("https://youtu.be/abc")
+        )
+
+    def test_duration_token(self) -> None:
+        self.assertEqual(parse_duration_seconds_token("30"), 30)
+        self.assertIsNone(parse_duration_seconds_token("0"))
+        self.assertIsNone(parse_duration_seconds_token("1:30"))
+        self.assertIsNone(parse_duration_seconds_token("30s"))
 
 
 class TestIsYoutubeUrl(unittest.TestCase):
