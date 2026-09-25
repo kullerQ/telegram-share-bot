@@ -25,8 +25,12 @@ INLINE_RATE_LIMITED_DESCRIPTION = "Too many downloads in progress. Please wait."
 START_MESSAGE = (
     "🎬 {bot_name}\n\n"
     "Paste one media link here and I'll send the media back.\n\n"
-    "↗️ To share in another chat, type @{bot_username} followed by the link there.\n"
-    "✂️ Want a YouTube clip? See /help for examples."
+    "🌐 Platforms: YouTube · TikTok · Instagram · X\n"
+    "🎞 Videos and TikTok photo slideshows (sound when available)\n"
+    "✂️ YouTube clips or full videos\n\n"
+    "↗️ To share in another chat, type @{bot_username} followed by a link.\n"
+    "Example: @{bot_username} <link>\n"
+    "💡 For more information, see /help."
 )
 HELP_MESSAGE = (
     "📖 How to share\n\n"
