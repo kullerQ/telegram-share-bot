@@ -210,12 +210,16 @@ class TestMediaProgress(unittest.IsolatedAsyncioTestCase):
         clip_choice, full_choice = query.answer.await_args.kwargs["results"]
         self.assertIn("Send clip 2:30-3:30", clip_choice.title)
         self.assertIn(
-            "YouTube · Video · Clip 2:30-3:30 · 1:00 · Ready from cache",
+            "YouTube · Video · Duration: 1:00 · Instant",
             clip_choice.description,
         )
         self.assertIn("Checking clip", clip_choice.input_message_content.message_text)
+        self.assertTrue(clip_choice.thumbnail_url.endswith("/youtube.png"))
+        self.assertEqual(clip_choice.thumbnail_width, 224)
+        self.assertEqual(clip_choice.thumbnail_height, 224)
         self.assertIn("Send full video", full_choice.title)
-        self.assertIn("YouTube · Video · 6:00 · Ready from cache", full_choice.description)
+        self.assertIn("YouTube · Video · Duration: 6:00 · Instant", full_choice.description)
+        self.assertEqual(full_choice.thumbnail_url, clip_choice.thumbnail_url)
 
     async def test_uncached_inline_video_has_action_and_readiness(self) -> None:
         query = MagicMock()
@@ -230,9 +234,10 @@ class TestMediaProgress(unittest.IsolatedAsyncioTestCase):
         result = query.answer.await_args.kwargs["results"][0]
         self.assertEqual(result.title, "▶ Send video")
         self.assertEqual(
-            result.description, "YouTube · Video · Download after selection"
+            result.description, "YouTube · Video · Download"
         )
         self.assertIn("Checking the media link", result.input_message_content.message_text)
+        self.assertTrue(result.thumbnail_url.endswith("/youtube.png"))
 
     async def test_clip_progress_starts_after_initial_checking_message(self) -> None:
         self.context.bot.edit_message_text = AsyncMock()
