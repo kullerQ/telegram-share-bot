@@ -82,6 +82,12 @@ INLINE_PENDING_CLIP_MESSAGE = "Preparing clip {range_label}…\n{url}"
 INLINE_CANCEL_BUTTON = "Cancel"
 INLINE_CANCELLED = "Cancelled."
 INLINE_CANCEL_ANSWER = "Cancelled"
+INLINE_RETRY_BUTTON = "Try again"
+INLINE_RETRY_CLIP_BUTTON = "Retry clip"
+INLINE_SEND_FULL_BUTTON = "Send full video"
+INLINE_RETRY_ANSWER = "Retrying…"
+INLINE_RETRY_EXPIRED = "This request has expired. Send the link again."
+INLINE_ALREADY_PREPARING = "This media is already being prepared."
 
 # --- After user chooses an inline result -------------------------------------
 

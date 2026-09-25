@@ -110,6 +110,11 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Configure release tag identity
+        run: |
+          git config user.name "kullerQ"
+          git config user.email "60192357+kullerQ@users.noreply.github.com"
+
       - name: Create immutable Git tag
         env:
           VERSION: ${{ steps.version.outputs.value }}

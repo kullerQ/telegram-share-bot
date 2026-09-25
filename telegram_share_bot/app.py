@@ -35,6 +35,7 @@ from telegram_share_bot.handlers import (
     clip_choice_callback,
     help_command,
     inline_query,
+    retry_inline_callback,
     start_command,
     url_message,
 )
@@ -130,6 +131,9 @@ def build_application() -> App:
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(InlineQueryHandler(inline_query))
     application.add_handler(ChosenInlineResultHandler(chosen_inline_result))
+    application.add_handler(
+        CallbackQueryHandler(retry_inline_callback, pattern=r"^(retry|fallback):")
+    )
     application.add_handler(
         CallbackQueryHandler(cancel_callback, pattern=r"^cancel:")
     )
