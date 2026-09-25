@@ -1,4 +1,5 @@
 python-telegram-bot==22.5
+httpx>=0.27,<0.29
 # default extras: brotli/certifi/mutagen/etc. curl-cffi is pinned separately —
 # TikTok requires browser impersonation; 0.16.1+ can pick chrome-150 which TikTok blocks.
 yt-dlp[default]>=2025.1.15

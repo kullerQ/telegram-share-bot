@@ -38,6 +38,7 @@ _LOGO_BY_HOST = {
     "pinterest.com": "pinterest.png",
     "pixiv.net": "pixiv.png",
     "redd.it": "reddit.png",
+    "v.redd.it": "reddit.png",
     "reddit.com": "reddit.png",
     "steamcommunity.com": "steam.png",
     "steampowered.com": "steam.png",

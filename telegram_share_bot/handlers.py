@@ -28,7 +28,7 @@ from telegram import (
 from telegram.error import BadRequest, NetworkError, TelegramError, TimedOut
 from telegram.ext import ContextTypes
 
-from telegram_share_bot import platform_icons, strings
+from telegram_share_bot import platform_icons, platform_previews, strings
 from telegram_share_bot.cache import CachedMedia, MediaCache
 from telegram_share_bot.config import (
     DEFAULT_UPLOAD_TIMEOUT_SECONDS,
@@ -657,6 +657,8 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         )
         return
 
+    preview = await platform_previews.resolve_preview(url)
+
     if time_range is not None:
         base_id = uuid4().hex
         clip_id = f"clip:{base_id}"
@@ -684,6 +686,7 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     clip_id,
                     url,
                     logo_base_url=settings.platform_logo_base_url,
+                    preview=preview,
                     cached=clip_cached,
                     time_range=time_range,
                 ),
@@ -691,6 +694,7 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     full_id,
                     url,
                     logo_base_url=settings.platform_logo_base_url,
+                    preview=preview,
                     cached=full_cached,
                     time_range=None,
                     force_full_title=True,
@@ -711,6 +715,7 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 result_id,
                 url,
                 logo_base_url=settings.platform_logo_base_url,
+                preview=preview,
                 cached=cached,
             )
         ],
@@ -1305,6 +1310,15 @@ def _inline_source_details(url: str, cached: CachedMedia | None) -> tuple[str, s
         media_type = "video" if "/reel/" in parsed.path else "media"
     elif host in {"x.com", "twitter.com", "vxtwitter.com", "fxtwitter.com", "fixupx.com"}:
         platform, media_type = "X", "media"
+    elif host in {"reddit.com", "redd.it", "v.redd.it"} or host.endswith(".reddit.com"):
+        platform, media_type = "Reddit", "video" if host == "v.redd.it" else "media"
+    elif host in {"facebook.com", "fb.watch"} or host.endswith(".facebook.com"):
+        platform = "Facebook"
+        media_type = (
+            "video"
+            if "/reel/" in parsed.path or "/videos/" in parsed.path or host == "fb.watch"
+            else "media"
+        )
     else:
         platform, media_type = host or "Link", "media"
     if cached is not None:
@@ -1330,6 +1344,7 @@ def _pending_media_article(
     url: str,
     *,
     logo_base_url: str | None,
+    preview: platform_previews.Preview | None = None,
     cached: CachedMedia | None = None,
     time_range: TimeRange | None = None,
     force_full_title: bool = False,
@@ -1355,10 +1370,9 @@ def _pending_media_article(
     if duration is not None and duration > 0:
         details.append(f"Duration: {_format_duration(duration)}")
     details.append("Instant" if cached is not None else "Download")
-    preview_url = platform_icons.video_thumbnail_url(url)
-    thumbnail_url = preview_url or platform_icons.thumbnail_url(url, logo_base_url)
-    if preview_url:
-        thumbnail_width, thumbnail_height = 320, 180
+    thumbnail_url = preview.url if preview else platform_icons.thumbnail_url(url, logo_base_url)
+    if preview:
+        thumbnail_width, thumbnail_height = preview.width, preview.height
     elif thumbnail_url:
         thumbnail_width, thumbnail_height = 224, 224
     else:
