@@ -1540,6 +1540,22 @@ def _cleanup_dir(directory: Path) -> None:
         directory.rmdir()
 
 
+def _cleanup_finished_download(
+    worker: asyncio.Task[DownloadedMedia], work_dir_holder: list[Path]
+) -> None:
+    """Clean an aborted worker's files only after its thread has stopped."""
+    try:
+        worker.result()
+    except (asyncio.CancelledError, Exception):
+        pass
+
+    if work_dir_holder:
+        try:
+            _cleanup_dir(work_dir_holder[0])
+        except OSError:
+            logger.debug("Could not clean completed download directory", exc_info=True)
+
+
 async def download_media(
     url: str,
     download_dir: Path,
@@ -1564,39 +1580,43 @@ async def download_media(
 
     abort_event = threading.Event()
     work_dir_holder: list[Path] = []
-    try:
-        return await asyncio.wait_for(
-            asyncio.to_thread(
-                _download_sync,
-                url,
-                download_dir,
-                max_file_bytes,
-                timeout_seconds,
-                abort_event,
-                work_dir_holder,
-                https_only=https_only,
-                allowed_hosts=allowed_hosts,
-                slideshow_slide_ms=slideshow_slide_ms,
-                slideshow_max_images=slideshow_max_images,
-                slideshow_images_loop=slideshow_images_loop,
-                time_range=time_range,
-                media_format=media_format,
-                on_optimizing=on_optimizing,
-            ),
-            timeout=timeout_seconds,
+    worker = asyncio.create_task(
+        asyncio.to_thread(
+            _download_sync,
+            url,
+            download_dir,
+            max_file_bytes,
+            timeout_seconds,
+            abort_event,
+            work_dir_holder,
+            https_only=https_only,
+            allowed_hosts=allowed_hosts,
+            slideshow_slide_ms=slideshow_slide_ms,
+            slideshow_max_images=slideshow_max_images,
+            slideshow_images_loop=slideshow_images_loop,
+            time_range=time_range,
+            media_format=media_format,
+            on_optimizing=on_optimizing,
         )
-    except TimeoutError as exc:
-        abort_event.set()
-        if work_dir_holder:
-            _cleanup_dir(work_dir_holder[0])
-        raise DownloadError(
-            strings.DOWNLOAD_TIMED_OUT.format(timeout_seconds=timeout_seconds)
-        ) from exc
+    )
+    try:
+        completed, _ = await asyncio.wait({worker}, timeout=timeout_seconds)
     except asyncio.CancelledError:
         abort_event.set()
-        if work_dir_holder:
-            _cleanup_dir(work_dir_holder[0])
+        worker.add_done_callback(
+            lambda task: _cleanup_finished_download(task, work_dir_holder)
+        )
         raise
+
+    if worker not in completed:
+        abort_event.set()
+        worker.add_done_callback(
+            lambda task: _cleanup_finished_download(task, work_dir_holder)
+        )
+        raise DownloadError(
+            strings.DOWNLOAD_TIMED_OUT.format(timeout_seconds=timeout_seconds)
+        )
+    return worker.result()
 
 
 def cleanup_media(media: DownloadedMedia) -> None:
