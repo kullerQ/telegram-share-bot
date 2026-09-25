@@ -29,6 +29,7 @@ if TYPE_CHECKING:
 
 from telegram_share_bot import strings
 from telegram_share_bot.config import (
+    DEFAULT_MAX_MEDIA_DURATION_SECONDS,
     DEFAULT_SLIDESHOW_IMAGES_LOOP,
     TELEGRAM_CAPTION_MAX_LENGTH,
     CaptionMode,
@@ -953,6 +954,26 @@ def _ensure_clip_within_max(time_range: TimeRange) -> None:
         )
 
 
+def ensure_full_media_duration(
+    duration: object, max_duration_seconds: int
+) -> None:
+    """Reject known overlong full media before transfer or conversion."""
+    if (
+        max_duration_seconds <= 0
+        or not isinstance(duration, (int, float))
+        or duration <= max_duration_seconds
+    ):
+        return
+    duration_limit = (
+        f"{max_duration_seconds // 60} min"
+        if max_duration_seconds % 60 == 0
+        else f"{max_duration_seconds} sec"
+    )
+    raise DownloadError(
+        strings.DOWNLOAD_MEDIA_TOO_LONG.format(duration_limit=duration_limit)
+    )
+
+
 def _resolve_clip_range(time_range: TimeRange, info: dict[str, Any]) -> TimeRange:
     """Clamp to video length, enforce max clip, return a closed range."""
     resolved = _clamp_time_range(time_range, info)
@@ -1166,6 +1187,7 @@ def _download_sync(
     slideshow_images_loop: bool = DEFAULT_SLIDESHOW_IMAGES_LOOP,
     time_range: TimeRange | None = None,
     media_format: MediaFormat = MediaFormat.VIDEO,
+    max_media_duration_seconds: int = DEFAULT_MAX_MEDIA_DURATION_SECONDS,
     on_optimizing: Callable[[], None] | None = None,
 ) -> DownloadedMedia:
     started_at = time.monotonic()
@@ -1204,8 +1226,12 @@ def _download_sync(
                 https_only=https_only,
                 allowed_hosts=allowed_hosts,
                 media_format=media_format,
+                max_media_duration_seconds=max_media_duration_seconds,
             )
             if slideshow is not None:
+                ensure_full_media_duration(
+                    slideshow.duration, max_media_duration_seconds
+                )
                 if media_format is MediaFormat.AUDIO:
                     result_path = _convert_audio_for_telegram(
                         slideshow.path,
@@ -1292,6 +1318,10 @@ def _download_sync(
                 metadata_started_at = time.monotonic()
                 extracted, from_cache = _extract_info_cached(ydl, url)
                 info = _pick_info(extracted)
+                if effective_range is None:
+                    ensure_full_media_duration(
+                        info.get("duration"), max_media_duration_seconds
+                    )
                 if is_clip:
                     logger.info(
                         "Clip metadata resolved in %.1fs (%s) for %s",
@@ -1569,6 +1599,7 @@ async def download_media(
     slideshow_images_loop: bool = DEFAULT_SLIDESHOW_IMAGES_LOOP,
     time_range: TimeRange | None = None,
     media_format: MediaFormat = MediaFormat.VIDEO,
+    max_media_duration_seconds: int = DEFAULT_MAX_MEDIA_DURATION_SECONDS,
     on_optimizing: Callable[[], None] | None = None,
 ) -> DownloadedMedia:
     if not is_allowed_media_host(url, allowed_hosts):
@@ -1596,6 +1627,7 @@ async def download_media(
             slideshow_images_loop=slideshow_images_loop,
             time_range=time_range,
             media_format=media_format,
+            max_media_duration_seconds=max_media_duration_seconds,
             on_optimizing=on_optimizing,
         )
     )

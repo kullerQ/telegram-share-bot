@@ -132,8 +132,9 @@ Tap a Video or Audio result (or a clip / full-length choice). A placeholder appe
 ## Limits
 
 - Max file size ≈ 45 MB (Telegram Bot API upload limit is 50 MB). Video quality is adapted to fit this limit rather than capped at one fixed resolution.
-- Download timeout defaults to 90 seconds.
-- Global concurrent downloads default to 3; per-user in-flight downloads default to 3. Set either to `0` to disable that limit.
+- Download timeout defaults to 90 seconds; source transfers are bounded to twice the output size limit.
+- Global concurrent downloads default to 2; each user may have 1 active request. Set either limit to `0` to disable it. The per-user cooldown defaults to 2 seconds.
+- New full video and audio requests are limited to 30 minutes when source metadata provides a duration (`MAX_MEDIA_DURATION_SECONDS=1800`). Set `0` to disable this limit. Short YouTube clips from longer videos remain available under the 10-minute clip limit. Unknown durations still have the byte and timeout limits.
 - User URLs are limited to YouTube / X / Instagram / TikTok by default (`ALLOWED_MEDIA_HOSTS=*` allows any host).
 - TikTok (including `vm.tiktok.com` / `vt.tiktok.com` short links) needs `curl-cffi` for browser impersonation — it is pinned in `requirements.txt`.
 - TikTok **photo posts** (image slideshows with sound) can be sent as a slideshow video or as the original soundtrack when present. Video slideshows are compiled into MP4 via `ffmpeg`: each image is shown for about `SLIDESHOW_SLIDE_MS` (default 2500 ms). `SLIDESHOW_IMAGES_LOOP=true` (default) makes the video match the **full** audio track and loops images to fill it; `false` shows each image once then trims the audio (a single-image post still uses the full audio). Multi-image posts get TikTok-style page dots at the bottom. At most `SLIDESHOW_MAX_IMAGES` (default 35) images are included. The Docker image already ships a static `ffmpeg`.

@@ -669,6 +669,33 @@ class TestSlideshowAudioChoice(unittest.TestCase):
         self.assertEqual(media.path.name, "slideshow-audio.mp3")
         self.assertEqual(media.duration, 12)
 
+    def test_long_slideshow_soundtrack_is_rejected_before_asset_download(self) -> None:
+        source = SlideshowSource(
+            image_urls=("https://cdn.example.com/slide.jpg",),
+            audio_url="https://cdn.example.com/sound.mp3",
+            title="Long photo post",
+            canonical_url="https://www.tiktok.com/@u/photo/1",
+            audio_duration=3600,
+        )
+        ref = TikTokPhotoRef(
+            user="@u", video_id="1", canonical_url=source.canonical_url
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                patch("telegram_share_bot.slideshow.detect_tiktok_photo_post", return_value=ref),
+                patch("telegram_share_bot.slideshow.extract_slideshow", return_value=source),
+                patch("telegram_share_bot.slideshow._download_bytes") as download_bytes,
+            ):
+                with self.assertRaises(DownloadError) as ctx:
+                    download_tiktok_slideshow(
+                        source.canonical_url,
+                        Path(tmp),
+                        max_file_bytes=1024,
+                        timeout_seconds=10,
+                    )
+                download_bytes.assert_not_called()
+        self.assertIn("30 min", str(ctx.exception))
+
     def test_audio_choice_reports_missing_slideshow_soundtrack(self) -> None:
         source = SlideshowSource(
             image_urls=("https://cdn.example.com/slide.jpg",),

@@ -12,6 +12,7 @@ from telegram_share_bot import strings
 from telegram_share_bot.cache import MediaCache
 from telegram_share_bot.config import Settings
 from telegram_share_bot.downloader import (
+    DirectMediaStream,
     DownloadedMedia,
     DownloadError,
     MediaFormat,
@@ -192,6 +193,54 @@ class TestMediaProgress(unittest.IsolatedAsyncioTestCase):
             strings.AUDIO_UNAVAILABLE,
         )
         status.delete.assert_not_awaited()
+
+    async def test_long_direct_stream_is_rejected_before_upload(self) -> None:
+        stream = DirectMediaStream(
+            direct_url="https://example.com/long.mp4",
+            title="Long video",
+            kind=MediaKind.VIDEO,
+            duration=3600,
+            size_bytes=1024,
+        )
+        status = MagicMock()
+        status.edit_text = AsyncMock()
+        upload = AsyncMock()
+        self.context.bot.edit_message_text = AsyncMock()
+        expected = strings.DOWNLOAD_MEDIA_TOO_LONG.format(duration_limit="30 min")
+
+        with (
+            patch(
+                "telegram_share_bot.handlers.get_direct_stream",
+                new=AsyncMock(return_value=stream),
+            ),
+            patch(
+                "telegram_share_bot.handlers._upload_direct_url_for_file_id",
+                new=upload,
+            ),
+        ):
+            await _run_direct_download(
+                self.context,
+                chat_id=42,
+                user_id=42,
+                url="https://example.com/long",
+                custom_caption=None,
+                time_range=None,
+                status_message=status,
+            )
+            await _prepare_inline_media(
+                self.context,
+                inline_message_id="long-inline",
+                url="https://example.com/long",
+                result_id="long-result",
+                user_id=42,
+            )
+
+        self.assertEqual(status.edit_text.await_args_list[-1].args[0], expected)
+        self.assertEqual(
+            self.context.bot.edit_message_text.await_args_list[-1].kwargs["text"],
+            expected,
+        )
+        upload.assert_not_awaited()
 
     async def test_inline_flow_shows_check_download_and_upload_states(self) -> None:
         self.context.bot.edit_message_text = AsyncMock()

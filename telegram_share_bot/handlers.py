@@ -46,6 +46,7 @@ from telegram_share_bot.downloader import (
     TimeRange,
     cleanup_media,
     download_media,
+    ensure_full_media_duration,
     extract_media_request,
     format_time_range,
     get_direct_stream,
@@ -577,6 +578,9 @@ async def _run_direct_download(
                 https_only=settings.https_only,
             )
             if direct_stream is not None:
+                ensure_full_media_duration(
+                    direct_stream.duration, settings.max_media_duration_seconds
+                )
                 await status_message.edit_text(strings.DIRECT_UPLOADING)
                 file_id_info = await _upload_direct_url_for_file_id(
                     context, settings, direct_stream
@@ -630,6 +634,7 @@ async def _run_direct_download(
                 slideshow_max_images=settings.slideshow_max_images,
                 slideshow_images_loop=settings.slideshow_images_loop,
                 time_range=time_range,
+                max_media_duration_seconds=settings.max_media_duration_seconds,
                 on_optimizing=show_optimization_status,
             )
             await status_message.edit_text(strings.DIRECT_UPLOADING)
@@ -1203,6 +1208,9 @@ async def _prepare_inline_media(
                 https_only=settings.https_only,
             )
             if direct_stream is not None:
+                ensure_full_media_duration(
+                    direct_stream.duration, settings.max_media_duration_seconds
+                )
                 if inline_message_id in _cancelled_set(context):
                     return
                 await _edit_inline_text(
@@ -1288,6 +1296,7 @@ async def _prepare_inline_media(
                 slideshow_images_loop=settings.slideshow_images_loop,
                 time_range=time_range,
                 media_format=media_format,
+                max_media_duration_seconds=settings.max_media_duration_seconds,
                 on_optimizing=show_optimization_status,
             )
             logger.info(

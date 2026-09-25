@@ -417,7 +417,7 @@ class TestClipDownloadOpts(unittest.TestCase):
                         {
                             "id": "abc",
                             "title": "Test",
-                            "duration": 600,
+                            "duration": 3600,
                             "ext": "mp4",
                         },
                         False,

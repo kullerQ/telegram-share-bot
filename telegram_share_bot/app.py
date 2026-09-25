@@ -24,6 +24,7 @@ from telegram.ext import (
 from telegram_share_bot import strings
 from telegram_share_bot.cache import MediaCache
 from telegram_share_bot.config import (
+    DEFAULT_MAX_CONCURRENT_DOWNLOADS,
     DEFAULT_UPLOAD_TIMEOUT_SECONDS,
     Settings,
     load_settings,
@@ -120,11 +121,13 @@ def build_application() -> App:
     )
     application.bot_data["settings"] = settings
     application.bot_data["media_cache"] = MediaCache(settings.cache_db_path)
-    raw_concurrency = getattr(settings, "max_concurrent_downloads", 3)
+    raw_concurrency = getattr(
+        settings, "max_concurrent_downloads", DEFAULT_MAX_CONCURRENT_DOWNLOADS
+    )
     try:
         concurrency = int(raw_concurrency)
     except (TypeError, ValueError):
-        concurrency = 3
+        concurrency = DEFAULT_MAX_CONCURRENT_DOWNLOADS
     # 0 disables the global download semaphore (unlimited parallel downloads).
     application.bot_data["download_semaphore"] = (
         None if concurrency <= 0 else asyncio.Semaphore(concurrency)

@@ -406,6 +406,33 @@ class TestMeasuredFallback(unittest.TestCase):
             self.assertEqual(media.kind, MediaKind.VIDEO)
 
 
+class TestMediaDurationLimit(unittest.TestCase):
+    def test_long_full_media_is_rejected_before_transfer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                patch("telegram_share_bot.downloader.is_safe_media_url", return_value=True),
+                patch("telegram_share_bot.downloader._safe_dns_resolution", contextlib.nullcontext),
+                patch("telegram_share_bot.downloader.yt_dlp.YoutubeDL") as ydl_class,
+                patch(
+                    "telegram_share_bot.downloader._extract_info_cached",
+                    return_value=(
+                        {"id": "long", "title": "Long video", "duration": 3600},
+                        False,
+                    ),
+                ),
+            ):
+                with self.assertRaises(DownloadError) as ctx:
+                    _download_sync(
+                        "https://youtube.com/watch?v=long",
+                        Path(tmp),
+                        max_file_bytes=45 * 1024 * 1024,
+                        timeout_seconds=10,
+                    )
+                ydl_class.return_value.__enter__.return_value.process_ie_result.assert_not_called()
+            self.assertIn("30 min", str(ctx.exception))
+            self.assertEqual(list(Path(tmp).iterdir()), [])
+
+
 class TestVideoOptimization(unittest.TestCase):
     def test_optimizes_at_most_twice_and_calls_status_once(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

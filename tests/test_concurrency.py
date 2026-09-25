@@ -4,11 +4,24 @@ from __future__ import annotations
 
 import asyncio
 import unittest
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from telegram_share_bot.config import DEFAULT_MAX_CONCURRENT_DOWNLOADS, load_settings
+from telegram_share_bot import strings
+from telegram_share_bot.config import (
+    DEFAULT_MAX_CONCURRENT_DOWNLOADS,
+    DEFAULT_MAX_DOWNLOADS_PER_USER,
+    DEFAULT_MAX_MEDIA_DURATION_SECONDS,
+    Settings,
+    load_settings,
+)
 from telegram_share_bot.downloader import DownloadedMedia, MediaKind
-from telegram_share_bot.handlers import direct_format_callback, url_message
+from telegram_share_bot.handlers import (
+    _release_user_download_slot,
+    _try_acquire_user_download_slot,
+    direct_format_callback,
+    url_message,
+)
 
 
 class TestConcurrencyLimiter(unittest.IsolatedAsyncioTestCase):
@@ -34,6 +47,10 @@ class TestConcurrencyLimiter(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 settings.max_concurrent_downloads, DEFAULT_MAX_CONCURRENT_DOWNLOADS
             )
+            self.assertEqual(settings.max_downloads_per_user, DEFAULT_MAX_DOWNLOADS_PER_USER)
+            self.assertEqual(
+                settings.max_media_duration_seconds, DEFAULT_MAX_MEDIA_DURATION_SECONDS
+            )
 
     def test_settings_zero_disables_limits(self) -> None:
         env = {
@@ -42,11 +59,36 @@ class TestConcurrencyLimiter(unittest.IsolatedAsyncioTestCase):
             "ALLOW_PUBLIC": "true",
             "MAX_CONCURRENT_DOWNLOADS": "0",
             "MAX_DOWNLOADS_PER_USER": "0",
+            "MAX_MEDIA_DURATION_SECONDS": "0",
         }
         with patch.dict("os.environ", env, clear=True):
             settings = load_settings()
             self.assertEqual(settings.max_concurrent_downloads, 0)
             self.assertEqual(settings.max_downloads_per_user, 0)
+            self.assertEqual(settings.max_media_duration_seconds, 0)
+
+    async def test_one_user_cannot_occupy_multiple_download_slots(self) -> None:
+        settings = Settings(
+            bot_token="test:token",
+            storage_chat_id=42,
+            max_file_bytes=1024,
+            download_timeout_seconds=10,
+            download_dir=Path("."),
+            cache_db_path=Path("cache.db"),
+            delete_storage_messages=False,
+            download_cooldown_seconds=0,
+        )
+        context = MagicMock()
+        context.application.bot_data = {"settings": settings}
+
+        self.assertIsNone(await _try_acquire_user_download_slot(context, 42))
+        self.assertEqual(
+            await _try_acquire_user_download_slot(context, 42),
+            strings.RATE_LIMITED,
+        )
+        self.assertIsNone(await _try_acquire_user_download_slot(context, 43))
+        await _release_user_download_slot(context, 42)
+        self.assertIsNone(await _try_acquire_user_download_slot(context, 42))
 
     async def test_semaphore_limits_parallel_downloads(self) -> None:
         semaphore_limit = 2

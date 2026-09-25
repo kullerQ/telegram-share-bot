@@ -146,6 +146,10 @@ DOWNLOAD_FAILED_INCOMPLETE = (
     "Download was aborted or incomplete (file may exceed limits)."
 )
 DOWNLOAD_LIVE_UNSUPPORTED = "Live streams cannot be downloaded."
+DOWNLOAD_MEDIA_TOO_LONG = (
+    "Media exceeds the {duration_limit} duration limit. "
+    "Choose a shorter clip when available."
+)
 DOWNLOAD_CLIP_TOO_LONG = (
     "Clips longer than {max_minutes} minutes are not supported. "
     "Choose full video, or use a shorter range."
