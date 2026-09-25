@@ -50,6 +50,9 @@ class TestBotGuidance(unittest.IsolatedAsyncioTestCase):
         args = self.message.reply_text.await_args
         self.assertIn("🎬 Share Bot", args.args[0])
         self.assertIn("@share_bot", args.args[0])
+        self.assertIn("YouTube · TikTok · Instagram · X", args.args[0])
+        self.assertIn("TikTok photo slideshows", args.args[0])
+        self.assertIn("YouTube clips or full videos", args.args[0])
         self.assertIn("/help", args.args[0])
         self.assertNotIn("1:20-2:05", args.args[0])
         self.assertNotIn("reply_markup", args.kwargs)
