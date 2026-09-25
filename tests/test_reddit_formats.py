@@ -58,6 +58,9 @@ class TestRedditFormats(unittest.TestCase):
                 def __exit__(self, *args: object) -> None:
                     return None
 
+                def build_format_selector(self, selector: str) -> str:
+                    return selector
+
                 def process_ie_result(
                     self, info: dict[str, object], download: bool = True
                 ) -> dict[str, object]:

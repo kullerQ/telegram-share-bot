@@ -540,6 +540,20 @@ def _audio_format_candidates(
     )[:_MAX_FORMAT_ATTEMPTS]
 
 
+def _set_attempt_format_selector(ydl: yt_dlp.YoutubeDL, selector: str) -> None:
+    """Rebuild yt-dlp's cached selector after changing the requested format."""
+    ydl.params["format"] = selector
+    ydl.format_selector = ydl.build_format_selector(selector)
+
+
+def _set_attempt_output_template(ydl: yt_dlp.YoutubeDL, template: str) -> None:
+    """Update yt-dlp's default output template without discarding its type mapping."""
+    current = ydl.params.get("outtmpl")
+    templates = dict(current) if isinstance(current, dict) else {}
+    templates["default"] = template
+    ydl.params["outtmpl"] = templates
+
+
 def _default_audio_selector(time_range: TimeRange | None, source_limit: int) -> str:
     if time_range is not None:
         return "ba"
@@ -1335,8 +1349,10 @@ def _download_sync(
                         )
                     attempt_dir = work_dir / f"attempt_{attempt}"
                     attempt_dir.mkdir(parents=True, exist_ok=True)
-                    ydl.params["outtmpl"] = str(attempt_dir / "%(title).80B [%(id)s].%(ext)s")
-                    ydl.params["format"] = selector
+                    _set_attempt_output_template(
+                        ydl, str(attempt_dir / "%(title).80B [%(id)s].%(ext)s")
+                    )
+                    _set_attempt_format_selector(ydl, selector)
                     source_bytes.clear()
                     source_too_large.clear()
                     transfer_started_at = time.monotonic()

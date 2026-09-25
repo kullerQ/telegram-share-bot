@@ -20,7 +20,16 @@ from telegram_share_bot.downloader import (
     _download_sync,
     _format_candidates,
     _optimize_video_file,
+    _set_attempt_format_selector,
+    _set_attempt_output_template,
 )
+
+
+def _outtmpl_template(params: dict[str, object]) -> str:
+    template = params["outtmpl"]
+    if isinstance(template, dict):
+        template = template["default"]
+    return str(template)
 
 
 class TestFormatRanking(unittest.TestCase):
@@ -154,13 +163,16 @@ class TestAudioFormatSelection(unittest.TestCase):
                 def __exit__(self, *args: object) -> None:
                     return None
 
+                def build_format_selector(self, selector: str) -> str:
+                    return selector
+
                 def process_ie_result(
                     self, info: dict[str, object], download: bool = True
                 ) -> dict[str, object]:
                     _ = info, download
                     selector = str(self.params["format"])
                     selectors.append(selector)
-                    path = Path(str(self.params["outtmpl"])).parent / "result.m4a"
+                    path = Path(_outtmpl_template(self.params)).parent / "result.m4a"
                     path.write_bytes(b"audio-bytes")
                     return {
                         "title": "Audio test",
@@ -169,7 +181,7 @@ class TestAudioFormatSelection(unittest.TestCase):
 
                 def prepare_filename(self, info: dict[str, object]) -> str:
                     _ = info
-                    return str(Path(str(self.params["outtmpl"])).parent / "result.m4a")
+                    return str(Path(_outtmpl_template(self.params)).parent / "result.m4a")
 
             with (
                 patch("telegram_share_bot.downloader.is_safe_media_url", return_value=True),
@@ -206,6 +218,9 @@ class TestAudioFormatSelection(unittest.TestCase):
 
                 def __exit__(self, *args: object) -> None:
                     return None
+
+                def build_format_selector(self, selector: str) -> str:
+                    return selector
 
                 def process_ie_result(
                     self, info: dict[str, object], download: bool = True
@@ -249,6 +264,53 @@ class TestAudioFormatSelection(unittest.TestCase):
             self.assertEqual(str(ctx.exception), strings.AUDIO_UNAVAILABLE)
 
 
+class TestYtDlpOutputTemplate(unittest.TestCase):
+    def test_attempt_template_keeps_yt_dlp_mapping_and_prepares_a_filename(self) -> None:
+        original_template = "downloads/%(title)s.%(ext)s"
+        attempt_template = "downloads/attempt/%(title).80B [%(id)s].%(ext)s"
+        with yt_dlp.YoutubeDL({"outtmpl": original_template, "quiet": True}) as ydl:
+            original_templates = dict(ydl.params["outtmpl"])
+            _set_attempt_output_template(ydl, attempt_template)
+
+            self.assertIsInstance(ydl.params["outtmpl"], dict)
+            self.assertEqual(ydl.params["outtmpl"]["default"], attempt_template)
+            self.assertEqual(
+                ydl.params["outtmpl"]["chapter"], original_templates["chapter"]
+            )
+            prepared = ydl.prepare_filename(
+                {"title": "Adaptive test", "id": "abc123", "ext": "mp4"}
+            )
+            self.assertIn("attempt", prepared)
+            self.assertTrue(prepared.endswith(".mp4"))
+
+    def test_selector_rebuild_switches_from_video_to_audio_only(self) -> None:
+        formats = [
+            {
+                "format_id": "video720",
+                "url": "https://cdn.invalid/video.mp4",
+                "ext": "mp4",
+                "vcodec": "h264",
+                "acodec": "none",
+                "height": 720,
+            },
+            {
+                "format_id": "audio128",
+                "url": "https://cdn.invalid/audio.m4a",
+                "ext": "m4a",
+                "vcodec": "none",
+                "acodec": "aac",
+                "abr": 128,
+            },
+        ]
+        with yt_dlp.YoutubeDL({"quiet": True, "format": "bv*+ba/b"}) as ydl:
+            initial = ydl._select_formats(formats, ydl.format_selector)
+            self.assertEqual([fmt["format_id"] for fmt in initial], ["video720+audio128"])
+
+            _set_attempt_format_selector(ydl, "audio128")
+            selected = ydl._select_formats(formats, ydl.format_selector)
+            self.assertEqual([fmt["format_id"] for fmt in selected], ["audio128"])
+
+
 class TestMeasuredFallback(unittest.TestCase):
     def test_retries_lower_quality_after_measured_output_is_too_large(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -290,12 +352,15 @@ class TestMeasuredFallback(unittest.TestCase):
                 def __exit__(self, *args: object) -> None:
                     return None
 
+                def build_format_selector(self, selector: str) -> str:
+                    return selector
+
                 def process_ie_result(
                     self, info: dict[str, object], download: bool = True
                 ) -> dict[str, object]:
                     selector = str(self.params["format"])
                     selectors.append(selector)
-                    path = Path(str(self.params["outtmpl"])).parent / "result.mp4"
+                    path = Path(_outtmpl_template(self.params)).parent / "result.mp4"
                     path.write_bytes(b"x" * (60 if selector.startswith("v720") else 40))
                     return {
                         "title": "Adaptive test",
@@ -303,7 +368,7 @@ class TestMeasuredFallback(unittest.TestCase):
                     }
 
                 def prepare_filename(self, info: dict[str, object]) -> str:
-                    return str(Path(str(self.params["outtmpl"])).parent / "result.mp4")
+                    return str(Path(_outtmpl_template(self.params)).parent / "result.mp4")
 
             with (
                 patch("telegram_share_bot.downloader.is_safe_media_url", return_value=True),
