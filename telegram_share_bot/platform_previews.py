@@ -26,6 +26,7 @@ _NEGATIVE_CACHE_TTL_SECONDS = 60
 _CACHE_LIMIT = 128
 _PREVIEW_CACHE: dict[str, tuple[float, Preview | None]] = {}
 _REDDIT_POST_RE = re.compile(r"^/r/[^/]+/comments/([a-zA-Z0-9]+)(?:/|$)")
+_X_STATUS_RE = re.compile(r"^/([^/]+)/status/(\d+)(?:/|$)")
 
 
 @dataclass(frozen=True, slots=True)
@@ -186,10 +187,14 @@ async def resolve_preview(url: str) -> Preview | None:
     if cached is not None and cached[0] > now:
         return cached[1]
 
-    # X account names can redirect when lowercased by URL normalization.
-    # Keep the original path's case while stripping tracking parameters.
+    # X redirects /video/1 links and can redirect lowercased account names.
+    # Request the canonical post path with the original account name casing.
     if platform == "x":
-        target = urlunsplit(("https", "x.com", urlsplit(url).path, "", ""))
+        path = urlsplit(url).path
+        status = _X_STATUS_RE.match(path)
+        if status is not None:
+            path = f"/{status.group(1)}/status/{status.group(2)}"
+        target = urlunsplit(("https", "x.com", path, "", ""))
     elif platform == "instagram":
         target = normalized
     else:

@@ -142,6 +142,21 @@ class TestPlatformPreviews(unittest.IsolatedAsyncioTestCase):
             ("https://x.com/PunchingCat/status/2103311089614340120", "x"),
         )
 
+    async def test_x_video_path_uses_canonical_post_for_preview(self) -> None:
+        expected = Preview("https://pbs.twimg.com/amplify_video_thumb/example.jpg")
+        with patch(
+            "telegram_share_bot.platform_previews._lookup_page_image",
+            new=AsyncMock(return_value=expected),
+        ) as lookup:
+            preview = await resolve_preview(
+                "https://x.com/animalsbabyy/status/2103205625752953328/video/1"
+            )
+        self.assertEqual(preview, expected)
+        self.assertEqual(
+            lookup.await_args.args[:2],
+            ("https://x.com/animalsbabyy/status/2103205625752953328", "x"),
+        )
+
     async def test_failed_lookup_is_cached_as_logo_fallback(self) -> None:
         with patch(
             "telegram_share_bot.platform_previews._lookup_page_image",
