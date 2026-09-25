@@ -21,7 +21,6 @@ logger = logging.getLogger(__name__)
 _LOOKUP_TIMEOUT_SECONDS = 1.5
 _MAX_HTML_BYTES = 96 * 1024
 _MAX_JSON_BYTES = 256 * 1024
-_MAX_TIKTOK_EMBED_BYTES = 384 * 1024
 _CACHE_TTL_SECONDS = 300
 _NEGATIVE_CACHE_TTL_SECONDS = 60
 _CACHE_LIMIT = 128
@@ -52,24 +51,6 @@ class _ImageMetaParser(HTMLParser):
             self.image_url = values.get("content")
 
 
-
-class _TikTokEmbedParser(HTMLParser):
-    def __init__(self) -> None:
-        super().__init__()
-        self.state = ""
-        self._in_state = False
-
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag == "script" and dict(attrs).get("id") == "__FRONTITY_CONNECT_STATE__":
-            self._in_state = True
-
-    def handle_data(self, data: str) -> None:
-        if self._in_state:
-            self.state += data
-
-    def handle_endtag(self, tag: str) -> None:
-        if tag == "script":
-            self._in_state = False
 
 
 def _matches_host(host: str, domain: str) -> bool:
@@ -126,35 +107,6 @@ async def _lookup_tiktok(url: str, client: httpx.AsyncClient) -> Preview | None:
     )
 
 
-async def _lookup_tiktok_photo(video_id: str, client: httpx.AsyncClient) -> Preview | None:
-    path = f"/embed/v2/{video_id}"
-    body = bytearray()
-    async with client.stream("GET", f"https://www.tiktok.com{path}") as response:
-        response.raise_for_status()
-        if "text/html" not in response.headers.get("content-type", "").lower():
-            return None
-        async for chunk in response.aiter_bytes():
-            if len(body) + len(chunk) > _MAX_TIKTOK_EMBED_BYTES:
-                return None
-            body.extend(chunk)
-    parser = _TikTokEmbedParser()
-    parser.feed(body.decode("utf-8", "ignore"))
-    if not parser.state:
-        return None
-    state = json.loads(parser.state)
-    images = state["source"]["data"][path]["videoData"]["imagePostInfo"]["displayImages"]
-    image = images[0]
-    url = _trusted_image_url(image["urlList"][0], "tiktok")
-    if url is None:
-        return None
-    width, height = image.get("width"), image.get("height")
-    return Preview(
-        url,
-        width if isinstance(width, int) and width > 0 else None,
-        height if isinstance(height, int) and height > 0 else None,
-    )
-
-
 async def _lookup_tiktok_media(url: str, client: httpx.AsyncClient) -> Preview | None:
     parsed = urlsplit(url)
     match = _TIKTOK_MEDIA_RE.match(parsed.path)
@@ -173,7 +125,8 @@ async def _lookup_tiktok_media(url: str, client: httpx.AsyncClient) -> Preview |
             return None
         url = urlunsplit(("https", "www.tiktok.com", resolved.path, "", ""))
     if match is not None and match.group(1) == "photo":
-        return await _lookup_tiktok_photo(match.group(2), client)
+        # Signed TikTok slideshow covers can render as blank inline thumbnails.
+        return None
     return await _lookup_tiktok(url, client)
 
 
