@@ -1331,14 +1331,6 @@ def _inline_source_details(url: str, cached: CachedMedia | None) -> tuple[str, s
     return platform, media_type
 
 
-def _format_duration(seconds: int) -> str:
-    hours, remainder = divmod(seconds, 3600)
-    minutes, remaining_seconds = divmod(remainder, 60)
-    if hours:
-        return f"{hours}:{minutes:02d}:{remaining_seconds:02d}"
-    return f"{minutes}:{remaining_seconds:02d}"
-
-
 def _pending_media_article(
     result_id: str,
     url: str,
@@ -1364,11 +1356,6 @@ def _pending_media_article(
     else:
         title = strings.INLINE_PENDING_TITLE.format(media_type=media_type)
         message_text = strings.INLINE_PENDING_MESSAGE.format(url=display_url)
-    duration = (cached.duration if cached is not None else None) or (
-        time_range.duration_seconds if time_range is not None else None
-    )
-    if duration is not None and duration > 0:
-        details.append(f"Duration: {_format_duration(duration)}")
     details.append("Instant" if cached is not None else "Download")
     thumbnail_url = preview.url if preview else platform_icons.thumbnail_url(url, logo_base_url)
     if preview:

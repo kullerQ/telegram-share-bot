@@ -210,7 +210,7 @@ class TestMediaProgress(unittest.IsolatedAsyncioTestCase):
         clip_choice, full_choice = query.answer.await_args.kwargs["results"]
         self.assertIn("Send clip 2:30-3:30", clip_choice.title)
         self.assertIn(
-            "YouTube · Video · Duration: 1:00 · Instant",
+            "YouTube · Video · Instant",
             clip_choice.description,
         )
         self.assertIn("Checking clip", clip_choice.input_message_content.message_text)
@@ -221,7 +221,7 @@ class TestMediaProgress(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(clip_choice.thumbnail_width, 320)
         self.assertEqual(clip_choice.thumbnail_height, 180)
         self.assertIn("Send full video", full_choice.title)
-        self.assertIn("YouTube · Video · Duration: 6:00 · Instant", full_choice.description)
+        self.assertIn("YouTube · Video · Instant", full_choice.description)
         self.assertEqual(full_choice.thumbnail_url, clip_choice.thumbnail_url)
 
     async def test_uncached_inline_video_has_action_and_readiness(self) -> None:
