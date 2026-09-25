@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
+
+from telegram_share_bot.normalizer import normalize_url
 
 # Unpadded public originals of the bundled Round Square PNGs. Pinning the
 # commit keeps thumbnail availability testable while this branch is local.
@@ -66,3 +68,21 @@ def thumbnail_url(url: str, base_url: str | None) -> str | None:
                 return f"{_UPSTREAM_BASE_URL}/{upstream_name}"
             return f"{base_url.rstrip('/')}/{filename}"
     return None
+
+
+def video_thumbnail_url(url: str) -> str | None:
+    """Derive a public YouTube preview without fetching video metadata."""
+    normalized = urlsplit(normalize_url(url))
+    if normalized.scheme != "https" or normalized.hostname != "www.youtube.com":
+        return None
+    if normalized.path != "/watch":
+        return None
+    video_ids = parse_qs(normalized.query).get("v", [])
+    if len(video_ids) != 1:
+        return None
+    video_id = video_ids[0]
+    if len(video_id) != 11 or not all(
+        char.isascii() and (char.isalnum() or char in "_-") for char in video_id
+    ):
+        return None
+    return f"https://i.ytimg.com/vi/{video_id}/mqdefault.jpg"

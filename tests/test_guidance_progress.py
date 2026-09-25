@@ -214,9 +214,12 @@ class TestMediaProgress(unittest.IsolatedAsyncioTestCase):
             clip_choice.description,
         )
         self.assertIn("Checking clip", clip_choice.input_message_content.message_text)
-        self.assertTrue(clip_choice.thumbnail_url.endswith("/youtube.png"))
-        self.assertEqual(clip_choice.thumbnail_width, 224)
-        self.assertEqual(clip_choice.thumbnail_height, 224)
+        self.assertEqual(
+            clip_choice.thumbnail_url,
+            "https://i.ytimg.com/vi/GKq9nKZpmu0/mqdefault.jpg",
+        )
+        self.assertEqual(clip_choice.thumbnail_width, 320)
+        self.assertEqual(clip_choice.thumbnail_height, 180)
         self.assertIn("Send full video", full_choice.title)
         self.assertIn("YouTube · Video · Duration: 6:00 · Instant", full_choice.description)
         self.assertEqual(full_choice.thumbnail_url, clip_choice.thumbnail_url)
@@ -237,7 +240,24 @@ class TestMediaProgress(unittest.IsolatedAsyncioTestCase):
             result.description, "YouTube · Video · Download"
         )
         self.assertIn("Checking the media link", result.input_message_content.message_text)
-        self.assertTrue(result.thumbnail_url.endswith("/youtube.png"))
+        self.assertEqual(
+            result.thumbnail_url,
+            "https://i.ytimg.com/vi/dQw4w9WgXcQ/mqdefault.jpg",
+        )
+
+    async def test_inline_non_youtube_link_falls_back_to_platform_logo(self) -> None:
+        query = MagicMock()
+        query.from_user = MagicMock(id=42)
+        query.query = "https://www.tiktok.com/@user/video/123456"
+        query.answer = AsyncMock()
+        update = MagicMock()
+        update.inline_query = query
+
+        await inline_query(update, self.context)
+
+        result = query.answer.await_args.kwargs["results"][0]
+        self.assertTrue(result.thumbnail_url.endswith("/tiktok.png"))
+        self.assertEqual((result.thumbnail_width, result.thumbnail_height), (224, 224))
 
     async def test_clip_progress_starts_after_initial_checking_message(self) -> None:
         self.context.bot.edit_message_text = AsyncMock()
