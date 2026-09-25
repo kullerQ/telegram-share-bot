@@ -40,6 +40,8 @@ RUN apk add --no-cache upx \
 # ---------------------------------------------------------------------------
 FROM python:3.11-alpine
 
+LABEL org.opencontainers.image.source="https://github.com/kullerQ/telegram-share-bot"
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     LOG_FILE=/app/logs/bot.log \

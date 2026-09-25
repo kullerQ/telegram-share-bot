@@ -10,11 +10,16 @@ env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
@@ -25,6 +30,11 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
+
+      - name: Validate release version
+        env:
+          BASE_REF: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || github.event.before }}
+        run: python scripts/check_release_version.py --base-ref "$BASE_REF"
 
       - name: Lint
         run: ruff check .
@@ -40,10 +50,33 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
       packages: write
+    concurrency:
+      group: versioned-release-main
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Read version
+        id: version
+        run: echo "value=$(cat VERSION)" >> "$GITHUB_OUTPUT"
+
+      - name: Check release tag
+        env:
+          VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          tag="v${VERSION}"
+          if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
+            git fetch --force origin "refs/tags/${tag}:refs/tags/${tag}"
+            tagged_commit="$(git rev-list -n 1 "${tag}")"
+            if [ "${tagged_commit}" != "${GITHUB_SHA}" ]; then
+              echo "${tag} already points to ${tagged_commit}, not ${GITHUB_SHA}" >&2
+              exit 1
+            fi
+          fi
 
       - uses: docker/setup-buildx-action@v3
 
@@ -60,7 +93,8 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=raw,value=latest
+            type=raw,value=${{ steps.version.outputs.value }},priority=900
+            type=raw,value=latest,priority=100
             type=sha,prefix=sha-
 
       - name: Build and push
@@ -75,3 +109,23 @@ jobs:
           sbom: false
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Create immutable Git tag
+        env:
+          VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          tag="v${VERSION}"
+          if ! git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
+            git tag -a "${tag}" "${GITHUB_SHA}" -m "Release ${tag}"
+            git push origin "refs/tags/${tag}"
+          fi
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          tag="v${VERSION}"
+          if ! gh release view "${tag}" >/dev/null 2>&1; then
+            gh release create "${tag}" --target "${GITHUB_SHA}" --title "${tag}" --generate-notes
+          fi
