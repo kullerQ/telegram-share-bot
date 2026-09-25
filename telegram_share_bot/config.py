@@ -50,6 +50,11 @@ DEFAULT_ALLOWED_MEDIA_HOSTS = frozenset(
         "fixupx.com",
         "instagram.com",
         "tiktok.com",
+        "reddit.com",
+        "redd.it",
+        "v.redd.it",
+        "facebook.com",
+        "fb.watch",
     }
 )
 

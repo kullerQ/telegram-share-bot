@@ -253,11 +253,37 @@ class TestMediaProgress(unittest.IsolatedAsyncioTestCase):
         update = MagicMock()
         update.inline_query = query
 
-        await inline_query(update, self.context)
+        with patch(
+            "telegram_share_bot.handlers.platform_previews.resolve_preview",
+            new=AsyncMock(return_value=None),
+        ):
+            await inline_query(update, self.context)
 
         result = query.answer.await_args.kwargs["results"][0]
         self.assertTrue(result.thumbnail_url.endswith("/tiktok.png"))
         self.assertEqual((result.thumbnail_width, result.thumbnail_height), (224, 224))
+
+    async def test_reddit_and_facebook_inline_links_keep_logo_on_preview_failure(self) -> None:
+        for url, filename in (
+            ("https://www.reddit.com/r/videos/comments/abc123/example/", "reddit.png"),
+            ("https://www.facebook.com/reel/123456789", "facebook.png"),
+        ):
+            with self.subTest(url=url):
+                query = MagicMock()
+                query.from_user = MagicMock(id=42)
+                query.query = url
+                query.answer = AsyncMock()
+                update = MagicMock()
+                update.inline_query = query
+                with patch(
+                    "telegram_share_bot.handlers.platform_previews.resolve_preview",
+                    new=AsyncMock(return_value=None),
+                ):
+                    await inline_query(update, self.context)
+                result = query.answer.await_args.kwargs["results"][0]
+                self.assertTrue(result.thumbnail_url.endswith("/" + filename))
+                platform = "Reddit" if filename == "reddit.png" else "Facebook"
+                self.assertIn(platform, result.description)
 
     async def test_clip_progress_starts_after_initial_checking_message(self) -> None:
         self.context.bot.edit_message_text = AsyncMock()
