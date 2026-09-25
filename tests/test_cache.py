@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import tempfile
 import unittest
 from pathlib import Path
 
 from telegram_share_bot.cache import MediaCache
-from telegram_share_bot.downloader import MediaKind
+from telegram_share_bot.downloader import MediaFormat, MediaKind
 
 
 class TestMediaCache(unittest.IsolatedAsyncioTestCase):
@@ -98,6 +99,54 @@ class TestMediaCache(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cached.file_id, "new_file_id")
         self.assertEqual(cached.title, "Song V2")
         self.assertEqual(cached.duration, 185)
+
+
+    async def test_format_and_quality_variants_are_isolated(self) -> None:
+        url = "https://www.youtube.com/watch?v=variant12345"
+        await self.cache.set(
+            url, "video-id", MediaKind.VIDEO, "Video", 30,
+            media_format=MediaFormat.VIDEO,
+        )
+        await self.cache.set(
+            url, "audio-id", MediaKind.AUDIO, "Audio", 30,
+            media_format=MediaFormat.AUDIO,
+        )
+
+        self.assertEqual(
+            (await self.cache.get(url, media_format=MediaFormat.VIDEO)).file_id,
+            "video-id",
+        )
+        self.assertEqual(
+            (await self.cache.get(url, media_format=MediaFormat.AUDIO)).file_id,
+            "audio-id",
+        )
+        self.assertIsNone(
+            await self.cache.get(url, media_format=MediaFormat.VIDEO, quality_policy="720p")
+        )
+
+    async def test_legacy_entry_is_reused_only_for_default_video(self) -> None:
+        from telegram_share_bot.cache import _legacy_cache_key
+
+        url = "https://www.youtube.com/watch?v=legacy12345"
+        legacy_key = _legacy_cache_key(url)
+        assert legacy_key is not None
+        await asyncio.to_thread(
+            self.cache._set_sync,
+            legacy_key,
+            "legacy-video-id",
+            MediaKind.VIDEO,
+            "Legacy",
+            45,
+        )
+
+        video = await self.cache.get(url, media_format=MediaFormat.VIDEO)
+        self.assertIsNotNone(video)
+        assert video is not None
+        self.assertEqual(video.file_id, "legacy-video-id")
+        self.assertIsNone(await self.cache.get(url, media_format=MediaFormat.AUDIO))
+        self.assertIsNone(
+            await self.cache.get(url, media_format=MediaFormat.VIDEO, quality_policy="720p")
+        )
 
     async def test_get_recovers_when_db_file_deleted(self) -> None:
         url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"

@@ -12,6 +12,7 @@ from telegram_share_bot.config import Settings
 from telegram_share_bot.downloader import (
     MAX_CLIP_SECONDS,
     DownloadError,
+    MediaFormat,
     MediaKind,
     TimeRange,
     _clamp_time_range,
@@ -232,6 +233,16 @@ class TestCacheKeyWithRange(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(clip.startswith(full))
         self.assertIn("#t=80-125", clip)
         self.assertIn("#t=80-end", open_ended)
+
+    def test_keys_separate_format_and_quality_without_caption_data(self) -> None:
+        url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+        video = _cache_key(url, None, media_format=MediaFormat.VIDEO)
+        audio = _cache_key(url, None, media_format=MediaFormat.AUDIO)
+        lower_quality = _cache_key(
+            url, None, media_format=MediaFormat.VIDEO, quality_policy="720p"
+        )
+        self.assertNotEqual(video, audio)
+        self.assertNotEqual(video, lower_quality)
 
     async def test_cache_roundtrip_separate(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
