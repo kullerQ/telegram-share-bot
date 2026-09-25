@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import unittest
 from unittest.mock import AsyncMock, patch
 
@@ -14,6 +15,7 @@ from telegram_share_bot.platform_previews import (
     _lookup_page_image,
     _lookup_reddit,
     _lookup_tiktok,
+    _lookup_tiktok_media,
     _trusted_image_url,
     resolve_preview,
 )
@@ -50,6 +52,55 @@ class TestPlatformPreviews(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             preview,
             Preview("https://p16-common-sign.tiktokcdn-eu.com/cover.jpg", 576, 1024),
+        )
+
+    async def test_tiktok_short_photo_link_uses_embed_cover(self) -> None:
+        photo_id = "7687699407227079966"
+        cover = "https://p16-common-sign.tiktokcdn-eu.com/cover.jpeg"
+        state = {
+            "source": {
+                "data": {
+                    f"/embed/v2/{photo_id}": {
+                        "videoData": {
+                            "imagePostInfo": {
+                                "displayImages": [
+                                    {"urlList": [cover], "width": 1264, "height": 927}
+                                ]
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        requests: list[str] = []
+
+        def response(request: httpx.Request) -> httpx.Response:
+            requests.append(str(request.url))
+            if request.url.host == "vt.tiktok.com":
+                return httpx.Response(
+                    301,
+                    headers={
+                        "location": "https://www.tiktok.com/@rem0ri/photo/"
+                        f"{photo_id}?_r=1"
+                    },
+                )
+            self.assertEqual(request.url.path, f"/embed/v2/{photo_id}")
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/html"},
+                text='<script id="__FRONTITY_CONNECT_STATE__" '
+                f'type="application/json">{json.dumps(state)}</script>',
+            )
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(response)) as client:
+            preview = await _lookup_tiktok_media("https://vt.tiktok.com/ZSqwHG2TG", client)
+        self.assertEqual(preview, Preview(cover, 1264, 927))
+        self.assertEqual(
+            requests,
+            [
+                "https://vt.tiktok.com/ZSqwHG2TG",
+                f"https://www.tiktok.com/embed/v2/{photo_id}",
+            ],
         )
 
     async def test_x_page_image_and_untrusted_image_fallback(self) -> None:
