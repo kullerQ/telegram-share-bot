@@ -34,7 +34,12 @@ jobs:
       - name: Validate release version
         env:
           BASE_REF: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || github.event.before }}
-        run: python scripts/check_release_version.py --base-ref "$BASE_REF"
+        run: |
+          base_ref="$BASE_REF"
+          if [ -z "$base_ref" ] || ! git cat-file -e "${base_ref}^{commit}" 2>/dev/null; then
+            base_ref="${GITHUB_SHA}^"
+          fi
+          python scripts/check_release_version.py --base-ref "$base_ref"
 
       - name: Lint
         run: ruff check .
