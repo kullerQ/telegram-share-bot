@@ -186,8 +186,14 @@ async def resolve_preview(url: str) -> Preview | None:
     if cached is not None and cached[0] > now:
         return cached[1]
 
-    # Direct page lookups use canonical public posts. Do not follow redirects.
-    target = normalized if platform in {"x", "instagram"} else url
+    # X account names can redirect when lowercased by URL normalization.
+    # Keep the original path's case while stripping tracking parameters.
+    if platform == "x":
+        target = urlunsplit(("https", "x.com", urlsplit(url).path, "", ""))
+    elif platform == "instagram":
+        target = normalized
+    else:
+        target = url
     started = time.monotonic()
     preview: Preview | None = None
     try:

@@ -127,6 +127,21 @@ class TestPlatformPreviews(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(preview, Preview("https://preview.redd.it/abc123.jpg", 640, 360))
 
+    async def test_x_lookup_preserves_account_case_and_strips_tracking(self) -> None:
+        expected = Preview("https://pbs.twimg.com/ext_tw_video_thumb/example.jpg")
+        with patch(
+            "telegram_share_bot.platform_previews._lookup_page_image",
+            new=AsyncMock(return_value=expected),
+        ) as lookup:
+            preview = await resolve_preview(
+                "https://x.com/PunchingCat/status/2103311089614340120?s=20"
+            )
+        self.assertEqual(preview, expected)
+        self.assertEqual(
+            lookup.await_args.args[:2],
+            ("https://x.com/PunchingCat/status/2103311089614340120", "x"),
+        )
+
     async def test_failed_lookup_is_cached_as_logo_fallback(self) -> None:
         with patch(
             "telegram_share_bot.platform_previews._lookup_page_image",
