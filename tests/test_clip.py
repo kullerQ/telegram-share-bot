@@ -416,7 +416,8 @@ class TestClipDownloadOpts(unittest.TestCase):
                 self.assertTrue(params_holder)
                 self.assertIn("download_ranges", params_holder[0])
                 self.assertNotIn("max_filesize", params_holder[0])
-                self.assertIn("height<=1080", str(params_holder[0].get("format")))
+                self.assertEqual(params_holder[0].get("format"), "bv*+ba/b")
+                self.assertNotIn("height<=1080", str(params_holder[0].get("format")))
 
     def test_clip_too_long_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

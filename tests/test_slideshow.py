@@ -373,7 +373,7 @@ class TestBuildSlideshowVideo(unittest.TestCase):
                     )
         self.assertEqual(str(ctx.exception), strings.SLIDESHOW_FFMPEG_MISSING)
 
-    def test_oversized_output_retries_then_fails(self) -> None:
+    def test_output_over_source_bound_fails_after_one_render(self) -> None:
         source = SlideshowSource(
             image_urls=("https://cdn.example.com/a.jpg",),
             audio_url=None,
@@ -442,10 +442,9 @@ class TestBuildSlideshowVideo(unittest.TestCase):
                     )
 
         self.assertIn("limit", str(ctx.exception).lower())
-        self.assertEqual(len(run_calls), 2)
-        # First attempt CRF 24 / 1080, second CRF 30 / 720
+        self.assertEqual(len(run_calls), 1)
+        # The shared downloader handles any over-limit output afterwards.
         self.assertIn("24", run_calls[0])
-        self.assertIn("30", run_calls[1])
 
     def test_successful_build_returns_video(self) -> None:
         source = SlideshowSource(

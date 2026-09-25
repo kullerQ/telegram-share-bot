@@ -529,6 +529,15 @@ async def _run_direct_download(
                     return
 
         await status_message.edit_text(strings.DIRECT_DOWNLOADING)
+        loop = asyncio.get_running_loop()
+
+        def show_optimization_status() -> None:
+            future = asyncio.run_coroutine_threadsafe(
+                status_message.edit_text(strings.OPTIMIZING_FOR_TELEGRAM), loop
+            )
+            with contextlib.suppress(Exception):
+                future.result(timeout=5)
+
         async with _download_slot(context):
             media = await download_media(
                 url=url,
@@ -541,6 +550,7 @@ async def _run_direct_download(
                 slideshow_max_images=settings.slideshow_max_images,
                 slideshow_images_loop=settings.slideshow_images_loop,
                 time_range=time_range,
+                on_optimizing=show_optimization_status,
             )
             await status_message.edit_text(strings.DIRECT_UPLOADING)
             sent_msg = await _send_media_to_chat(
@@ -1110,6 +1120,21 @@ async def _prepare_inline_media(
             reply_markup=_cancel_keyboard(result_id),
         )
         queue_started_at = time.monotonic()
+        loop = asyncio.get_running_loop()
+
+        def show_optimization_status() -> None:
+            future = asyncio.run_coroutine_threadsafe(
+                _edit_inline_text(
+                    context,
+                    inline_message_id,
+                    strings.OPTIMIZING_FOR_TELEGRAM,
+                    reply_markup=_cancel_keyboard(result_id),
+                ),
+                loop,
+            )
+            with contextlib.suppress(Exception):
+                future.result(timeout=5)
+
         async with _download_slot(context):
             if inline_message_id in _cancelled_set(context):
                 return
@@ -1131,6 +1156,7 @@ async def _prepare_inline_media(
                 slideshow_max_images=settings.slideshow_max_images,
                 slideshow_images_loop=settings.slideshow_images_loop,
                 time_range=time_range,
+                on_optimizing=show_optimization_status,
             )
             logger.info(
                 "Inline download completed in %.1fs for %s",

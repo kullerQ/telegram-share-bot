@@ -709,7 +709,7 @@ def _run_ffmpeg(
             argv,
             check=False,
             capture_output=True,
-            timeout=max(5.0, timeout_seconds),
+            timeout=max(0.1, timeout_seconds),
         )
     except subprocess.TimeoutExpired as exc:
         raise DownloadError(strings.SLIDESHOW_BUILD_FAILED) from exc
@@ -757,7 +757,7 @@ def build_slideshow_video(
     started = time.monotonic()
 
     def _remaining_timeout() -> float:
-        return max(5.0, float(timeout_seconds) - (time.monotonic() - started))
+        return max(0.1, float(timeout_seconds) - (time.monotonic() - started))
 
     try:
         with _safe_dns_resolution():
@@ -819,10 +819,9 @@ def build_slideshow_video(
     duration = max(1, math.floor(total + 0.5))
 
     output_path = work_dir / "slideshow.mp4"
-    encode_attempts: list[tuple[int, int, int]] = [
-        (1080, 1920, 24),
-        (720, 1280, 30),
-    ]
+    # One source render; the shared downloader applies at most two bounded
+    # Telegram-size optimization passes if this output is still too large.
+    encode_attempts: list[tuple[int, int, int]] = [(1080, 1920, 24)]
 
     last_error: Exception | None = None
     for width, height, crf in encode_attempts:
@@ -868,7 +867,7 @@ def build_slideshow_video(
         size = output_path.stat().st_size
         if size > max_file_bytes:
             logger.info(
-                "Slideshow output %s bytes exceeds limit; retrying lower quality",
+                "Slideshow source output %s bytes exceeds bounded source limit",
                 size,
             )
             last_error = DownloadError(
