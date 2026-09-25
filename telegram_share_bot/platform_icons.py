@@ -1,0 +1,68 @@
+"""Public thumbnail URLs for platform logos in inline search results."""
+
+from __future__ import annotations
+
+from urllib.parse import urlsplit
+
+# Exact public originals of the bundled 224px Round Square PNGs. Pinning the
+# commit keeps previews stable while a feature branch is still local.
+_UPSTREAM_BASE_URL = (
+    "https://raw.githubusercontent.com/YukiPixels/Pixel-Art-Icons/"
+    "fb9c766d2aa3150b709add9da7126db8cb5afb28/224pxl/round%20square"
+)
+_UPSTREAM_FILENAME_EXCEPTIONS = {
+    "bilibili.png": "bilibili28c.png",
+    "twitch.png": "twitch-224z.png",
+}
+
+_LOGO_BY_HOST = {
+    "artstation.com": "artstation.png",
+    "b23.tv": "bilibili.png",
+    "bilibili.com": "bilibili.png",
+    "bsky.app": "bluesky.png",
+    "chzzk.naver.com": "chzzk.png",
+    "deviantart.com": "deviantart.png",
+    "discord.com": "discord.png",
+    "discord.gg": "discord.png",
+    "facebook.com": "facebook.png",
+    "fb.watch": "facebook.png",
+    "github.com": "github.png",
+    "instagram.com": "instagram.png",
+    "itch.io": "itch.png",
+    "kick.com": "kick.png",
+    "ko-fi.com": "kofi.png",
+    "patreon.com": "patreon.png",
+    "pin.it": "pinterest.png",
+    "pinterest.com": "pinterest.png",
+    "pixiv.net": "pixiv.png",
+    "redd.it": "reddit.png",
+    "reddit.com": "reddit.png",
+    "steamcommunity.com": "steam.png",
+    "steampowered.com": "steam.png",
+    "tiktok.com": "tiktok.png",
+    "twitch.tv": "twitch.png",
+    "twitter.com": "twitter.png",
+    "vxtwitter.com": "twitter.png",
+    "fxtwitter.com": "twitter.png",
+    "fixupx.com": "twitter.png",
+    "x.com": "twitter.png",
+    "youtu.be": "youtube.png",
+    "youtube.com": "youtube.png",
+    "youtube-nocookie.com": "youtube.png",
+}
+
+
+def thumbnail_url(url: str, base_url: str | None) -> str | None:
+    """Choose a static logo using only the URL host; never fetch remote metadata."""
+    if not base_url:
+        return None
+    host = (urlsplit(url).hostname or "").lower().rstrip(".")
+    for domain, filename in _LOGO_BY_HOST.items():
+        if host == domain or host.endswith(f".{domain}"):
+            if base_url == "upstream":
+                upstream_name = _UPSTREAM_FILENAME_EXCEPTIONS.get(
+                    filename, f"{filename.removesuffix('.png')}224.png"
+                )
+                return f"{_UPSTREAM_BASE_URL}/{upstream_name}"
+            return f"{base_url.rstrip('/')}/{filename}"
+    return None

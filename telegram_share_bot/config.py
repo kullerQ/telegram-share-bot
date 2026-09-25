@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import TypeVar
+from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
 
@@ -33,6 +34,10 @@ DEFAULT_DOWNLOAD_COOLDOWN_SECONDS = 2
 DEFAULT_ALLOW_PUBLIC = False
 DEFAULT_ALLOW_SHARED_STORAGE = False
 DEFAULT_HTTPS_ONLY = True
+DEFAULT_PLATFORM_LOGO_BASE_URL = (
+    "https://raw.githubusercontent.com/kullerQ/telegram-share-bot/main/"
+    "telegram_share_bot/assets/platforms"
+)
 DEFAULT_ALLOWED_MEDIA_HOSTS = frozenset(
     {
         "youtube.com",
@@ -95,6 +100,7 @@ class Settings:
     # None means allow any host (`ALLOWED_MEDIA_HOSTS=*`).
     allowed_media_hosts: frozenset[str] | None = DEFAULT_ALLOWED_MEDIA_HOSTS
     caption_mode: CaptionMode = DEFAULT_CAPTION_MODE
+    platform_logo_base_url: str | None = DEFAULT_PLATFORM_LOGO_BASE_URL
     slideshow_slide_ms: int = DEFAULT_SLIDESHOW_SLIDE_MS
     slideshow_max_images: int = DEFAULT_SLIDESHOW_MAX_IMAGES
     slideshow_images_loop: bool = DEFAULT_SLIDESHOW_IMAGES_LOOP
@@ -462,6 +468,24 @@ def load_settings(env_file: Path = _ENV_PATH) -> Settings:
         env_file=env_file,
     )
 
+    logo_base_raw = os.getenv("PLATFORM_LOGO_BASE_URL")
+    platform_logo_base_url = (
+        DEFAULT_PLATFORM_LOGO_BASE_URL
+        if logo_base_raw is None
+        else logo_base_raw.strip().rstrip("/") or None
+    )
+    if platform_logo_base_url is not None and platform_logo_base_url != "upstream":
+        parsed_logo_url = urlsplit(platform_logo_base_url)
+        if (
+            parsed_logo_url.scheme != "https"
+            or not parsed_logo_url.netloc
+            or parsed_logo_url.query
+            or parsed_logo_url.fragment
+        ):
+            raise RuntimeError(
+                "PLATFORM_LOGO_BASE_URL must be 'upstream' or a public HTTPS directory URL."
+            )
+
     slideshow_slide_ms = parse_int(
         "SLIDESHOW_SLIDE_MS",
         os.getenv("SLIDESHOW_SLIDE_MS"),
@@ -505,6 +529,7 @@ def load_settings(env_file: Path = _ENV_PATH) -> Settings:
         https_only=https_only,
         allowed_media_hosts=allowed_media_hosts,
         caption_mode=caption_mode,
+        platform_logo_base_url=platform_logo_base_url,
         slideshow_slide_ms=slideshow_slide_ms,
         slideshow_max_images=slideshow_max_images,
         slideshow_images_loop=slideshow_images_loop,

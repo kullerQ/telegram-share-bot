@@ -52,6 +52,7 @@ from telegram_share_bot.downloader import (
     resolve_caption,
 )
 from telegram_share_bot.normalizer import safe_url_for_log
+from telegram_share_bot.platform_icons import thumbnail_url as platform_thumbnail_url
 
 logger = logging.getLogger(__name__)
 
@@ -683,12 +684,14 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 _pending_media_article(
                     clip_id,
                     url,
+                    logo_base_url=settings.platform_logo_base_url,
                     cached=clip_cached,
                     time_range=time_range,
                 ),
                 _pending_media_article(
                     full_id,
                     url,
+                    logo_base_url=settings.platform_logo_base_url,
                     cached=full_cached,
                     time_range=None,
                     force_full_title=True,
@@ -704,7 +707,14 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     cached = await _cache(context).get(url)
     await _answer_inline_query(
         query,
-        results=[_pending_media_article(result_id, url, cached=cached)],
+        results=[
+            _pending_media_article(
+                result_id,
+                url,
+                logo_base_url=settings.platform_logo_base_url,
+                cached=cached,
+            )
+        ],
         cache_time=1,
         is_personal=True,
     )
@@ -1279,7 +1289,9 @@ def _error_article(title: str, description: str) -> InlineQueryResultArticle:
 def _inline_source_details(url: str, cached: CachedMedia | None) -> tuple[str, str]:
     parsed = urlsplit(url)
     host = (parsed.hostname or "").lower().removeprefix("www.").removeprefix("m.")
-    if host == "youtu.be" or host.endswith(".youtube.com") or host == "youtube.com":
+    if host == "youtu.be" or host in {"youtube.com", "youtube-nocookie.com"} or (
+        host.endswith(".youtube.com") or host.endswith(".youtube-nocookie.com")
+    ):
         platform, media_type = "YouTube", "video"
     elif host == "tiktok.com" or host.endswith(".tiktok.com"):
         platform = "TikTok"
@@ -1318,6 +1330,7 @@ def _pending_media_article(
     result_id: str,
     url: str,
     *,
+    logo_base_url: str | None,
     cached: CachedMedia | None = None,
     time_range: TimeRange | None = None,
     force_full_title: bool = False,
@@ -1334,7 +1347,6 @@ def _pending_media_article(
         message_text = strings.INLINE_PENDING_CLIP_MESSAGE.format(
             range_label=range_label, url=display_url
         )
-        details.append(f"Clip {range_label}")
     else:
         title = strings.INLINE_PENDING_TITLE.format(media_type=media_type)
         message_text = strings.INLINE_PENDING_MESSAGE.format(url=display_url)
@@ -1342,12 +1354,16 @@ def _pending_media_article(
         time_range.duration_seconds if time_range is not None else None
     )
     if duration is not None and duration > 0:
-        details.append(_format_duration(duration))
-    details.append("Ready from cache" if cached is not None else "Download after selection")
+        details.append(f"Duration: {_format_duration(duration)}")
+    details.append("Instant" if cached is not None else "Download")
+    logo_url = platform_thumbnail_url(url, logo_base_url)
     return InlineQueryResultArticle(
         id=result_id,
         title=title[:64],
         description=" · ".join(details)[:120],
+        thumbnail_url=logo_url,
+        thumbnail_width=224 if logo_url is not None else None,
+        thumbnail_height=224 if logo_url is not None else None,
         input_message_content=InputTextMessageContent(
             message_text=message_text[:4096]
         ),
