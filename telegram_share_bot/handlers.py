@@ -28,7 +28,7 @@ from telegram import (
 from telegram.error import BadRequest, NetworkError, TelegramError, TimedOut
 from telegram.ext import ContextTypes
 
-from telegram_share_bot import strings
+from telegram_share_bot import platform_icons, strings
 from telegram_share_bot.cache import CachedMedia, MediaCache
 from telegram_share_bot.config import (
     DEFAULT_UPLOAD_TIMEOUT_SECONDS,
@@ -52,7 +52,6 @@ from telegram_share_bot.downloader import (
     resolve_caption,
 )
 from telegram_share_bot.normalizer import safe_url_for_log
-from telegram_share_bot.platform_icons import thumbnail_url as platform_thumbnail_url
 
 logger = logging.getLogger(__name__)
 
@@ -1356,14 +1355,21 @@ def _pending_media_article(
     if duration is not None and duration > 0:
         details.append(f"Duration: {_format_duration(duration)}")
     details.append("Instant" if cached is not None else "Download")
-    logo_url = platform_thumbnail_url(url, logo_base_url)
+    preview_url = platform_icons.video_thumbnail_url(url)
+    thumbnail_url = preview_url or platform_icons.thumbnail_url(url, logo_base_url)
+    if preview_url:
+        thumbnail_width, thumbnail_height = 320, 180
+    elif thumbnail_url:
+        thumbnail_width, thumbnail_height = 224, 224
+    else:
+        thumbnail_width, thumbnail_height = None, None
     return InlineQueryResultArticle(
         id=result_id,
         title=title[:64],
         description=" · ".join(details)[:120],
-        thumbnail_url=logo_url,
-        thumbnail_width=224 if logo_url is not None else None,
-        thumbnail_height=224 if logo_url is not None else None,
+        thumbnail_url=thumbnail_url,
+        thumbnail_width=thumbnail_width,
+        thumbnail_height=thumbnail_height,
         input_message_content=InputTextMessageContent(
             message_text=message_text[:4096]
         ),
