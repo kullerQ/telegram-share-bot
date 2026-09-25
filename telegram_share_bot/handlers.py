@@ -61,6 +61,8 @@ _STALE_INLINE_QUERY_MARKERS = (
 )
 
 _CALLBACK_PREFIX = "cancel:"
+_RETRY_PREFIX = "retry:"
+_FULL_FALLBACK_PREFIX = "fallback:"
 _CLIP_CALLBACK_PREFIX = "clip:"
 _FULL_CALLBACK_PREFIX = "full:"
 _PENDING_KEY = "pending_inline"
@@ -777,6 +779,87 @@ async def chosen_inline_result(
     tasks[inline_message_id] = task
 
 
+async def retry_inline_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Retry a transient inline failure or switch a failed clip to its full video."""
+    query = update.callback_query
+    if query is None or query.data is None:
+        return
+
+    user_id = query.from_user.id if query.from_user else None
+    if not _is_user_allowed(context, user_id):
+        await query.answer(text=strings.ACCESS_DENIED, show_alert=True)
+        return
+
+    retrying = query.data.startswith(_RETRY_PREFIX)
+    using_full_video = query.data.startswith(_FULL_FALLBACK_PREFIX)
+    if not retrying and not using_full_video:
+        await query.answer()
+        return
+
+    prefix = _RETRY_PREFIX if retrying else _FULL_FALLBACK_PREFIX
+    result_id = query.data.removeprefix(prefix)
+    pending = _pending_map(context).get(result_id)
+    if pending is None:
+        await query.answer(text=strings.INLINE_RETRY_EXPIRED, show_alert=True)
+        return
+
+    inline_message_id = query.inline_message_id
+    if not inline_message_id:
+        await query.answer(text=strings.INLINE_RETRY_EXPIRED, show_alert=True)
+        return
+
+    tasks = _task_map(context)
+    existing = tasks.get(inline_message_id)
+    if existing is not None and not existing.done():
+        await query.answer(text=strings.INLINE_ALREADY_PREPARING)
+        return
+
+    denial = await _try_acquire_user_download_slot(context, user_id)
+    if denial is not None:
+        await query.answer(text=denial, show_alert=True)
+        return
+
+    time_range = None if using_full_video else pending.time_range
+    _store_pending_url(
+        context,
+        result_id,
+        pending.url,
+        custom_caption=pending.custom_caption,
+        time_range=time_range,
+    )
+    await query.answer(text=strings.INLINE_RETRY_ANSWER)
+    display_url = safe_url_for_log(pending.url)
+    pending_message = (
+        strings.INLINE_PENDING_CLIP_MESSAGE.format(
+            range_label=format_time_range(time_range),
+            url=display_url,
+        )
+        if time_range is not None
+        else strings.INLINE_CHOSEN_DOWNLOADING.format(url=display_url)
+    )
+    await _edit_inline_text(
+        context,
+        inline_message_id,
+        pending_message,
+        reply_markup=_cancel_keyboard(result_id),
+    )
+    task = asyncio.create_task(
+        _prepare_inline_media(
+            context,
+            inline_message_id=inline_message_id,
+            url=pending.url,
+            result_id=result_id,
+            user_id=user_id,
+            custom_caption=pending.custom_caption,
+            time_range=time_range,
+        ),
+        name=f"retry-inline-{result_id}",
+    )
+    tasks[inline_message_id] = task
+
+
 async def clip_choice_callback(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
@@ -896,6 +979,7 @@ async def _prepare_inline_media(
     cache = _cache(context)
     display_url = safe_url_for_log(url)
     media: DownloadedMedia | None = None
+    keep_pending_for_retry = False
 
     try:
         # 1. Attempt instant send from cache
@@ -1046,21 +1130,42 @@ async def _prepare_inline_media(
         if inline_message_id in _cancelled_set(context):
             return
         logger.warning("Inline download failed for %s: %s", display_url, exc)
+        keep_pending_for_retry = exc.retryable
+        if keep_pending_for_retry:
+            _store_pending_url(
+                context,
+                result_id,
+                url,
+                custom_caption=custom_caption,
+                time_range=time_range,
+            )
         await _edit_inline_text(
             context,
             inline_message_id,
             str(exc) or strings.INLINE_CHOSEN_DOWNLOAD_FAILED,
-            reply_markup=_cancel_keyboard(result_id),
+            reply_markup=(
+                _retry_keyboard(result_id, time_range)
+                if keep_pending_for_retry
+                else _EMPTY_KEYBOARD
+            ),
         )
     except (NetworkError, TimedOut) as exc:
         if inline_message_id in _cancelled_set(context):
             return
         logger.warning("Inline upload failed for %s: %s", display_url, exc)
+        keep_pending_for_retry = True
+        _store_pending_url(
+            context,
+            result_id,
+            url,
+            custom_caption=custom_caption,
+            time_range=time_range,
+        )
         await _edit_inline_text(
             context,
             inline_message_id,
             strings.INLINE_CHOSEN_UPLOAD_FAILED,
-            reply_markup=_cancel_keyboard(result_id),
+            reply_markup=_retry_keyboard(result_id, time_range),
         )
     except Exception:
         if inline_message_id in _cancelled_set(context):
@@ -1070,11 +1175,13 @@ async def _prepare_inline_media(
             context,
             inline_message_id,
             strings.INLINE_CHOSEN_PREPARE_FAILED,
-            reply_markup=_cancel_keyboard(result_id),
+            reply_markup=_EMPTY_KEYBOARD,
         )
     finally:
         _task_map(context).pop(inline_message_id, None)
         _cancelled_set(context).discard(inline_message_id)
+        if not keep_pending_for_retry:
+            _pending_map(context).pop(result_id, None)
         if media is not None:
             cleanup_media(media)
         await _release_user_download_slot(context, user_id)
@@ -1091,6 +1198,30 @@ def _cancel_keyboard(result_id: str) -> InlineKeyboardMarkup:
             ]
         ]
     )
+
+
+def _retry_keyboard(
+    result_id: str, time_range: TimeRange | None
+) -> InlineKeyboardMarkup:
+    retry_label = (
+        strings.INLINE_RETRY_CLIP_BUTTON
+        if time_range is not None
+        else strings.INLINE_RETRY_BUTTON
+    )
+    buttons = [
+        InlineKeyboardButton(
+            retry_label,
+            callback_data=f"{_RETRY_PREFIX}{result_id}",
+        )
+    ]
+    if time_range is not None:
+        buttons.append(
+            InlineKeyboardButton(
+                strings.INLINE_SEND_FULL_BUTTON,
+                callback_data=f"{_FULL_FALLBACK_PREFIX}{result_id}",
+            )
+        )
+    return InlineKeyboardMarkup([buttons])
 
 
 def _error_article(title: str, description: str) -> InlineQueryResultArticle:

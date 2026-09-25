@@ -307,6 +307,29 @@ def _looks_like_stale_cdn_url(exc: BaseException) -> bool:
     )
 
 
+def _is_transient_download_error(message: str) -> bool:
+    """Recognize network failures that may succeed when the user retries."""
+    message = message.lower()
+    markers = (
+        "timed out",
+        "timeout",
+        "temporary failure",
+        "temporarily unavailable",
+        "connection reset",
+        "connection refused",
+        "connection aborted",
+        "remote end closed",
+        "network is unreachable",
+        "http error 408",
+        "http error 429",
+        "http error 500",
+        "http error 502",
+        "http error 503",
+        "http error 504",
+    )
+    return any(marker in message for marker in markers)
+
+
 def _extract_info_cached(
     ydl: yt_dlp.YoutubeDL,
     url: str,
@@ -398,6 +421,14 @@ class MediaRequest:
 
 class DownloadError(Exception):
     """Raised when a URL cannot be downloaded within bot limits."""
+
+    def __init__(self, message: str, *, retryable: bool | None = None) -> None:
+        super().__init__(message)
+        self.retryable = (
+            _is_transient_download_error(message)
+            if retryable is None
+            else retryable
+        )
 
 
 # YouTube clip length hard cap (still offer both choices; clip path rejects over-long).
@@ -968,13 +999,19 @@ def _download_sync(
                     max_mb=max_file_bytes // (1024 * 1024)
                 )
             ) from exc
-        raise DownloadError(strings.DOWNLOAD_FAILED_GENERIC) from exc
+        raise DownloadError(
+            strings.DOWNLOAD_FAILED_GENERIC,
+            retryable=_is_transient_download_error(message),
+        ) from exc
     except Exception as exc:
         _cleanup_dir(work_dir)
         logger.warning(
             "Download failed for %s: %s", safe_url_for_log(url), exc
         )
-        raise DownloadError(strings.DOWNLOAD_FAILED_GENERIC) from exc
+        raise DownloadError(
+            strings.DOWNLOAD_FAILED_GENERIC,
+            retryable=_is_transient_download_error(str(exc)),
+        ) from exc
 
 
 def _cleanup_dir(directory: Path) -> None:
