@@ -23,34 +23,39 @@ INLINE_RATE_LIMITED_TITLE = "Busy"
 INLINE_RATE_LIMITED_DESCRIPTION = "Too many downloads in progress. Please wait."
 
 START_MESSAGE = (
-    "Welcome to <b>{bot_name}</b>!\n\n"
-    "I download media from YouTube, Twitter/X, and similar links, "
-    "then send the file in chat.\n\n"
-    "Try me inline:\n"
-    "<code>@{bot_username} {example_url}</code>\n\n"
-    "Or paste a media URL here."
-    "{caption_hint}"
+    "🎬 {bot_name}\n\n"
+    "Paste one media link here and I'll send the media back.\n\n"
+    "🌐 Platforms: YouTube · TikTok · Instagram · X\n"
+    "🎞 Videos and TikTok photo slideshows (sound when available)\n"
+    "✂️ YouTube clips or full videos\n\n"
+    "↗️ To share in another chat, type @{bot_username} followed by a link.\n"
+    "Example: @{bot_username} <link>\n"
+    "💡 For more information, see /help."
 )
-
-START_CAPTION_CUSTOM_HINT = (
-    "\n\nOptional caption after the link:\n"
-    "<code>@{bot_username} {example_url} your caption here</code>"
+HELP_MESSAGE = (
+    "📖 How to share\n\n"
+    "📩 In this chat\n"
+    "Paste a media link and I'll send it here.\n\n"
+    "↗️ In another chat\n"
+    "Type @{bot_username} followed by a link, then choose a result.\n\n"
+    "✂️ YouTube clips\n"
+    "Add a range after the link, for example 1:20-2:05. Or use a link with "
+    "?t=2022 and add 30 for a 30-second clip. With ?t=2022 alone, the clip "
+    "runs to the end. Choose the clip or full video.\n\n"
+    "✍️ Captions\n"
+    "{caption_help}\n\n"
+    "One media item per request. Playlists and multi-item collections are not supported."
 )
-
-START_CAPTION_OFF_HINT = "\n\nMedia is sent without captions."
-
-START_CLIP_HINT = (
-    "\n\nYouTube clip — absolute range, <code>?t=</code> plus length in seconds, "
-    "or <code>?t=</code> alone (from that point to the end):\n"
-    "<code>@{bot_username} {example_url} 1:20-2:05</code>\n"
-    "<code>@{bot_username} https://youtu.be/…?t=2022 30</code>\n"
-    "<code>@{bot_username} https://youtu.be/…?t=2022</code>"
-)
+HELP_CAPTION_MEDIA = "The media title is used as the caption."
+HELP_CAPTION_CUSTOM = "Add your caption after the link or clip range."
+HELP_CAPTION_OFF = "Captions are disabled for this bot."
 
 # --- Direct private-chat URL handling ----------------------------------------
 
 DIRECT_URL_HINT = "Send a media URL, or use me inline: @BotName <url>"
-DIRECT_DOWNLOADING = "Downloading…"
+DIRECT_PREPARING = "Checking the media link…"
+DIRECT_DOWNLOADING = "Downloading media…"
+DIRECT_UPLOADING = "Sending media to Telegram…"
 DIRECT_DONE = "Done."
 DIRECT_DOWNLOAD_FAILED = "Could not download that media."
 DIRECT_SEND_FAILED = "Something went wrong while sending the media."
@@ -74,11 +79,11 @@ INLINE_EMPTY_DESCRIPTION = (
 INLINE_NO_URL_TITLE = "No URL found"
 INLINE_NO_URL_DESCRIPTION = "Include a full http(s) link in the inline query."
 
-INLINE_PENDING_TITLE = "Send media"
-INLINE_PENDING_CLIP_TITLE = "Send clip {range_label}"
-INLINE_PENDING_FULL_TITLE = "Send full video"
-INLINE_PENDING_MESSAGE = "Preparing media…\n{url}"
-INLINE_PENDING_CLIP_MESSAGE = "Preparing clip {range_label}…\n{url}"
+INLINE_PENDING_TITLE = "▶ Send {media_type}"
+INLINE_PENDING_CLIP_TITLE = "✂ Send clip {range_label}"
+INLINE_PENDING_FULL_TITLE = "▶ Send full video"
+INLINE_PENDING_MESSAGE = "Checking the media link…\n{url}"
+INLINE_PENDING_CLIP_MESSAGE = "Checking clip {range_label}…\n{url}"
 INLINE_CANCEL_BUTTON = "Cancel"
 INLINE_CANCELLED = "Cancelled."
 INLINE_CANCEL_ANSWER = "Cancelled"
@@ -92,7 +97,8 @@ INLINE_ALREADY_PREPARING = "This media is already being prepared."
 # --- After user chooses an inline result -------------------------------------
 
 INLINE_CHOSEN_NO_URL = "No URL found in the query."
-INLINE_CHOSEN_DOWNLOADING = "Downloading…\n{url}"
+INLINE_DOWNLOADING = "Downloading media…\n{url}"
+INLINE_UPLOADING = "Sending media to Telegram…\n{url}"
 INLINE_CHOSEN_DOWNLOAD_FAILED = "Download failed."
 INLINE_CHOSEN_UPLOAD_FAILED = (
     "Could not upload the media to Telegram (network error). Please try again."

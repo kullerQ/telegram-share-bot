@@ -1,0 +1,5 @@
+# Platform icon attribution
+
+These 224 × 224 Round Square PNG platform icons are from [Pixel Art Icons by Yūki](https://github.com/YukiPixels/Pixel-Art-Icons), commit `fb9c766d2aa3150b709add9da7126db8cb5afb28`.
+
+The files were renamed for this bot. Each original icon was reduced to 112 × 112 pixels with nearest-neighbor sampling and centered on a transparent 224 × 224 canvas to make inline result logos appear smaller. They are shared under [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/).

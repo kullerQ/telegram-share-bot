@@ -877,7 +877,10 @@ def _download_sync(
             f"bv*[filesize<{max_file_bytes}]+ba/"
             f"b[filesize<{max_file_bytes}]/"
             f"bv*[filesize_approx<{max_file_bytes}]+ba/"
-            f"b[filesize_approx<{max_file_bytes}]"
+            f"b[filesize_approx<{max_file_bytes}]/"
+            "b[height<=720]/"
+            "bv*[acodec=none][protocol=https][height<=720]/"
+            "bv*[acodec=none][height<=720]"
         )
 
     effective_range = time_range
@@ -894,8 +897,16 @@ def _download_sync(
 
                 # Probe metadata first so live streams abort before any media bytes land.
                 # Reuse extract_info from get_direct_stream when still warm.
+                metadata_started_at = time.monotonic()
                 extracted, from_cache = _extract_info_cached(ydl, url)
                 info = _pick_info(extracted)
+                if is_clip:
+                    logger.info(
+                        "Clip metadata resolved in %.1fs (%s) for %s",
+                        time.monotonic() - metadata_started_at,
+                        "cache" if from_cache else "source",
+                        safe_url_for_log(url),
+                    )
 
                 if effective_range is not None:
                     effective_range = _resolve_clip_range(effective_range, info)
@@ -910,6 +921,7 @@ def _download_sync(
                         )
                     )
 
+                transfer_started_at = time.monotonic()
                 try:
                     processed = ydl.process_ie_result(extracted, download=True)
                 except yt_dlp.utils.DownloadError as download_exc:
@@ -940,6 +952,12 @@ def _download_sync(
                         ) from download_exc
                     processed = ydl.process_ie_result(extracted, download=True)
 
+                if is_clip:
+                    logger.info(
+                        "Clip section transfer and ffmpeg processing took %.1fs for %s",
+                        time.monotonic() - transfer_started_at,
+                        safe_url_for_log(url),
+                    )
                 if isinstance(processed, dict):
                     info = _pick_info(processed)
 
@@ -1159,6 +1177,7 @@ def _extract_direct_stream_sync(
                 )
 
                 direct = info.get("url")
+                selected_size = info.get("filesize") or info.get("filesize_approx")
                 if (
                     isinstance(direct, str)
                     and direct.startswith("http")
@@ -1166,6 +1185,10 @@ def _extract_direct_stream_sync(
                     and ".m3u8" not in direct
                     and ".mpd" not in direct
                     and info.get("vcodec") != "none"
+                    and (
+                        not isinstance(selected_size, (int, float))
+                        or selected_size <= max_file_bytes
+                    )
                 ):
                     ext = str(info.get("ext") or "mp4")
                     kind = _classify_ext(ext)

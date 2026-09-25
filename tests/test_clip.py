@@ -334,7 +334,11 @@ class TestInlineClipChoice(unittest.IsolatedAsyncioTestCase):
         query.answer = AsyncMock()
         update.inline_query = query
 
-        await inline_query(update, context)
+        with patch(
+            "telegram_share_bot.handlers.platform_previews.resolve_preview",
+            new=AsyncMock(return_value=None),
+        ):
+            await inline_query(update, context)
         results = query.answer.await_args.kwargs["results"]
         self.assertEqual(len(results), 1)
 
