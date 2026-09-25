@@ -508,6 +508,14 @@ async def _explicit_format_command(
     )
 
 
+async def _remove_completed_direct_status(status_message: Message) -> None:
+    """Remove transient progress text after its media has been delivered."""
+    try:
+        await status_message.delete()
+    except TelegramError:
+        logger.debug("Could not remove completed direct status message")
+
+
 async def _run_direct_download(
     context: ContextTypes.DEFAULT_TYPE,
     *,
@@ -536,7 +544,7 @@ async def _run_direct_download(
                     cached,
                     custom_caption=custom_caption,
                 )
-                await status_message.edit_text(strings.DIRECT_DONE)
+                await _remove_completed_direct_status(status_message)
                 return
             except BadRequest as exc:
                 logger.warning(
@@ -596,7 +604,7 @@ async def _run_direct_download(
                         ),
                         custom_caption=custom_caption,
                     )
-                    await status_message.edit_text(strings.DIRECT_DONE)
+                    await _remove_completed_direct_status(status_message)
                     return
 
         await status_message.edit_text(strings.DIRECT_DOWNLOADING)
@@ -642,7 +650,7 @@ async def _run_direct_download(
             time_range=time_range,
             media_format=media_format,
         )
-        await status_message.edit_text(strings.DIRECT_DONE)
+        await _remove_completed_direct_status(status_message)
     except DownloadError as exc:
         logger.warning("Direct download failed for %s: %s", display_url, exc)
         await status_message.edit_text(str(exc) or strings.DIRECT_DOWNLOAD_FAILED)

@@ -554,6 +554,20 @@ def _set_attempt_output_template(ydl: yt_dlp.YoutubeDL, template: str) -> None:
     ydl.params["outtmpl"] = templates
 
 
+def _is_audio_unavailable_error(error: BaseException | str) -> bool:
+    """Recognize extractor errors that mean a link has no usable audio."""
+    message = str(error).lower()
+    return any(
+        marker in message
+        for marker in (
+            "requested format is not available",
+            "no video formats found",
+            "no audio formats found",
+            "only images are available",
+        )
+    )
+
+
 def _default_audio_selector(time_range: TimeRange | None, source_limit: int) -> str:
     if time_range is not None:
         return "ba"
@@ -1042,11 +1056,17 @@ def _optimize_video_file(
     ffmpeg_bin = shutil.which("ffmpeg")
     if ffmpeg_bin is None:
         raise DownloadError(strings.DOWNLOAD_FIT_FFMPEG_MISSING)
+    source_size = path.stat().st_size
+    logger.info(
+        "Optimizing video for Telegram: source_bytes=%d limit_bytes=%d",
+        source_size,
+        max_file_bytes,
+    )
     if on_optimizing is not None:
         on_optimizing()
 
     best_path = path
-    best_size = path.stat().st_size
+    best_size = source_size
     attempts = ((28, "128k"), (33, "96k"))
     for index, (crf, audio_rate) in enumerate(attempts, start=1):
         if abort_event is not None and abort_event.is_set():
@@ -1466,12 +1486,8 @@ def _download_sync(
                     raise last_error
                 if last_error is not None:
                     message = str(last_error).split("\n")[-1].strip()
-                    if media_format is MediaFormat.AUDIO and any(
-                        marker in message.lower()
-                        for marker in (
-                            "requested format is not available",
-                            "no video formats found",
-                        )
+                    if media_format is MediaFormat.AUDIO and _is_audio_unavailable_error(
+                        message
                     ):
                         raise DownloadError(strings.AUDIO_UNAVAILABLE) from last_error
                     raise DownloadError(
@@ -1485,6 +1501,9 @@ def _download_sync(
     except yt_dlp.utils.DownloadError as exc:
         _cleanup_dir(work_dir)
         message = str(exc).split("\n")[-1].strip() or strings.DOWNLOAD_FAILED_GENERIC
+        if media_format is MediaFormat.AUDIO and _is_audio_unavailable_error(message):
+            logger.info("No compatible audio stream available for %s", safe_url_for_log(url))
+            raise DownloadError(strings.AUDIO_UNAVAILABLE) from exc
         logger.warning("yt-dlp download error for %s: %s", safe_url_for_log(url), message)
         if "File is larger than max-filesize" in message or "filesize" in message.lower():
             raise DownloadError(
@@ -1496,10 +1515,14 @@ def _download_sync(
         ) from exc
     except Exception as exc:
         _cleanup_dir(work_dir)
-        logger.warning("Download failed for %s: %s", safe_url_for_log(url), exc)
+        message = str(exc).split("\n")[-1].strip() or strings.DOWNLOAD_FAILED_GENERIC
+        if media_format is MediaFormat.AUDIO and _is_audio_unavailable_error(message):
+            logger.info("No compatible audio stream available for %s", safe_url_for_log(url))
+            raise DownloadError(strings.AUDIO_UNAVAILABLE) from exc
+        logger.warning("Download failed for %s: %s", safe_url_for_log(url), message)
         raise DownloadError(
             strings.DOWNLOAD_FAILED_GENERIC,
-            retryable=_is_transient_download_error(str(exc)),
+            retryable=_is_transient_download_error(message),
         ) from exc
 
 

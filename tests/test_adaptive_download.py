@@ -209,59 +209,71 @@ class TestAudioFormatSelection(unittest.TestCase):
 
     def test_missing_audio_stream_has_a_clear_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            class FakeYdl:
-                def __init__(self, opts: dict[str, object]) -> None:
-                    self.params = dict(opts)
+            for error_type in (yt_dlp.utils.DownloadError, yt_dlp.utils.ExtractorError):
+                class FakeYdl:
+                    def __init__(self, opts: dict[str, object]) -> None:
+                        self.params = dict(opts)
 
-                def __enter__(self) -> FakeYdl:
-                    return self
+                    def __enter__(self) -> FakeYdl:
+                        return self
 
-                def __exit__(self, *args: object) -> None:
-                    return None
+                    def __exit__(self, *args: object) -> None:
+                        return None
 
-                def build_format_selector(self, selector: str) -> str:
-                    return selector
+                    def build_format_selector(self, selector: str) -> str:
+                        return selector
 
-                def process_ie_result(
-                    self, info: dict[str, object], download: bool = True
-                ) -> dict[str, object]:
-                    _ = info, download
-                    raise yt_dlp.utils.DownloadError(
-                        "Requested format is not available. Use --list-formats."
-                    )
+                    def process_ie_result(
+                        self,
+                        info: dict[str, object],
+                        download: bool = True,
+                        error_to_raise: type[Exception] = error_type,
+                    ) -> dict[str, object]:
+                        _ = info, download
+                        raise error_to_raise(
+                            "[Reddit] Requested format is not available. "
+                            "Use --list-formats for a list of available formats"
+                        )
 
-            with (
-                patch("telegram_share_bot.downloader.is_safe_media_url", return_value=True),
-                patch("telegram_share_bot.downloader._safe_dns_resolution", contextlib.nullcontext),
-                patch("telegram_share_bot.downloader.yt_dlp.YoutubeDL", FakeYdl),
-                patch(
-                    "telegram_share_bot.downloader._extract_info_cached",
-                    return_value=(
-                        {
-                            "title": "No audio",
-                            "duration": 60,
-                            "formats": [
-                                {
-                                    "format_id": "video",
-                                    "height": 720,
-                                    "vcodec": "h264",
-                                    "acodec": "none",
-                                }
-                            ],
-                        },
-                        False,
+                with (
+                    patch(
+                        "telegram_share_bot.downloader.is_safe_media_url",
+                        return_value=True,
                     ),
-                ),
-            ):
-                with self.assertRaises(DownloadError) as ctx:
-                    _download_sync(
-                        "https://youtube.com/watch?v=example",
-                        Path(tmp),
-                        max_file_bytes=100,
-                        timeout_seconds=10,
-                        media_format=MediaFormat.AUDIO,
-                    )
-            self.assertEqual(str(ctx.exception), strings.AUDIO_UNAVAILABLE)
+                    patch(
+                        "telegram_share_bot.downloader._safe_dns_resolution",
+                        contextlib.nullcontext,
+                    ),
+                    patch("telegram_share_bot.downloader.yt_dlp.YoutubeDL", FakeYdl),
+                    patch(
+                        "telegram_share_bot.downloader._extract_info_cached",
+                        return_value=(
+                            {
+                                "title": "No audio",
+                                "duration": 60,
+                                "formats": [
+                                    {
+                                        "format_id": "video",
+                                        "height": 720,
+                                        "vcodec": "h264",
+                                        "acodec": "none",
+                                    }
+                                ],
+                            },
+                            False,
+                        ),
+                    ),
+                ):
+                    with self.subTest(error_type=error_type.__name__):
+                        with self.assertRaises(DownloadError) as ctx:
+                            _download_sync(
+                                "https://reddit.com/r/example/video",
+                                Path(tmp),
+                                max_file_bytes=100,
+                                timeout_seconds=10,
+                                media_format=MediaFormat.AUDIO,
+                            )
+                        self.assertEqual(str(ctx.exception), strings.AUDIO_UNAVAILABLE)
 
 
 class TestYtDlpOutputTemplate(unittest.TestCase):
@@ -412,17 +424,19 @@ class TestVideoOptimization(unittest.TestCase):
             def notice() -> None:
                 notices.append(True)
 
-            with (
-                patch("telegram_share_bot.downloader.shutil.which", return_value="ffmpeg"),
-                patch("telegram_share_bot.downloader.subprocess.run", side_effect=fake_run),
-            ):
-                result = _optimize_video_file(
-                    source,
-                    max_file_bytes=10,
-                    deadline=9999999999,
-                    abort_event=None,
-                    on_optimizing=notice,
-                )
+            with self.assertLogs("telegram_share_bot.downloader", level="INFO") as logs:
+                with (
+                    patch("telegram_share_bot.downloader.shutil.which", return_value="ffmpeg"),
+                    patch("telegram_share_bot.downloader.subprocess.run", side_effect=fake_run),
+                ):
+                    result = _optimize_video_file(
+                        source,
+                        max_file_bytes=10,
+                        deadline=9999999999,
+                        abort_event=None,
+                        on_optimizing=notice,
+                    )
+            self.assertTrue(any("Optimizing video for Telegram" in line for line in logs.output))
             self.assertEqual(result.stat().st_size, 8)
             self.assertLessEqual(calls, 2)
             self.assertEqual(notices, [True])

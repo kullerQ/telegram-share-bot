@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,7 +11,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from telegram_share_bot import strings
 from telegram_share_bot.cache import MediaCache
 from telegram_share_bot.config import Settings
-from telegram_share_bot.downloader import DownloadedMedia, MediaFormat, MediaKind, TimeRange
+from telegram_share_bot.downloader import (
+    DownloadedMedia,
+    DownloadError,
+    MediaFormat,
+    MediaKind,
+    TimeRange,
+)
 from telegram_share_bot.handlers import (
     _prepare_inline_media,
     _run_direct_download,
@@ -105,10 +112,18 @@ class TestMediaProgress(unittest.IsolatedAsyncioTestCase):
         path.write_bytes(b"media")
         return DownloadedMedia(path, "Example video", MediaKind.VIDEO, 30)
 
-    async def test_direct_chat_shows_download_upload_and_done_states(self) -> None:
+    async def test_direct_chat_shows_optimization_and_clears_status_after_send(self) -> None:
         status = MagicMock()
         status.edit_text = AsyncMock()
+        status.delete = AsyncMock()
         media = self._media("direct")
+
+        async def download_with_optimization(**kwargs: object) -> DownloadedMedia:
+            callback = kwargs["on_optimizing"]
+            assert callable(callback)
+            await asyncio.to_thread(callback)
+            return media
+
         with (
             patch(
                 "telegram_share_bot.handlers.get_direct_stream",
@@ -116,7 +131,7 @@ class TestMediaProgress(unittest.IsolatedAsyncioTestCase):
             ),
             patch(
                 "telegram_share_bot.handlers.download_media",
-                new=AsyncMock(return_value=media),
+                new=AsyncMock(side_effect=download_with_optimization),
             ),
             patch(
                 "telegram_share_bot.handlers._send_media_to_chat",
@@ -141,10 +156,42 @@ class TestMediaProgress(unittest.IsolatedAsyncioTestCase):
             [call.args[0] for call in status.edit_text.await_args_list],
             [
                 strings.DIRECT_DOWNLOADING,
+                strings.OPTIMIZING_FOR_TELEGRAM,
                 strings.DIRECT_UPLOADING,
-                strings.DIRECT_DONE,
             ],
         )
+        status.delete.assert_awaited_once()
+
+    async def test_direct_audio_without_a_stream_shows_specific_feedback(self) -> None:
+        status = MagicMock()
+        status.edit_text = AsyncMock()
+        status.delete = AsyncMock()
+        with (
+            patch(
+                "telegram_share_bot.handlers.get_direct_stream",
+                new=AsyncMock(return_value=None),
+            ),
+            patch(
+                "telegram_share_bot.handlers.download_media",
+                new=AsyncMock(side_effect=DownloadError(strings.AUDIO_UNAVAILABLE)),
+            ),
+        ):
+            await _run_direct_download(
+                self.context,
+                chat_id=42,
+                user_id=42,
+                url="https://reddit.com/r/example/video",
+                custom_caption=None,
+                time_range=None,
+                status_message=status,
+                media_format=MediaFormat.AUDIO,
+            )
+
+        self.assertEqual(
+            status.edit_text.await_args_list[-1].args[0],
+            strings.AUDIO_UNAVAILABLE,
+        )
+        status.delete.assert_not_awaited()
 
     async def test_inline_flow_shows_check_download_and_upload_states(self) -> None:
         self.context.bot.edit_message_text = AsyncMock()
