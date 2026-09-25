@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from telegram_share_bot.config import DEFAULT_MAX_CONCURRENT_DOWNLOADS, load_settings
 from telegram_share_bot.downloader import DownloadedMedia, MediaKind
-from telegram_share_bot.handlers import url_message
+from telegram_share_bot.handlers import direct_format_callback, url_message
 
 
 class TestConcurrencyLimiter(unittest.IsolatedAsyncioTestCase):
@@ -95,17 +95,6 @@ class TestConcurrencyLimiter(unittest.IsolatedAsyncioTestCase):
             dummy.duration = 10
             return dummy
 
-        update = MagicMock()
-        update.effective_user = MagicMock()
-        update.effective_user.id = 42
-        msg = MagicMock()
-        msg.text = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
-        msg.chat_id = 12345
-        status_msg = MagicMock()
-        status_msg.edit_text = AsyncMock()
-        msg.reply_text = AsyncMock(return_value=status_msg)
-        update.effective_message = msg
-
         with (
             patch("telegram_share_bot.handlers.get_direct_stream", AsyncMock(return_value=None)),
             patch("telegram_share_bot.handlers.download_media", side_effect=fake_download),
@@ -116,9 +105,29 @@ class TestConcurrencyLimiter(unittest.IsolatedAsyncioTestCase):
             ),
             patch("telegram_share_bot.handlers.cleanup_media"),
         ):
-            # Run 5 concurrent url_message requests
-            tasks = [url_message(update, context) for _ in range(5)]
-            await asyncio.gather(*tasks)
+            callbacks = []
+            for _ in range(5):
+                update = MagicMock()
+                update.effective_user = MagicMock(id=42)
+                message = MagicMock()
+                message.text = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+                message.chat_id = 12345
+                status_message = MagicMock(spec=__import__("telegram").Message)
+                status_message.edit_text = AsyncMock()
+                message.reply_text = AsyncMock(return_value=status_message)
+                update.effective_message = message
+                await url_message(update, context)
+
+                keyboard = message.reply_text.await_args.kwargs["reply_markup"]
+                choice_id = keyboard.inline_keyboard[0][0].callback_data.split(":", 1)[1]
+                update.callback_query = MagicMock()
+                update.callback_query.from_user = MagicMock(id=42)
+                update.callback_query.data = f"video:{choice_id}"
+                update.callback_query.message = status_message
+                update.callback_query.answer = AsyncMock()
+                callbacks.append(direct_format_callback(update, context))
+
+            await asyncio.gather(*callbacks)
 
         # Verify that concurrency never exceeded the semaphore limit
         self.assertLessEqual(max_seen_active, semaphore_limit)

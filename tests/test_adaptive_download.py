@@ -8,9 +8,15 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import yt_dlp
+
+from telegram_share_bot import strings
 from telegram_share_bot.downloader import (
     DownloadedMedia,
+    DownloadError,
+    MediaFormat,
     MediaKind,
+    _audio_format_candidates,
     _download_sync,
     _format_candidates,
     _optimize_video_file,
@@ -70,6 +76,177 @@ class TestFormatRanking(unittest.TestCase):
             "acodec": "aac",
         }
         self.assertEqual(_format_candidates({"formats": [candidate]}, max_file_bytes=100), [])
+
+
+class TestAudioFormatSelection(unittest.TestCase):
+    def test_ranks_audio_only_streams_and_skips_unbounded_estimates(self) -> None:
+        formats = [
+            {
+                "format_id": "video",
+                "height": 1080,
+                "filesize": 10,
+                "vcodec": "h264",
+                "acodec": "none",
+            },
+            {
+                "format_id": "audio-low",
+                "abr": 64,
+                "filesize": 5,
+                "vcodec": "none",
+                "acodec": "opus",
+            },
+            {
+                "format_id": "audio-high",
+                "abr": 128,
+                "filesize": 8,
+                "vcodec": "none",
+                "acodec": "aac",
+            },
+            {
+                "format_id": "audio-too-large",
+                "abr": 256,
+                "filesize": 250,
+                "vcodec": "none",
+                "acodec": "aac",
+            },
+        ]
+        candidates = _audio_format_candidates({"formats": formats}, max_file_bytes=100)
+        self.assertEqual(
+            [candidate.selector for candidate in candidates],
+            ["audio-high", "audio-low"],
+        )
+
+    def test_audio_download_uses_audio_only_format_and_returns_native_audio(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            selectors: list[str] = []
+            formats = [
+                {
+                    "format_id": "video",
+                    "height": 1080,
+                    "filesize": 10,
+                    "vcodec": "h264",
+                    "acodec": "none",
+                },
+                {
+                    "format_id": "audio-low",
+                    "abr": 64,
+                    "filesize": 5,
+                    "vcodec": "none",
+                    "acodec": "opus",
+                },
+                {
+                    "format_id": "audio-high",
+                    "abr": 128,
+                    "filesize": 8,
+                    "vcodec": "none",
+                    "acodec": "aac",
+                },
+            ]
+
+            class FakeYdl:
+                def __init__(self, opts: dict[str, object]) -> None:
+                    self.params = dict(opts)
+
+                def __enter__(self) -> FakeYdl:
+                    return self
+
+                def __exit__(self, *args: object) -> None:
+                    return None
+
+                def process_ie_result(
+                    self, info: dict[str, object], download: bool = True
+                ) -> dict[str, object]:
+                    _ = info, download
+                    selector = str(self.params["format"])
+                    selectors.append(selector)
+                    path = Path(str(self.params["outtmpl"])).parent / "result.m4a"
+                    path.write_bytes(b"audio-bytes")
+                    return {
+                        "title": "Audio test",
+                        "requested_downloads": [{"filepath": str(path)}],
+                    }
+
+                def prepare_filename(self, info: dict[str, object]) -> str:
+                    _ = info
+                    return str(Path(str(self.params["outtmpl"])).parent / "result.m4a")
+
+            with (
+                patch("telegram_share_bot.downloader.is_safe_media_url", return_value=True),
+                patch("telegram_share_bot.downloader._safe_dns_resolution", contextlib.nullcontext),
+                patch("telegram_share_bot.downloader.yt_dlp.YoutubeDL", FakeYdl),
+                patch(
+                    "telegram_share_bot.downloader._extract_info_cached",
+                    return_value=(
+                        {"title": "Audio test", "duration": 60, "formats": formats},
+                        False,
+                    ),
+                ),
+            ):
+                media = _download_sync(
+                    "https://youtube.com/watch?v=example",
+                    root,
+                    max_file_bytes=100,
+                    timeout_seconds=10,
+                    media_format=MediaFormat.AUDIO,
+                )
+            self.assertEqual(selectors[0], "audio-high")
+            self.assertNotIn("video", selectors)
+            self.assertEqual(media.kind, MediaKind.AUDIO)
+            self.assertEqual(media.path.suffix, ".m4a")
+
+    def test_missing_audio_stream_has_a_clear_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            class FakeYdl:
+                def __init__(self, opts: dict[str, object]) -> None:
+                    self.params = dict(opts)
+
+                def __enter__(self) -> FakeYdl:
+                    return self
+
+                def __exit__(self, *args: object) -> None:
+                    return None
+
+                def process_ie_result(
+                    self, info: dict[str, object], download: bool = True
+                ) -> dict[str, object]:
+                    _ = info, download
+                    raise yt_dlp.utils.DownloadError(
+                        "Requested format is not available. Use --list-formats."
+                    )
+
+            with (
+                patch("telegram_share_bot.downloader.is_safe_media_url", return_value=True),
+                patch("telegram_share_bot.downloader._safe_dns_resolution", contextlib.nullcontext),
+                patch("telegram_share_bot.downloader.yt_dlp.YoutubeDL", FakeYdl),
+                patch(
+                    "telegram_share_bot.downloader._extract_info_cached",
+                    return_value=(
+                        {
+                            "title": "No audio",
+                            "duration": 60,
+                            "formats": [
+                                {
+                                    "format_id": "video",
+                                    "height": 720,
+                                    "vcodec": "h264",
+                                    "acodec": "none",
+                                }
+                            ],
+                        },
+                        False,
+                    ),
+                ),
+            ):
+                with self.assertRaises(DownloadError) as ctx:
+                    _download_sync(
+                        "https://youtube.com/watch?v=example",
+                        Path(tmp),
+                        max_file_bytes=100,
+                        timeout_seconds=10,
+                        media_format=MediaFormat.AUDIO,
+                    )
+            self.assertEqual(str(ctx.exception), strings.AUDIO_UNAVAILABLE)
 
 
 class TestMeasuredFallback(unittest.TestCase):

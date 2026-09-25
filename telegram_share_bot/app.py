@@ -30,14 +30,17 @@ from telegram_share_bot.config import (
 )
 from telegram_share_bot.downloader import cleanup_stale_downloads
 from telegram_share_bot.handlers import (
+    audio_command,
     cancel_callback,
     chosen_inline_result,
     clip_choice_callback,
+    direct_format_callback,
     help_command,
     inline_query,
     retry_inline_callback,
     start_command,
     url_message,
+    video_command,
 )
 from telegram_share_bot.logging_filters import configure_logging
 
@@ -129,6 +132,12 @@ def build_application() -> App:
 
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(
+        CommandHandler("audio", audio_command, filters=filters.ChatType.PRIVATE)
+    )
+    application.add_handler(
+        CommandHandler("video", video_command, filters=filters.ChatType.PRIVATE)
+    )
     application.add_handler(InlineQueryHandler(inline_query))
     application.add_handler(ChosenInlineResultHandler(chosen_inline_result))
     application.add_handler(
@@ -138,7 +147,12 @@ def build_application() -> App:
         CallbackQueryHandler(cancel_callback, pattern=r"^cancel:")
     )
     application.add_handler(
-        CallbackQueryHandler(clip_choice_callback, pattern=r"^(clip|full):")
+        CallbackQueryHandler(direct_format_callback, pattern=r"^(video|audio):")
+    )
+    application.add_handler(
+        CallbackQueryHandler(
+            clip_choice_callback, pattern=r"^(clipaudio|fullaudio|clip|full):"
+        )
     )
     application.add_handler(
         MessageHandler(

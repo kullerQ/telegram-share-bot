@@ -30,6 +30,7 @@ from telegram_share_bot.config import (
 from telegram_share_bot.downloader import (
     DownloadedMedia,
     DownloadError,
+    MediaFormat,
     MediaKind,
     _safe_dns_resolution,
     is_safe_media_url,
@@ -901,6 +902,7 @@ def download_tiktok_slideshow(
     abort_event: threading.Event | None = None,
     https_only: bool = False,
     allowed_hosts: frozenset[str] | None = None,
+    media_format: MediaFormat = MediaFormat.VIDEO,
 ) -> DownloadedMedia | None:
     """If *url* is a TikTok photo post, build and return a slideshow video.
 
@@ -916,6 +918,52 @@ def download_tiktok_slideshow(
         max_images=max_images,
         https_only=https_only,
     )
+    if media_format is MediaFormat.AUDIO:
+        if source.audio_url is None:
+            raise DownloadError(strings.AUDIO_UNAVAILABLE)
+        if https_only and not source.audio_url.lower().startswith("https://"):
+            raise DownloadError(strings.DOWNLOAD_HTTPS_REQUIRED)
+        audio_path = work_dir / f"slideshow-audio.{_guess_ext(source.audio_url, 'm4a')}"
+        ydl_opts: dict[str, Any] = {
+            "quiet": True,
+            "no_warnings": True,
+            "socket_timeout": min(30, timeout_seconds),
+        }
+        try:
+            with _safe_dns_resolution():
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:  # type: ignore[arg-type]
+                    _download_bytes(
+                        ydl,
+                        source.audio_url,
+                        audio_path,
+                        remaining_budget=max_file_bytes,
+                        abort_event=abort_event,
+                    )
+        except DownloadError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "TikTok slideshow soundtrack download failed for %s: %s",
+                safe_url_for_log(source.canonical_url),
+                exc,
+            )
+            raise DownloadError(strings.DOWNLOAD_FAILED_GENERIC) from exc
+        raw_duration = (
+            source.audio_duration
+            if source.audio_duration is not None
+            else _probe_media_duration(audio_path)
+        )
+        duration = (
+            max(1, math.floor(raw_duration + 0.5))
+            if raw_duration is not None
+            else None
+        )
+        return DownloadedMedia(
+            path=audio_path,
+            title=source.title,
+            kind=MediaKind.AUDIO,
+            duration=duration,
+        )
     return build_slideshow_video(
         source,
         work_dir,

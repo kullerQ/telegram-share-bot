@@ -298,13 +298,16 @@ class TestInlineClipChoice(unittest.IsolatedAsyncioTestCase):
         query.answer.assert_awaited()
         kwargs = query.answer.await_args.kwargs
         results = kwargs["results"]
-        self.assertEqual(len(results), 2)
-        self.assertTrue(results[0].id.startswith("clip:"))
-        self.assertTrue(results[1].id.startswith("full:"))
-        self.assertIn("clip", results[0].title.lower())
-        self.assertIn("full", results[1].title.lower())
+        self.assertEqual(len(results), 4)
+        self.assertTrue(results[0].id.startswith("clip-video:"))
+        self.assertTrue(results[1].id.startswith("clip-audio:"))
+        self.assertTrue(results[2].id.startswith("full-video:"))
+        self.assertTrue(results[3].id.startswith("full-audio:"))
+        self.assertIn("video clip", results[0].title.lower())
+        self.assertIn("audio clip", results[1].title.lower())
+        self.assertIn("full", results[2].title.lower())
 
-    async def test_youtube_t_alone_offers_two_results(self) -> None:
+    async def test_youtube_t_alone_offers_all_format_choices(self) -> None:
         context = self._context()
         update = MagicMock()
         query = MagicMock()
@@ -315,12 +318,12 @@ class TestInlineClipChoice(unittest.IsolatedAsyncioTestCase):
 
         await inline_query(update, context)
         results = query.answer.await_args.kwargs["results"]
-        self.assertEqual(len(results), 2)
-        self.assertTrue(results[0].id.startswith("clip:"))
-        self.assertTrue(results[1].id.startswith("full:"))
+        self.assertEqual(len(results), 4)
+        self.assertTrue(results[0].id.startswith("clip-video:"))
+        self.assertTrue(results[2].id.startswith("full-video:"))
         self.assertIn("end", results[0].title.lower())
 
-    async def test_youtube_caption_without_range_one_result(self) -> None:
+    async def test_youtube_caption_without_range_offers_video_and_audio(self) -> None:
         context = self._context()
         update = MagicMock()
         query = MagicMock()
@@ -331,10 +334,11 @@ class TestInlineClipChoice(unittest.IsolatedAsyncioTestCase):
 
         await inline_query(update, context)
         results = query.answer.await_args.kwargs["results"]
-        self.assertEqual(len(results), 1)
-        self.assertFalse(results[0].id.startswith("clip:"))
+        self.assertEqual(len(results), 2)
+        self.assertTrue(results[0].id.startswith("video:"))
+        self.assertTrue(results[1].id.startswith("audio:"))
 
-    async def test_tiktok_range_token_one_result(self) -> None:
+    async def test_tiktok_range_token_offers_video_and_audio(self) -> None:
         context = self._context()
         update = MagicMock()
         query = MagicMock()
@@ -351,7 +355,8 @@ class TestInlineClipChoice(unittest.IsolatedAsyncioTestCase):
         ):
             await inline_query(update, context)
         results = query.answer.await_args.kwargs["results"]
-        self.assertEqual(len(results), 1)
+        self.assertEqual(len(results), 2)
+        self.assertEqual([result.title for result in results], ["▶ Send video", "♫ Send audio"])
 
 
 class TestClipDownloadOpts(unittest.TestCase):

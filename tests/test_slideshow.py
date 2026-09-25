@@ -9,7 +9,7 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 from telegram_share_bot import strings
-from telegram_share_bot.downloader import DownloadError, MediaKind
+from telegram_share_bot.downloader import DownloadError, MediaFormat, MediaKind
 from telegram_share_bot.slideshow import (
     SlideshowSource,
     TikTokPhotoRef,
@@ -18,6 +18,7 @@ from telegram_share_bot.slideshow import (
     build_slideshow_video,
     clear_short_link_cache,
     detect_tiktok_photo_post,
+    download_tiktok_slideshow,
     extract_slideshow,
     plan_slideshow_timeline,
 )
@@ -623,6 +624,75 @@ class TestBuildSlideshowVideo(unittest.TestCase):
                 self.assertEqual(captured[0].count("-i"), 5)
                 self.assertNotIn("-stream_loop", captured[0])
                 self.assertIn("10.000", captured[0])
+
+
+class TestSlideshowAudioChoice(unittest.TestCase):
+    def test_audio_choice_downloads_the_slideshow_soundtrack(self) -> None:
+        source = SlideshowSource(
+            image_urls=("https://cdn.example.com/slide.jpg",),
+            audio_url="https://cdn.example.com/audio.mp3",
+            title="Photo post",
+            canonical_url="https://www.tiktok.com/@u/photo/1",
+            audio_duration=12.0,
+        )
+        ref = TikTokPhotoRef(
+            user="@u", video_id="1", canonical_url=source.canonical_url
+        )
+
+        def save_audio(
+            _ydl: Any, _url: str, path: Path, *, remaining_budget: int, abort_event: Any
+        ) -> int:
+            _ = remaining_budget, abort_event
+            path.write_bytes(b"soundtrack")
+            return path.stat().st_size
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                patch("telegram_share_bot.slideshow.detect_tiktok_photo_post", return_value=ref),
+                patch("telegram_share_bot.slideshow.extract_slideshow", return_value=source),
+                patch("telegram_share_bot.slideshow._safe_dns_resolution") as dns_cm,
+                patch("telegram_share_bot.slideshow._download_bytes", side_effect=save_audio),
+            ):
+                dns_cm.return_value.__enter__ = MagicMock(return_value=None)
+                dns_cm.return_value.__exit__ = MagicMock(return_value=False)
+                media = download_tiktok_slideshow(
+                    source.canonical_url,
+                    Path(tmp),
+                    max_file_bytes=1024,
+                    timeout_seconds=10,
+                    media_format=MediaFormat.AUDIO,
+                )
+
+        self.assertIsNotNone(media)
+        assert media is not None
+        self.assertEqual(media.kind, MediaKind.AUDIO)
+        self.assertEqual(media.path.name, "slideshow-audio.mp3")
+        self.assertEqual(media.duration, 12)
+
+    def test_audio_choice_reports_missing_slideshow_soundtrack(self) -> None:
+        source = SlideshowSource(
+            image_urls=("https://cdn.example.com/slide.jpg",),
+            audio_url=None,
+            title="Silent photo post",
+            canonical_url="https://www.tiktok.com/@u/photo/1",
+        )
+        ref = TikTokPhotoRef(
+            user="@u", video_id="1", canonical_url=source.canonical_url
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                patch("telegram_share_bot.slideshow.detect_tiktok_photo_post", return_value=ref),
+                patch("telegram_share_bot.slideshow.extract_slideshow", return_value=source),
+            ):
+                with self.assertRaises(DownloadError) as ctx:
+                    download_tiktok_slideshow(
+                        source.canonical_url,
+                        Path(tmp),
+                        max_file_bytes=1024,
+                        timeout_seconds=10,
+                        media_format=MediaFormat.AUDIO,
+                    )
+        self.assertEqual(str(ctx.exception), strings.AUDIO_UNAVAILABLE)
 
 
 if __name__ == "__main__":

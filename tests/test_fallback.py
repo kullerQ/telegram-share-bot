@@ -12,8 +12,13 @@ from telegram.error import BadRequest, NetworkError
 from telegram_share_bot import strings
 from telegram_share_bot.cache import MediaCache
 from telegram_share_bot.config import Settings
-from telegram_share_bot.downloader import DirectMediaStream, DownloadedMedia, MediaKind
-from telegram_share_bot.handlers import _prepare_inline_media, url_message
+from telegram_share_bot.downloader import DirectMediaStream, DownloadedMedia, MediaFormat, MediaKind
+from telegram_share_bot.handlers import (
+    PendingClipChoice,
+    _prepare_inline_media,
+    direct_format_callback,
+    url_message,
+)
 
 
 class TestCacheFallback(unittest.IsolatedAsyncioTestCase):
@@ -36,11 +41,9 @@ class TestCacheFallback(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self) -> None:
         self.temp_dir.cleanup()
 
-    async def test_url_message_cache_hit_and_evict_on_bad_request(self) -> None:
+    async def test_private_url_offers_video_audio_and_selected_cache_fallback(self) -> None:
         url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
         stale_file_id = "STALE_FILE_ID_123"
-
-        # Pre-seed cache with stale file_id
         await self.cache.set(
             url=url,
             file_id=stale_file_id,
@@ -49,14 +52,11 @@ class TestCacheFallback(unittest.IsolatedAsyncioTestCase):
             duration=100,
         )
 
-        # Mock Telegram context and update
         context = MagicMock()
         context.application.bot_data = {
             "settings": self.settings,
             "media_cache": self.cache,
         }
-
-        # Mock bot sending: first call (cached) raises BadRequest, second call (fresh) succeeds
         context.bot.send_video = AsyncMock()
         context.bot.send_video.side_effect = [
             BadRequest("Wrong file identifier/HTTP URL specified"),
@@ -67,10 +67,29 @@ class TestCacheFallback(unittest.IsolatedAsyncioTestCase):
         message = MagicMock()
         message.text = url
         message.chat_id = 123456
-        status_msg = MagicMock()
+        status_msg = MagicMock(spec=__import__("telegram").Message)
         status_msg.edit_text = AsyncMock()
         message.reply_text = AsyncMock(return_value=status_msg)
         update.effective_message = message
+        update.effective_user = MagicMock(id=42)
+
+        await url_message(update, context)
+        keyboard = message.reply_text.await_args.kwargs["reply_markup"]
+        self.assertEqual(
+            [button.callback_data.split(":", 1)[0] for button in keyboard.inline_keyboard[0]],
+            ["video", "audio"],
+        )
+        self.assertEqual(context.bot.send_video.call_count, 0)
+
+        choice_id = keyboard.inline_keyboard[0][0].callback_data.split(":", 1)[1]
+        context.application.bot_data["pending_clip_choice"] = {
+            choice_id: PendingClipChoice(url, None, None, message.chat_id)
+        }
+        update.callback_query = MagicMock()
+        update.callback_query.from_user = MagicMock(id=42)
+        update.callback_query.data = f"video:{choice_id}"
+        update.callback_query.message = status_msg
+        update.callback_query.answer = AsyncMock()
 
         work_dir = Path(self.temp_dir.name) / "work1"
         work_dir.mkdir(parents=True, exist_ok=True)
@@ -81,19 +100,17 @@ class TestCacheFallback(unittest.IsolatedAsyncioTestCase):
             duration=120,
         )
         fresh_media.path.write_bytes(b"dummy video data")
-
-        download_mock = AsyncMock(return_value=fresh_media)
         with (
             patch("telegram_share_bot.handlers.get_direct_stream", AsyncMock(return_value=None)),
-            patch("telegram_share_bot.handlers.download_media", download_mock),
+            patch(
+                "telegram_share_bot.handlers.download_media",
+                AsyncMock(return_value=fresh_media),
+            ),
         ):
-            await url_message(update, context)
+            await direct_format_callback(update, context)
 
-        # Verify:
-        # 1. The bot attempted to send cached media first and threw BadRequest
         self.assertEqual(context.bot.send_video.call_count, 2)
-        # 2. Fresh download succeeded and replaced the stale file_id in cache with NEW_FRESH_FILE_ID
-        updated = await self.cache.get(url)
+        updated = await self.cache.get(url, media_format=MediaFormat.VIDEO)
         self.assertIsNotNone(updated)
         assert updated is not None
         self.assertEqual(updated.file_id, "NEW_FRESH_FILE_ID")
