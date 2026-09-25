@@ -19,6 +19,10 @@ Works in private chats, groups, and channels. The bot does **not** need to be a 
 Without `/setinline`, the bot will not appear when users type `@YourBot`.
 Without `/setinlinefeedback`, the bot cannot learn which result you chose, so the media never replaces the placeholder.
 
+## Versioned container releases
+
+Each merged pull request publishes one versioned image to GHCR. `BOT_IMAGE_TAG=latest` follows the newest release; set `BOT_IMAGE_TAG=1.0.0` in `.env` to pin a release. The image is also tagged with its Git commit SHA. Pull deliberately with `docker compose pull` before recreating the container. See [.dev/release-versioning.md](../.dev/release-versioning.md) for version bump rules and the release process.
+
 ## Docker setup (Recommended)
 
 1. Configure `.env`:
