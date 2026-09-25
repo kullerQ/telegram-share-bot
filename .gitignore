@@ -1,6 +1,8 @@
 .env
 .venv/
-.dev/
+.dev/*
+!.dev/release-versioning.md
+!.dev/telegram-share-bot-implementation-plan.md
 venv/
 __pycache__/
 *.py[cod]
