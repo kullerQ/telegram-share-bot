@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from urllib.parse import urlsplit
 
-# Exact public originals of the bundled 224px Round Square PNGs. Pinning the
-# commit keeps previews stable while a feature branch is still local.
+# Unpadded public originals of the bundled Round Square PNGs. Pinning the
+# commit keeps thumbnail availability testable while this branch is local.
 _UPSTREAM_BASE_URL = (
     "https://raw.githubusercontent.com/YukiPixels/Pixel-Art-Icons/"
     "fb9c766d2aa3150b709add9da7126db8cb5afb28/224pxl/round%20square"
