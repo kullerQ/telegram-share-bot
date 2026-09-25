@@ -7,16 +7,15 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from telegram import SwitchInlineQueryChosenChat
-
 from telegram_share_bot import strings
 from telegram_share_bot.cache import MediaCache
 from telegram_share_bot.config import Settings
-from telegram_share_bot.downloader import DownloadedMedia, MediaKind
+from telegram_share_bot.downloader import DownloadedMedia, MediaKind, TimeRange
 from telegram_share_bot.handlers import (
     _prepare_inline_media,
     _run_direct_download,
     help_command,
+    inline_query,
     start_command,
 )
 
@@ -45,32 +44,28 @@ class TestBotGuidance(unittest.IsolatedAsyncioTestCase):
         self.update.effective_chat = MagicMock()
         self.update.effective_user = MagicMock(id=42)
 
-    async def test_start_is_short_and_offers_chosen_chat_inline_action(self) -> None:
+    async def test_start_is_short_and_points_to_inline_sharing(self) -> None:
         await start_command(self.update, self.context)
 
         args = self.message.reply_text.await_args
-        self.assertIn("Welcome to Share Bot", args.args[0])
+        self.assertIn("🎬 Share Bot", args.args[0])
+        self.assertIn("@share_bot", args.args[0])
         self.assertIn("/help", args.args[0])
         self.assertNotIn("1:20-2:05", args.args[0])
-        button = args.kwargs["reply_markup"].inline_keyboard[0][0]
-        self.assertEqual(button.text, "Share media")
-        self.assertIsInstance(
-            button.switch_inline_query_chosen_chat, SwitchInlineQueryChosenChat
-        )
-        self.assertEqual(button.switch_inline_query_chosen_chat.query, "")
-        self.assertTrue(button.switch_inline_query_chosen_chat.allow_user_chats)
-        self.assertTrue(button.switch_inline_query_chosen_chat.allow_group_chats)
+        self.assertNotIn("reply_markup", args.kwargs)
 
-    async def test_help_has_link_and_clip_details(self) -> None:
+    async def test_help_has_scannable_instructions_and_actual_caption_mode(self) -> None:
         await help_command(self.update, self.context)
 
-        text = self.message.reply_text.await_args.args[0]
+        args = self.message.reply_text.await_args
+        text = args.args[0]
+        self.assertIn("📖 How to share", text)
         self.assertIn("@share_bot", text)
         self.assertIn("1:20-2:05", text)
         self.assertIn("full video", text)
+        self.assertIn(strings.HELP_CAPTION_MEDIA, text)
         self.assertIn("multi-item collections are not supported", text)
-        button = self.message.reply_text.await_args.kwargs["reply_markup"].inline_keyboard[0][0]
-        self.assertEqual(button.text, "Share media")
+        self.assertNotIn("reply_markup", args.kwargs)
 
 
 class TestMediaProgress(unittest.IsolatedAsyncioTestCase):
@@ -183,11 +178,92 @@ class TestMediaProgress(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             states,
             [
-                strings.INLINE_CHOSEN_DOWNLOADING.format(
-                    url="https://example.com/video"
-                ),
                 strings.INLINE_DOWNLOADING.format(url="https://example.com/video"),
                 strings.INLINE_UPLOADING.format(url="https://example.com/video"),
+            ],
+        )
+
+    async def test_inline_choices_use_known_details_without_remote_metadata(self) -> None:
+        url = "https://youtu.be/GKq9nKZpmu0"
+        clip = TimeRange(150, 210)
+        await self.cache.set(
+            url, "CLIP_ID", MediaKind.VIDEO, "Example", 60, time_range=clip
+        )
+        await self.cache.set(url, "FULL_ID", MediaKind.VIDEO, "Example", 360)
+        query = MagicMock()
+        query.from_user = MagicMock(id=42)
+        query.query = f"{url} 2:30-3:30"
+        query.answer = AsyncMock()
+        update = MagicMock()
+        update.inline_query = query
+
+        with (
+            patch("telegram_share_bot.handlers.get_direct_stream") as direct,
+            patch("telegram_share_bot.handlers.download_media") as download,
+        ):
+            await inline_query(update, self.context)
+        direct.assert_not_called()
+        download.assert_not_called()
+        clip_choice, full_choice = query.answer.await_args.kwargs["results"]
+        self.assertIn("Send clip 2:30-3:30", clip_choice.title)
+        self.assertIn(
+            "YouTube · Video · Clip 2:30-3:30 · 1:00 · Ready from cache",
+            clip_choice.description,
+        )
+        self.assertIn("Checking clip", clip_choice.input_message_content.message_text)
+        self.assertIn("Send full video", full_choice.title)
+        self.assertIn("YouTube · Video · 6:00 · Ready from cache", full_choice.description)
+
+    async def test_uncached_inline_video_has_action_and_readiness(self) -> None:
+        query = MagicMock()
+        query.from_user = MagicMock(id=42)
+        query.query = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+        query.answer = AsyncMock()
+        update = MagicMock()
+        update.inline_query = query
+
+        await inline_query(update, self.context)
+
+        result = query.answer.await_args.kwargs["results"][0]
+        self.assertEqual(result.title, "▶ Send video")
+        self.assertEqual(
+            result.description, "YouTube · Video · Download after selection"
+        )
+        self.assertIn("Checking the media link", result.input_message_content.message_text)
+
+    async def test_clip_progress_starts_after_initial_checking_message(self) -> None:
+        self.context.bot.edit_message_text = AsyncMock()
+        self.context.bot.edit_message_media = AsyncMock()
+        media = self._media("clip")
+        with (
+            patch(
+                "telegram_share_bot.handlers.download_media",
+                new=AsyncMock(return_value=media),
+            ),
+            patch(
+                "telegram_share_bot.handlers._upload_for_file_id",
+                new=AsyncMock(return_value=("FILE_ID", "Clip", MediaKind.VIDEO)),
+            ),
+        ):
+            await _prepare_inline_media(
+                self.context,
+                inline_message_id="clip-progress",
+                url="https://youtu.be/GKq9nKZpmu0",
+                result_id="clip-result",
+                user_id=42,
+                time_range=TimeRange(150, 210),
+            )
+
+        states = [
+            call.kwargs["text"]
+            for call in self.context.bot.edit_message_text.await_args_list
+        ]
+        display_url = "https://www.youtube.com/watch?v=GKq9nKZpmu0"
+        self.assertEqual(
+            states,
+            [
+                strings.INLINE_DOWNLOADING.format(url=display_url),
+                strings.INLINE_UPLOADING.format(url=display_url),
             ],
         )
 

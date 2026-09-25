@@ -9,6 +9,7 @@ import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any, cast
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 from telegram import (
@@ -22,7 +23,6 @@ from telegram import (
     InputMediaVideo,
     InputTextMessageContent,
     Message,
-    SwitchInlineQueryChosenChat,
     Update,
 )
 from telegram.error import BadRequest, NetworkError, TelegramError, TimedOut
@@ -307,23 +307,6 @@ async def _answer_inline_query(
         raise
 
 
-def _share_media_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton(
-                    strings.START_SHARE_MEDIA_BUTTON,
-                    switch_inline_query_chosen_chat=SwitchInlineQueryChosenChat(
-                        query="",
-                        allow_user_chats=True,
-                        allow_group_chats=True,
-                    ),
-                )
-            ]
-        ]
-    )
-
-
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_message is None or update.effective_chat is None:
         return
@@ -335,9 +318,11 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     bot_name = context.bot.first_name or strings.BOT_DISPLAY_NAME
+    bot_username = context.bot.username or strings.FALLBACK_BOT_USERNAME
     await update.effective_message.reply_text(
-        strings.START_MESSAGE.format(bot_name=bot_name),
-        reply_markup=_share_media_keyboard(),
+        strings.START_MESSAGE.format(
+            bot_name=bot_name, bot_username=bot_username
+        ),
     )
 
 
@@ -353,9 +338,17 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
 
     bot_username = context.bot.username or strings.FALLBACK_BOT_USERNAME
+    caption_mode = _settings(context).caption_mode
+    if caption_mode is CaptionMode.CUSTOM:
+        caption_help = strings.HELP_CAPTION_CUSTOM
+    elif caption_mode is CaptionMode.OFF:
+        caption_help = strings.HELP_CAPTION_OFF
+    else:
+        caption_help = strings.HELP_CAPTION_MEDIA
     await message.reply_text(
-        strings.HELP_MESSAGE.format(bot_username=bot_username),
-        reply_markup=_share_media_keyboard(),
+        strings.HELP_MESSAGE.format(
+            bot_username=bot_username, caption_help=caption_help
+        ),
     )
 
 
@@ -690,13 +683,13 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 _pending_media_article(
                     clip_id,
                     url,
-                    is_cached=clip_cached is not None,
+                    cached=clip_cached,
                     time_range=time_range,
                 ),
                 _pending_media_article(
                     full_id,
                     url,
-                    is_cached=full_cached is not None,
+                    cached=full_cached,
                     time_range=None,
                     force_full_title=True,
                 ),
@@ -711,7 +704,7 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     cached = await _cache(context).get(url)
     await _answer_inline_query(
         query,
-        results=[_pending_media_article(result_id, url, is_cached=cached is not None)],
+        results=[_pending_media_article(result_id, url, cached=cached)],
         cache_time=1,
         is_personal=True,
     )
@@ -855,7 +848,7 @@ async def retry_inline_callback(
             url=display_url,
         )
         if time_range is not None
-        else strings.INLINE_CHOSEN_DOWNLOADING.format(url=display_url)
+        else strings.INLINE_PENDING_MESSAGE.format(url=display_url)
     )
     await _edit_inline_text(
         context,
@@ -998,6 +991,7 @@ async def _prepare_inline_media(
     display_url = safe_url_for_log(url)
     media: DownloadedMedia | None = None
     keep_pending_for_retry = False
+    started_at = time.monotonic()
 
     try:
         # 1. Attempt instant send from cache
@@ -1043,20 +1037,7 @@ async def _prepare_inline_media(
         # 2. Cache miss or fallback to download pipeline
         if inline_message_id in _cancelled_set(context):
             return
-        pending_message = (
-            strings.INLINE_PENDING_CLIP_MESSAGE.format(
-                range_label=format_time_range(time_range),
-                url=display_url,
-            )
-            if time_range is not None
-            else strings.INLINE_CHOSEN_DOWNLOADING.format(url=display_url)
-        )
-        await _edit_inline_text(
-            context,
-            inline_message_id,
-            pending_message,
-            reply_markup=_cancel_keyboard(result_id),
-        )
+        # The chosen article already contains the checking status and Cancel button.
         # Try direct URL import via Telegram first (fastest, zero local upload bandwidth).
         # Skip for clips — that path would send the whole video.
         if time_range is None:
@@ -1114,9 +1095,17 @@ async def _prepare_inline_media(
             strings.INLINE_DOWNLOADING.format(url=display_url),
             reply_markup=_cancel_keyboard(result_id),
         )
+        queue_started_at = time.monotonic()
         async with _download_slot(context):
             if inline_message_id in _cancelled_set(context):
                 return
+            if time.monotonic() - queue_started_at >= 0.1:
+                logger.info(
+                    "Inline download waited %.1fs for a slot: %s",
+                    time.monotonic() - queue_started_at,
+                    display_url,
+                )
+            download_started_at = time.monotonic()
             media = await download_media(
                 url=url,
                 download_dir=settings.download_dir,
@@ -1129,6 +1118,11 @@ async def _prepare_inline_media(
                 slideshow_images_loop=settings.slideshow_images_loop,
                 time_range=time_range,
             )
+            logger.info(
+                "Inline download completed in %.1fs for %s",
+                time.monotonic() - download_started_at,
+                display_url,
+            )
             if inline_message_id in _cancelled_set(context):
                 return
             await _edit_inline_text(
@@ -1137,7 +1131,13 @@ async def _prepare_inline_media(
                 strings.INLINE_UPLOADING.format(url=display_url),
                 reply_markup=_cancel_keyboard(result_id),
             )
+            upload_started_at = time.monotonic()
             file_id, title, kind = await _upload_for_file_id(context, settings, media)
+            logger.info(
+                "Inline Telegram upload completed in %.1fs for %s",
+                time.monotonic() - upload_started_at,
+                display_url,
+            )
         await cache.set(
             url=url,
             file_id=file_id,
@@ -1158,7 +1158,12 @@ async def _prepare_inline_media(
             inline_message_id=inline_message_id,
             reply_markup=_EMPTY_KEYBOARD,
         )
-        logger.info("Inline media ready for %s (%s)", display_url, kind.value)
+        logger.info(
+            "Inline media ready for %s (%s) in %.1fs",
+            display_url,
+            kind.value,
+            time.monotonic() - started_at,
+        )
     except asyncio.CancelledError:
         logger.info("Inline prepare cancelled for %s", display_url)
         raise
@@ -1271,32 +1276,78 @@ def _error_article(title: str, description: str) -> InlineQueryResultArticle:
     )
 
 
+def _inline_source_details(url: str, cached: CachedMedia | None) -> tuple[str, str]:
+    parsed = urlsplit(url)
+    host = (parsed.hostname or "").lower().removeprefix("www.").removeprefix("m.")
+    if host == "youtu.be" or host.endswith(".youtube.com") or host == "youtube.com":
+        platform, media_type = "YouTube", "video"
+    elif host == "tiktok.com" or host.endswith(".tiktok.com"):
+        platform = "TikTok"
+        if "/video/" in parsed.path:
+            media_type = "video"
+        elif "/photo/" in parsed.path:
+            media_type = "photo"
+        else:
+            media_type = "media"
+    elif host == "instagram.com" or host.endswith(".instagram.com"):
+        platform = "Instagram"
+        media_type = "video" if "/reel/" in parsed.path else "media"
+    elif host in {"x.com", "twitter.com", "vxtwitter.com", "fxtwitter.com", "fixupx.com"}:
+        platform, media_type = "X", "media"
+    else:
+        platform, media_type = host or "Link", "media"
+    if cached is not None:
+        if cached.kind is MediaKind.VIDEO:
+            media_type = "video"
+        elif cached.kind is MediaKind.AUDIO:
+            media_type = "audio"
+        else:
+            media_type = "media"
+    return platform, media_type
+
+
+def _format_duration(seconds: int) -> str:
+    hours, remainder = divmod(seconds, 3600)
+    minutes, remaining_seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{remaining_seconds:02d}"
+    return f"{minutes}:{remaining_seconds:02d}"
+
+
 def _pending_media_article(
     result_id: str,
     url: str,
     *,
-    is_cached: bool = False,
+    cached: CachedMedia | None = None,
     time_range: TimeRange | None = None,
     force_full_title: bool = False,
 ) -> InlineQueryResultArticle:
     display_url = safe_url_for_log(url)
+    platform, media_type = _inline_source_details(url, cached)
+    details = [platform, media_type.capitalize()]
     if force_full_title:
-        base_title = strings.INLINE_PENDING_FULL_TITLE
+        title = strings.INLINE_PENDING_FULL_TITLE
         message_text = strings.INLINE_PENDING_MESSAGE.format(url=display_url)
     elif time_range is not None:
         range_label = format_time_range(time_range)
-        base_title = strings.INLINE_PENDING_CLIP_TITLE.format(range_label=range_label)
+        title = strings.INLINE_PENDING_CLIP_TITLE.format(range_label=range_label)
         message_text = strings.INLINE_PENDING_CLIP_MESSAGE.format(
             range_label=range_label, url=display_url
         )
+        details.append(f"Clip {range_label}")
     else:
-        base_title = strings.INLINE_PENDING_TITLE
+        title = strings.INLINE_PENDING_TITLE.format(media_type=media_type)
         message_text = strings.INLINE_PENDING_MESSAGE.format(url=display_url)
-    title = f"⚡ {base_title} (cached)" if is_cached else base_title
+    duration = (cached.duration if cached is not None else None) or (
+        time_range.duration_seconds if time_range is not None else None
+    )
+    if duration is not None and duration > 0:
+        details.append(_format_duration(duration))
+    details.append("Ready from cache" if cached is not None else "Download after selection")
     return InlineQueryResultArticle(
         id=result_id,
         title=title[:64],
-        description=display_url[:120],
+        description=" · ".join(details)[:120],
         input_message_content=InputTextMessageContent(
             message_text=message_text[:4096]
         ),
