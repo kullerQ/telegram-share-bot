@@ -19,10 +19,6 @@ Works in private chats, groups, and channels. The bot does **not** need to be a 
 Without `/setinline`, the bot will not appear when users type `@YourBot`.
 Without `/setinlinefeedback`, the bot cannot learn which result you chose, so the media never replaces the placeholder.
 
-## Versioned container releases
-
-Each merged pull request publishes one versioned image to GHCR. `BOT_IMAGE_TAG=latest` follows the newest release; set `BOT_IMAGE_TAG=1.0.0` in `.env` to pin a release. The image is also tagged with its Git commit SHA. Pull deliberately with `docker compose pull` before recreating the container. See [.dev/release-versioning.md](../.dev/release-versioning.md) for version bump rules and the release process.
-
 ## Docker setup (Recommended)
 
 1. Configure `.env`:
@@ -114,7 +110,7 @@ For a YouTube **clip**, either:
 - use a share link with `?t=` / `start=` and a following duration in **seconds** (e.g. `?t=2022` + `30` → clip from 33:42 for 30 seconds), or
 - use `?t=` / `start=` alone to choose a clip from that start through the end of the video (still offers full video as the other choice).
 
-Inline mode offers **Send clip** and **Send full video**; in a private chat the bot asks with buttons. Captions may follow the range or duration. A caption without a leading range/duration on a link without `t=` still downloads the whole video.
+Inline mode offers Video and Audio results; YouTube clip links also offer clip and full-length versions in both formats. In a private chat, paste a link and choose Video or Audio. For a direct choice, send `/video <link>` or `/audio <link>`. Captions may follow the range or duration. A caption without a leading range/duration on a link without `t=` still downloads the whole video.
 
 ```text
 @YourBot https://youtube.com/watch?v=… 1:20-2:05
@@ -124,23 +120,23 @@ Inline mode offers **Send clip** and **Send full video**; in a private chat the 
 @YourBot https://youtu.be/…?t=2022
 ```
 
-Tap **Send media** (or a clip / full-video choice). A placeholder appears first; the bot downloads in the background and replaces it with the file. Tap **Cancel** to stop and clear the placeholder.
+Tap a Video or Audio result (or a clip / full-length choice). A placeholder appears first; the bot prepares the media in the background and replaces it with the file. Tap **Cancel** to stop and clear the placeholder.
 
 ## How it works
 
 1. Telegram sends an `inline_query` with the URL.
 2. The bot answers **immediately** with a placeholder article (Telegram rejects answers that take too long).
 3. When you tap the result, Telegram sends `chosen_inline_result` (needs `/setinlinefeedback`).
-4. The bot downloads via `yt-dlp`, uploads to `STORAGE_CHAT_ID` for a `file_id`, deletes that storage message, then edits the inline message to the media.
+4. The bot downloads via `yt-dlp`, uploads to `STORAGE_CHAT_ID` for a `file_id`, deletes that storage message, then edits the inline message to the media. Video selection prefers the best plausible quality that fits the configured Telegram size limit, tries lower-quality formats if the measured file is still too large, then makes at most two bounded `ffmpeg` optimization attempts. This is a size-based choice, not a fixed resolution cap. Audio selection downloads an audio-only stream and prepares native Telegram audio; YouTube clips and TikTok slideshow soundtracks are supported when the source provides audio. Telegram direct URL imports are attempted only for known-size streams within the limit and fall back to a local download if Telegram rejects the URL.
 
 ## Limits
 
-- Max file size ≈ 45 MB (Telegram Bot API upload limit is 50 MB).
+- Max file size ≈ 45 MB (Telegram Bot API upload limit is 50 MB). Video quality is adapted to fit this limit rather than capped at one fixed resolution.
 - Download timeout defaults to 90 seconds.
 - Global concurrent downloads default to 3; per-user in-flight downloads default to 3. Set either to `0` to disable that limit.
 - User URLs are limited to YouTube / X / Instagram / TikTok by default (`ALLOWED_MEDIA_HOSTS=*` allows any host).
 - TikTok (including `vm.tiktok.com` / `vt.tiktok.com` short links) needs `curl-cffi` for browser impersonation — it is pinned in `requirements.txt`.
-- TikTok **photo posts** (image slideshows with sound) are compiled into an MP4 via `ffmpeg`: each image is shown for about `SLIDESHOW_SLIDE_MS` (default 2500 ms). `SLIDESHOW_IMAGES_LOOP=true` (default) makes the video match the **full** audio track and loops images to fill it; `false` shows each image once then trims the audio (a single-image post still uses the full audio). Multi-image posts get TikTok-style page dots at the bottom. At most `SLIDESHOW_MAX_IMAGES` (default 35) images are included. The Docker image already ships a static `ffmpeg`.
+- TikTok **photo posts** (image slideshows with sound) can be sent as a slideshow video or as the original soundtrack when present. Video slideshows are compiled into MP4 via `ffmpeg`: each image is shown for about `SLIDESHOW_SLIDE_MS` (default 2500 ms). `SLIDESHOW_IMAGES_LOOP=true` (default) makes the video match the **full** audio track and loops images to fill it; `false` shows each image once then trims the audio (a single-image post still uses the full audio). Multi-image posts get TikTok-style page dots at the bottom. At most `SLIDESHOW_MAX_IMAGES` (default 35) images are included. The Docker image already ships a static `ffmpeg`.
 - `HTTPS_ONLY` defaults to true (set `false` to allow plain `http://` media URLs).
 - Captions: `CAPTION_MODE=media` (default, media title), `custom` (only text after the URL), or `off` (no captions). Custom captions are plain text, max 1024 characters, not stored in the media cache, and not sent to `STORAGE_CHAT_ID`.
 - YouTube clips: optional `start-end` after the link, or `?t=` / `start=` on the URL plus a duration in seconds, or `?t=` alone (from start to end). Max clip length 10 minutes. Requires `ffmpeg` (already in the Docker image).
