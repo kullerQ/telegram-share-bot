@@ -877,7 +877,10 @@ def _download_sync(
             f"bv*[filesize<{max_file_bytes}]+ba/"
             f"b[filesize<{max_file_bytes}]/"
             f"bv*[filesize_approx<{max_file_bytes}]+ba/"
-            f"b[filesize_approx<{max_file_bytes}]"
+            f"b[filesize_approx<{max_file_bytes}]/"
+            "b[height<=720]/"
+            "bv*[acodec=none][protocol=https][height<=720]/"
+            "bv*[acodec=none][height<=720]"
         )
 
     effective_range = time_range
@@ -1174,6 +1177,7 @@ def _extract_direct_stream_sync(
                 )
 
                 direct = info.get("url")
+                selected_size = info.get("filesize") or info.get("filesize_approx")
                 if (
                     isinstance(direct, str)
                     and direct.startswith("http")
@@ -1181,6 +1185,10 @@ def _extract_direct_stream_sync(
                     and ".m3u8" not in direct
                     and ".mpd" not in direct
                     and info.get("vcodec") != "none"
+                    and (
+                        not isinstance(selected_size, (int, float))
+                        or selected_size <= max_file_bytes
+                    )
                 ):
                     ext = str(info.get("ext") or "mp4")
                     kind = _classify_ext(ext)
