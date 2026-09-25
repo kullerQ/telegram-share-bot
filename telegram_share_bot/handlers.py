@@ -22,9 +22,9 @@ from telegram import (
     InputMediaVideo,
     InputTextMessageContent,
     Message,
+    SwitchInlineQueryChosenChat,
     Update,
 )
-from telegram.constants import ParseMode
 from telegram.error import BadRequest, NetworkError, TelegramError, TimedOut
 from telegram.ext import ContextTypes
 
@@ -307,6 +307,23 @@ async def _answer_inline_query(
         raise
 
 
+def _share_media_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    strings.START_SHARE_MEDIA_BUTTON,
+                    switch_inline_query_chosen_chat=SwitchInlineQueryChosenChat(
+                        query="",
+                        allow_user_chats=True,
+                        allow_group_chats=True,
+                    ),
+                )
+            ]
+        ]
+    )
+
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_message is None or update.effective_chat is None:
         return
@@ -317,32 +334,29 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.effective_message.reply_text(strings.ACCESS_DENIED)
         return
 
-    bot_username = context.bot.username or strings.FALLBACK_BOT_USERNAME
     bot_name = context.bot.first_name or strings.BOT_DISPLAY_NAME
-    settings = _settings(context)
-    caption_hint = ""
-    if settings.caption_mode is CaptionMode.CUSTOM:
-        caption_hint = strings.START_CAPTION_CUSTOM_HINT.format(
-            bot_username=bot_username,
-            example_url=strings.EXAMPLE_MEDIA_URL,
-        )
-    elif settings.caption_mode is CaptionMode.OFF:
-        caption_hint = strings.START_CAPTION_OFF_HINT
-    caption_hint += strings.START_CLIP_HINT.format(
-        bot_username=bot_username,
-        example_url="https://youtube.com/watch?v=…",
+    await update.effective_message.reply_text(
+        strings.START_MESSAGE.format(bot_name=bot_name),
+        reply_markup=_share_media_keyboard(),
     )
-    text = strings.START_MESSAGE.format(
-        bot_name=bot_name,
-        bot_username=bot_username,
-        example_url=strings.EXAMPLE_MEDIA_URL,
-        caption_hint=caption_hint,
-    )
-    await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await start_command(update, context)
+    message = update.effective_message
+    if message is None:
+        return
+
+    if not _is_user_allowed(
+        context, update.effective_user.id if update.effective_user else None
+    ):
+        await message.reply_text(strings.ACCESS_DENIED)
+        return
+
+    bot_username = context.bot.username or strings.FALLBACK_BOT_USERNAME
+    await message.reply_text(
+        strings.HELP_MESSAGE.format(bot_username=bot_username),
+        reply_markup=_share_media_keyboard(),
+    )
 
 
 async def url_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -420,7 +434,7 @@ async def url_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             )
             await cache.evict(url, time_range=None)
 
-    status = await message.reply_text(strings.DIRECT_DOWNLOADING)
+    status = await message.reply_text(strings.DIRECT_PREPARING)
     await _run_direct_download(
         context,
         chat_id=message.chat_id,
@@ -453,6 +467,7 @@ async def _run_direct_download(
         if cached is not None:
             logger.info("Cache hit for direct URL: %s", display_url)
             try:
+                await status_message.edit_text(strings.DIRECT_UPLOADING)
                 await _send_cached_media_to_chat(
                     context,
                     chat_id,
@@ -491,6 +506,7 @@ async def _run_direct_download(
                 https_only=settings.https_only,
             )
             if direct_stream is not None:
+                await status_message.edit_text(strings.DIRECT_UPLOADING)
                 file_id_info = await _upload_direct_url_for_file_id(
                     context, settings, direct_stream
                 )
@@ -519,6 +535,7 @@ async def _run_direct_download(
                     await status_message.edit_text(strings.DIRECT_DONE)
                     return
 
+        await status_message.edit_text(strings.DIRECT_DOWNLOADING)
         async with _download_slot(context):
             media = await download_media(
                 url=url,
@@ -532,6 +549,7 @@ async def _run_direct_download(
                 slideshow_images_loop=settings.slideshow_images_loop,
                 time_range=time_range,
             )
+            await status_message.edit_text(strings.DIRECT_UPLOADING)
             sent_msg = await _send_media_to_chat(
                 context,
                 chat_id,
@@ -1052,6 +1070,12 @@ async def _prepare_inline_media(
             if direct_stream is not None:
                 if inline_message_id in _cancelled_set(context):
                     return
+                await _edit_inline_text(
+                    context,
+                    inline_message_id,
+                    strings.INLINE_UPLOADING.format(url=display_url),
+                    reply_markup=_cancel_keyboard(result_id),
+                )
                 file_id_info = await _upload_direct_url_for_file_id(
                     context, settings, direct_stream
                 )
@@ -1084,6 +1108,12 @@ async def _prepare_inline_media(
                     )
                     return
 
+        await _edit_inline_text(
+            context,
+            inline_message_id,
+            strings.INLINE_DOWNLOADING.format(url=display_url),
+            reply_markup=_cancel_keyboard(result_id),
+        )
         async with _download_slot(context):
             if inline_message_id in _cancelled_set(context):
                 return
@@ -1101,6 +1131,12 @@ async def _prepare_inline_media(
             )
             if inline_message_id in _cancelled_set(context):
                 return
+            await _edit_inline_text(
+                context,
+                inline_message_id,
+                strings.INLINE_UPLOADING.format(url=display_url),
+                reply_markup=_cancel_keyboard(result_id),
+            )
             file_id, title, kind = await _upload_for_file_id(context, settings, media)
         await cache.set(
             url=url,

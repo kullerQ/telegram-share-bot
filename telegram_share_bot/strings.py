@@ -23,34 +23,29 @@ INLINE_RATE_LIMITED_TITLE = "Busy"
 INLINE_RATE_LIMITED_DESCRIPTION = "Too many downloads in progress. Please wait."
 
 START_MESSAGE = (
-    "Welcome to <b>{bot_name}</b>!\n\n"
-    "I download media from YouTube, Twitter/X, and similar links, "
-    "then send the file in chat.\n\n"
-    "Try me inline:\n"
-    "<code>@{bot_username} {example_url}</code>\n\n"
-    "Or paste a media URL here."
-    "{caption_hint}"
+    "Welcome to {bot_name}!\n\n"
+    "Share a media link in another chat with the button below, or paste it here.\n"
+    "Use /help for link formats and YouTube clip options."
 )
-
-START_CAPTION_CUSTOM_HINT = (
-    "\n\nOptional caption after the link:\n"
-    "<code>@{bot_username} {example_url} your caption here</code>"
-)
-
-START_CAPTION_OFF_HINT = "\n\nMedia is sent without captions."
-
-START_CLIP_HINT = (
-    "\n\nYouTube clip — absolute range, <code>?t=</code> plus length in seconds, "
-    "or <code>?t=</code> alone (from that point to the end):\n"
-    "<code>@{bot_username} {example_url} 1:20-2:05</code>\n"
-    "<code>@{bot_username} https://youtu.be/…?t=2022 30</code>\n"
-    "<code>@{bot_username} https://youtu.be/…?t=2022</code>"
+START_SHARE_MEDIA_BUTTON = "Share media"
+HELP_MESSAGE = (
+    "Send one media link in this chat, or tap Share media to choose another chat.\n\n"
+    "Inline: type @{bot_username} followed by a media link.\n"
+    "Private chat: paste the link directly.\n"
+    "Add optional caption text after the link.\n\n"
+    "YouTube clips: add a range such as 1:20-2:05, or add a start time and "
+    "duration in seconds, for example ?t=2022 30. A start time alone selects "
+    "the video through its end. You can choose the clip or the full video.\n\n"
+    "Share a link to one media item. Playlists and multi-item collections are "
+    "not supported."
 )
 
 # --- Direct private-chat URL handling ----------------------------------------
 
 DIRECT_URL_HINT = "Send a media URL, or use me inline: @BotName <url>"
-DIRECT_DOWNLOADING = "Downloading…"
+DIRECT_PREPARING = "Checking the media link…"
+DIRECT_DOWNLOADING = "Downloading media…"
+DIRECT_UPLOADING = "Sending media to Telegram…"
 DIRECT_DONE = "Done."
 DIRECT_DOWNLOAD_FAILED = "Could not download that media."
 DIRECT_SEND_FAILED = "Something went wrong while sending the media."
@@ -92,7 +87,9 @@ INLINE_ALREADY_PREPARING = "This media is already being prepared."
 # --- After user chooses an inline result -------------------------------------
 
 INLINE_CHOSEN_NO_URL = "No URL found in the query."
-INLINE_CHOSEN_DOWNLOADING = "Downloading…\n{url}"
+INLINE_CHOSEN_DOWNLOADING = "Checking the media link…\n{url}"
+INLINE_DOWNLOADING = "Downloading media…\n{url}"
+INLINE_UPLOADING = "Sending media to Telegram…\n{url}"
 INLINE_CHOSEN_DOWNLOAD_FAILED = "Download failed."
 INLINE_CHOSEN_UPLOAD_FAILED = (
     "Could not upload the media to Telegram (network error). Please try again."
