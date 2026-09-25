@@ -894,8 +894,16 @@ def _download_sync(
 
                 # Probe metadata first so live streams abort before any media bytes land.
                 # Reuse extract_info from get_direct_stream when still warm.
+                metadata_started_at = time.monotonic()
                 extracted, from_cache = _extract_info_cached(ydl, url)
                 info = _pick_info(extracted)
+                if is_clip:
+                    logger.info(
+                        "Clip metadata resolved in %.1fs (%s) for %s",
+                        time.monotonic() - metadata_started_at,
+                        "cache" if from_cache else "source",
+                        safe_url_for_log(url),
+                    )
 
                 if effective_range is not None:
                     effective_range = _resolve_clip_range(effective_range, info)
@@ -910,6 +918,7 @@ def _download_sync(
                         )
                     )
 
+                transfer_started_at = time.monotonic()
                 try:
                     processed = ydl.process_ie_result(extracted, download=True)
                 except yt_dlp.utils.DownloadError as download_exc:
@@ -940,6 +949,12 @@ def _download_sync(
                         ) from download_exc
                     processed = ydl.process_ie_result(extracted, download=True)
 
+                if is_clip:
+                    logger.info(
+                        "Clip section transfer and ffmpeg processing took %.1fs for %s",
+                        time.monotonic() - transfer_started_at,
+                        safe_url_for_log(url),
+                    )
                 if isinstance(processed, dict):
                     info = _pick_info(processed)
 
