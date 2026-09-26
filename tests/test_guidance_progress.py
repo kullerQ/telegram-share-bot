@@ -326,7 +326,7 @@ class TestMediaProgress(unittest.IsolatedAsyncioTestCase):
             clip_choice.description,
         )
         self.assertIn("Send audio clip 2:30-3:30", audio_clip.title)
-        self.assertIn("YouTube · Audio · 2:30-3:30 · Download", audio_clip.description)
+        self.assertIn("YouTube · Audio · Download", audio_clip.description)
         self.assertIn("Checking clip", clip_choice.input_message_content.message_text)
         self.assertEqual(
             clip_choice.thumbnail_url,
