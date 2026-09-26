@@ -38,6 +38,7 @@ from telegram_share_bot.handlers import (
     direct_format_callback,
     help_command,
     inline_query,
+    private_choice_cancel_callback,
     retry_inline_callback,
     settings_callback,
     settings_command,
@@ -157,6 +158,9 @@ def build_application() -> App:
         CallbackQueryHandler(retry_inline_callback, pattern=r"^(retry|fallback):")
     )
     application.add_handler(CallbackQueryHandler(cancel_callback, pattern=r"^cancel:"))
+    application.add_handler(
+        CallbackQueryHandler(private_choice_cancel_callback, pattern=r"^direct-cancel:")
+    )
     application.add_handler(
         CallbackQueryHandler(
             direct_format_callback,

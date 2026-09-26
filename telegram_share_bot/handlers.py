@@ -85,6 +85,7 @@ _VIDEO_CALLBACK_PREFIX = "video:"
 _VIDEO_BEST_CALLBACK_PREFIX = "video-best:"
 _VIDEO_BALANCED_CALLBACK_PREFIX = "video-balanced:"
 _AUDIO_CALLBACK_PREFIX = "audio:"
+_DIRECT_CHOICE_CANCEL_PREFIX = "direct-cancel:"
 _CLIP_BEST_CALLBACK_PREFIX = "clip-best:"
 _CLIP_BALANCED_CALLBACK_PREFIX = "clip-balanced:"
 _FULL_BEST_CALLBACK_PREFIX = "full-best:"
@@ -544,6 +545,14 @@ def _format_choice_keyboard(
             ),
         ]
     ]
+    rows.append(
+        [
+            InlineKeyboardButton(
+                strings.DIRECT_CANCEL_BUTTON,
+                callback_data=f"{_DIRECT_CHOICE_CANCEL_PREFIX}{choice_id}",
+            )
+        ]
+    )
     return InlineKeyboardMarkup(rows)
 
 
@@ -608,6 +617,14 @@ def _clip_choice_keyboard(
                 ),
             ]
         )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                strings.DIRECT_CANCEL_BUTTON,
+                callback_data=f"{_DIRECT_CHOICE_CANCEL_PREFIX}{choice_id}",
+            )
+        ]
+    )
     return InlineKeyboardMarkup(rows)
 
 
@@ -1486,6 +1503,37 @@ async def retry_inline_callback(update: Update, context: ContextTypes.DEFAULT_TY
     tasks[inline_message_id] = task
 
 
+async def private_choice_cancel_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Dismiss a pending private-chat format or clip choice."""
+    query = update.callback_query
+    if query is None or query.data is None:
+        return
+    user_id = query.from_user.id if query.from_user else None
+    if not _is_user_allowed(context, user_id):
+        await query.answer(text=strings.ACCESS_DENIED, show_alert=True)
+        return
+    if not query.data.startswith(_DIRECT_CHOICE_CANCEL_PREFIX):
+        await query.answer()
+        return
+    choice_id = query.data.removeprefix(_DIRECT_CHOICE_CANCEL_PREFIX)
+    pending = _pending_clip_map(context).get(choice_id)
+    if pending is None:
+        await query.answer(text=strings.DIRECT_CLIP_EXPIRED, show_alert=True)
+        return
+    if pending.owner_user_id is not None and pending.owner_user_id != user_id:
+        await query.answer(text=strings.SETTINGS_NOT_YOURS, show_alert=True)
+        return
+    msg = query.message
+    if not isinstance(msg, Message):
+        await query.answer()
+        return
+    _pending_clip_map(context).pop(choice_id, None)
+    await query.answer(text=strings.DIRECT_CANCELLED)
+    await msg.edit_text(strings.DIRECT_CANCELLED, reply_markup=None)
+
+
 async def direct_format_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Apply a private-chat Video or Audio choice to the pending link."""
     query = update.callback_query
@@ -1507,18 +1555,19 @@ async def direct_format_callback(update: Update, context: ContextTypes.DEFAULT_T
         return
     prefix, media_format, quality_override = selected
     choice_id = query.data.removeprefix(prefix)
-    pending = _pending_clip_map(context).pop(choice_id, None)
+    pending = _pending_clip_map(context).get(choice_id)
     if pending is None:
         await query.answer(text=strings.DIRECT_CLIP_EXPIRED, show_alert=True)
         return
     if pending.owner_user_id is not None and pending.owner_user_id != user_id:
         await query.answer(text=strings.SETTINGS_NOT_YOURS, show_alert=True)
         return
-    quality_policy = quality_override or pending.preferences.video_quality
     msg = query.message
     if not isinstance(msg, Message):
         await query.answer()
         return
+    _pending_clip_map(context).pop(choice_id, None)
+    quality_policy = quality_override or pending.preferences.video_quality
     await query.answer(text=strings.DIRECT_CLIP_CHOICE_ANSWER)
     await _run_direct_download(
         context,
@@ -1562,7 +1611,7 @@ async def clip_choice_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         return
     prefix, want_clip, media_format, quality_override = selected
     choice_id = data.removeprefix(prefix)
-    pending = _pending_clip_map(context).pop(choice_id, None)
+    pending = _pending_clip_map(context).get(choice_id)
     if pending is None:
         await query.answer(text=strings.DIRECT_CLIP_EXPIRED, show_alert=True)
         msg = query.message
@@ -1573,6 +1622,11 @@ async def clip_choice_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     if pending.owner_user_id is not None and pending.owner_user_id != user_id:
         await query.answer(text=strings.SETTINGS_NOT_YOURS, show_alert=True)
         return
+    msg = query.message
+    if not isinstance(msg, Message):
+        await query.answer()
+        return
+    _pending_clip_map(context).pop(choice_id, None)
     quality_policy = quality_override or pending.preferences.video_quality
 
     await query.answer(text=strings.DIRECT_CLIP_CHOICE_ANSWER)
@@ -1583,17 +1637,12 @@ async def clip_choice_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         and time_range.duration_seconds is not None
         and time_range.duration_seconds > MAX_CLIP_SECONDS
     ):
-        msg = query.message
-        if isinstance(msg, Message):
-            await msg.edit_text(
-                strings.DOWNLOAD_CLIP_TOO_LONG.format(max_minutes=MAX_CLIP_SECONDS // 60),
-                reply_markup=None,
-            )
+        await msg.edit_text(
+            strings.DOWNLOAD_CLIP_TOO_LONG.format(max_minutes=MAX_CLIP_SECONDS // 60),
+            reply_markup=None,
+        )
         return
 
-    msg = query.message
-    if not isinstance(msg, Message):
-        return
     await _run_direct_download(
         context,
         chat_id=pending.chat_id,
