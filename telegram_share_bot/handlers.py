@@ -802,8 +802,11 @@ async def url_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     url = request.url
     custom_caption = request.custom_caption
     time_range = request.time_range
+    bot_username = context.bot.username or strings.FALLBACK_BOT_USERNAME
     if url is None:
-        await message.reply_text(strings.DIRECT_URL_HINT)
+        await message.reply_text(strings.DIRECT_URL_HINT.format(
+            bot_username=escape(bot_username)
+        ))
         return
 
     settings = _settings(context)
