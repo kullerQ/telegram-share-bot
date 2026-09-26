@@ -33,8 +33,8 @@ Without `/setinlinefeedback`, the bot cannot learn which result you chose, so th
 
 2. Create host dirs and fix ownership (container runs as uid/gid `1000`):
    ```bash
-   mkdir -p downloads logs
-   sudo chown -R 1000:1000 ./downloads ./logs
+   mkdir -p downloads data logs
+   sudo chown -R 1000:1000 ./downloads ./data ./logs
    ```
    On Windows this step is usually unnecessary; on Linux bind mounts owned by `root` will cause `PermissionDenied` when the bot writes downloads or logs.
 
@@ -43,7 +43,7 @@ Without `/setinlinefeedback`, the bot cannot learn which result you chose, so th
    docker compose up -d
    ```
 
-   Compose drops Linux capabilities, runs a read-only root filesystem (with writable `downloads`/`logs` mounts and `/tmp`), and health-checks reachability of `api.telegram.org`. For stronger SSRF defense, also restrict the host/container egress firewall to HTTPS destinations you trust (Telegram API + media CDNs).
+   Compose drops Linux capabilities, runs a read-only root filesystem (with writable `downloads`/`data`/`logs` mounts and `/tmp`), and health-checks reachability of `api.telegram.org`. Back up `./data` to preserve per-user sharing preferences. For stronger SSRF defense, also restrict the host/container egress firewall to HTTPS destinations you trust (Telegram API + media CDNs).
 
 4. **Accessing logs**:
    - Live stream in console:
@@ -110,7 +110,7 @@ For a YouTube **clip**, either:
 - use a share link with `?t=` / `start=` and a following duration in **seconds** (e.g. `?t=2022` + `30` → clip from 33:42 for 30 seconds), or
 - use `?t=` / `start=` alone to choose a clip from that start through the end of the video (still offers full video as the other choice).
 
-Inline mode offers Video Auto and Audio results; YouTube clip links also offer clip and full-length versions in both formats. In a private chat, paste a link and choose Video Auto, Best, Balanced, or Audio. Auto starts with the highest feasible source quality, samples transfer speed after five seconds, and tries a lower quality if the projected download exceeds 45 seconds by default. Best holds the highest feasible source quality; Balanced prefers a progressive 720p-class stream, favoring 60 fps and AVC when available. Quality tiers describe preferred source quality rather than hard resolution caps. Telegram's file-size and overall download limits still apply. For a direct choice, send `/video <link>`, `/video best <link>`, `/video balanced <link>`, or `/audio <link>`. Captions may follow the range or duration. A caption without a leading range/duration on a link without `t=` still downloads the whole video.
+Inline mode offers explicit Video and Audio results; YouTube clip links also offer clip and full-length versions in both formats. In a private chat, paste a link to use your saved format default, or choose from the menu when it is set to **Not specified**. Use `/settings` to set quality (Auto, Best, or Balanced), caption (Media title, Original link, or None), and format (Video, Audio, or Not specified). New users start with Auto quality, bot-level caption behavior, and Not specified format. Auto starts with the best source and switches quality when the estimated download exceeds 45 seconds by default. Best never steps down to another source format and reports when that source cannot fit Telegram. Balanced prefers 720p, 60 fps, AVC when available, then falls back to the best deliverable alternative. Quality preferences are not literal height caps. `/video`, `/video best`, `/video balanced`, and `/audio` provide explicit per-request format choices. Captions may follow the range or duration; an explicit caption overrides a saved caption preference.
 
 ```text
 @YourBot https://youtube.com/watch?v=… 1:20-2:05
@@ -127,13 +127,13 @@ Tap a Video or Audio result (or a clip / full-length choice). A placeholder appe
 1. Telegram sends an `inline_query` with the URL.
 2. The bot answers **immediately** with a placeholder article (Telegram rejects answers that take too long).
 3. When you tap the result, Telegram sends `chosen_inline_result` (needs `/setinlinefeedback`).
-4. The bot downloads via `yt-dlp`, uploads to `STORAGE_CHAT_ID` for a `file_id`, deletes that storage message, then edits the inline message to the media. Auto video selection tries the highest feasible source first and steps down on a slow transfer or oversized output. Best and Balanced keep their selected quality and can make at most two bounded `ffmpeg` optimization attempts to meet Telegram's size limit. Audio selection downloads an audio-only stream and prepares native Telegram audio; YouTube clips and TikTok slideshow soundtracks are supported when the source provides audio. Telegram direct URL imports are used for eligible audio streams and fall back to local delivery if Telegram rejects the URL.
+4. The bot downloads via `yt-dlp`, uploads to `STORAGE_CHAT_ID` for a `file_id`, deletes that storage message, then edits the inline message to the media. Auto video selection tries the highest feasible source first and steps down on a slow transfer or oversized output. Best stays on the top source format; Balanced prefers its target when available and may try the best alternative. Both can use at most two bounded `ffmpeg` optimization attempts to meet Telegram's size limit. Audio selection downloads an audio-only stream and prepares native Telegram audio; YouTube clips and TikTok slideshow soundtracks are supported when the source provides audio. Telegram direct URL imports are used for eligible audio streams and fall back to local delivery if Telegram rejects the URL.
 
 ## Limits
 
 - Max file size ≈ 45 MB (Telegram Bot API upload limit is 50 MB). Video quality is adapted to fit this limit rather than capped at one fixed resolution.
 - Download timeout defaults to 120 seconds; source transfers are bounded to twice the output size limit.
-- Auto video checks elapsed time and transferred bytes from five seconds onward. `MAX_ESTIMATED_DOWNLOAD_SECONDS=45` sets the projected total download target; `0` disables this speed-based step-down. Every retry shares the 120-second overall deadline. Best and Balanced use the full deadline without speed-based step-down.
+- Auto video checks elapsed time and transferred bytes from five seconds onward. `MAX_ESTIMATED_DOWNLOAD_SECONDS=45` sets the projected total download target; `0` disables this speed-based step-down. Every retry shares the 120-second overall deadline. Best and Balanced use the full deadline without Auto's speed-based step-down. Best does not change source format; Balanced may fall back when its preferred format cannot be delivered.
 - Global concurrent downloads default to 6; each user may have 3 active requests. Set either limit to `0` to disable it. The per-user cooldown defaults to 2 seconds.
 - Each user may make 10 download requests per rolling 60-second window by default (`MAX_DOWNLOADS_PER_MINUTE`); rejected requests due to cooldown or active-download limits count too. Set it to `0` to disable this rate limit.
 - New full video and audio requests are limited to 30 minutes when source metadata provides a duration (`MAX_MEDIA_DURATION_SECONDS=1800`). Set `0` to disable this limit. Short YouTube clips from longer videos remain available under the 10-minute clip limit. Unknown durations still have the byte and timeout limits.
@@ -142,6 +142,7 @@ Tap a Video or Audio result (or a clip / full-length choice). A placeholder appe
 - TikTok **photo posts** (image slideshows with sound) can be sent as a slideshow video or as the original soundtrack when present. Video slideshows are compiled into MP4 via `ffmpeg`: each image is shown for about `SLIDESHOW_SLIDE_MS` (default 2500 ms). `SLIDESHOW_IMAGES_LOOP=true` (default) makes the video match the **full** audio track and loops images to fill it; `false` shows each image once then trims the audio (a single-image post still uses the full audio). Multi-image posts get TikTok-style page dots at the bottom. At most `SLIDESHOW_MAX_IMAGES` (default 35) images are included. The Docker image already ships a static `ffmpeg`.
 - `HTTPS_ONLY` defaults to true (set `false` to allow plain `http://` media URLs).
 - Captions: `CAPTION_MODE=media` (default, media title), `custom` (only text after the URL), or `off` (no captions). Custom captions are plain text, max 1024 characters, not stored in the media cache, and not sent to `STORAGE_CHAT_ID`.
+- Per-user settings: `/settings` saves preferences in `./data/user_settings.db`, separate from temporary downloads. Back up `./data` to retain them; the directory is mounted at `/app/data` in Docker and ignored by Git.
 - YouTube clips: optional `start-end` after the link, or `?t=` / `start=` on the URL plus a duration in seconds, or `?t=` alone (from start to end). Max clip length 10 minutes. Requires `ffmpeg` (already in the Docker image). When suitable HLS streams are available, video and audio are fetched separately and combined locally to avoid slow section transfers.
 - Unsupported or oversize URLs replace the placeholder with an error message.
 
@@ -149,5 +150,5 @@ Tap a Video or Audio result (or a clip / full-length choice). A placeholder appe
 
 - Users should `/start` the bot once before relying on inline mode.
 - Respect platform Terms of Service for downloaded content; this project is for personal/lightweight use.
-- Previously uploaded videos are reused when their recorded output resolution meets or exceeds the requested quality tier. Auto prefers a cached Best upload when it is at least as good as the cached Auto upload. Clip ranges and full videos remain separate cache entries; captions are applied when sent.
+- Previously uploaded videos are reused when their recorded output quality is compatible with the requested policy. Auto prefers a cached Best upload when it is at least as good as the cached Auto upload. Clip ranges and full videos remain separate cache entries; captions are applied when sent.
 - Signed / credentialed URLs are not stored in the shared media cache.
