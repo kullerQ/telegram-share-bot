@@ -11,9 +11,14 @@ from unittest.mock import MagicMock, patch
 from telegram_share_bot.downloader import (
     _download_sync,
     _extract_direct_stream_sync,
+    _VideoProbe,
 )
 
 
+@patch(
+    "telegram_share_bot.downloader._probe_video_file",
+    new=lambda *_: _VideoProbe(60, "h264", "yuv420p", "aac", 1280, 720),
+)
 class TestRedditFormats(unittest.TestCase):
     def test_oversized_selected_stream_is_not_sent_directly(self) -> None:
         selected = {

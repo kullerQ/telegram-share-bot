@@ -51,7 +51,9 @@ def _cache_key(
     if not norm_url:
         return None
     clip_suffix = time_range.cache_suffix() if time_range is not None else ""
-    return f"{norm_url}#format={media_format.value}&quality={quality}{clip_suffix}"
+    # Earlier video entries could contain an unchecked audio component or codec.
+    delivery = "&delivery=2" if media_format is MediaFormat.VIDEO else ""
+    return f"{norm_url}#format={media_format.value}&quality={quality}{delivery}{clip_suffix}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -266,10 +268,6 @@ class MediaCache:
             cached = await asyncio.to_thread(self._get_with_recovery, key)
             if cached is not None:
                 return cached
-            if media_format is MediaFormat.VIDEO and quality_policy == "best-fit":
-                legacy_key = _legacy_cache_key(url, time_range)
-                if legacy_key is not None and legacy_key != key:
-                    return await asyncio.to_thread(self._get_with_recovery, legacy_key)
             return None
         except _RECOVERABLE_DB_ERRORS:
             return None
@@ -301,11 +299,32 @@ class MediaCache:
                 return auto
             return best
 
-        target_height = 720 if quality_policy == "balanced" else None
-        if quality_policy.endswith("p") and quality_policy[:-1].isdigit():
-            target_height = int(quality_policy[:-1])
+        if quality_policy == "balanced":
+            balanced_candidates = [
+                await self.get(url, time_range=time_range, quality_policy=policy)
+                for policy in ("source-best", "auto-best", "balanced")
+            ]
+            known_quality = [
+                candidate
+                for candidate in balanced_candidates
+                if candidate is not None
+                and candidate.kind is MediaKind.VIDEO
+                and candidate.video_height is not None
+            ]
+            if known_quality:
+                return max(known_quality, key=lambda item: item.video_height or 0)
+            # An exact-policy cache entry remains usable even when Telegram did
+            # not report dimensions; cross-policy quality cannot be inferred.
+            exact = balanced_candidates[2]
+            return exact if exact is not None and exact.kind is MediaKind.VIDEO else None
+
+        target_height = (
+            int(quality_policy[:-1])
+            if quality_policy.endswith("p") and quality_policy[:-1].isdigit()
+            else None
+        )
         if target_height is not None:
-            candidates: list[CachedMedia] = []
+            qualified_candidates: list[CachedMedia] = []
             for policy in ("source-best", "auto-best", quality_policy):
                 candidate = await self.get(url, time_range=time_range, quality_policy=policy)
                 if (
@@ -314,9 +333,9 @@ class MediaCache:
                     and candidate.video_height is not None
                     and candidate.video_height >= target_height
                 ):
-                    candidates.append(candidate)
-            if candidates:
-                return max(candidates, key=lambda item: item.video_height or 0)
+                    qualified_candidates.append(candidate)
+            if qualified_candidates:
+                return max(qualified_candidates, key=lambda item: item.video_height or 0)
         return await self.get(url, time_range=time_range, quality_policy=quality_policy)
 
     async def evict_entry(self, cached: CachedMedia) -> None:

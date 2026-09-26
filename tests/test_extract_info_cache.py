@@ -18,10 +18,15 @@ from telegram_share_bot.downloader import (
     _extract_info_cache,
     _extract_info_cached,
     _looks_like_stale_cdn_url,
+    _VideoProbe,
     clear_extract_info_cache,
 )
 
 
+@patch(
+    "telegram_share_bot.downloader._probe_video_file",
+    new=lambda *_: _VideoProbe(60, "h264", "yuv420p", "aac", 1280, 720),
+)
 class TestExtractInfoCache(unittest.TestCase):
     def setUp(self) -> None:
         clear_extract_info_cache()

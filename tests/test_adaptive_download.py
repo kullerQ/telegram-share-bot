@@ -23,10 +23,13 @@ from telegram_share_bot.downloader import (
     _download_sync,
     _format_candidates,
     _optimize_video_file,
+    _probe_video_file,
     _projected_transfer_seconds,
     _run_bounded_clip_ffmpeg,
     _set_attempt_format_selector,
     _set_attempt_output_template,
+    _VideoProbe,
+    _youtube_hls_clip_streams,
 )
 
 
@@ -95,6 +98,91 @@ class TestFormatRanking(unittest.TestCase):
         )
         self.assertEqual(candidates[0].selector, "v720-avc")
 
+    def test_balanced_falls_back_to_highest_available_quality(self) -> None:
+        formats = [
+            {
+                "format_id": "v480",
+                "height": 480,
+                "fps": 30,
+                "filesize": 10,
+                "vcodec": "avc1",
+                "acodec": "aac",
+            },
+            {
+                "format_id": "v1080",
+                "height": 1080,
+                "fps": 30,
+                "filesize": 30,
+                "vcodec": "vp9",
+                "acodec": "aac",
+            },
+        ]
+        candidates = _format_candidates(
+            {"formats": formats},
+            max_file_bytes=45 * 1024 * 1024,
+            quality_policy=VideoQualityPolicy.BALANCED,
+        )
+        self.assertEqual(candidates[0].selector, "v1080")
+
+    def test_best_keeps_top_source_without_lower_quality_fallback(self) -> None:
+        formats = [
+            {
+                "format_id": "v1440",
+                "height": 1440,
+                "fps": 60,
+                "filesize": 200,
+                "vcodec": "avc1",
+                "acodec": "aac",
+            },
+            {
+                "format_id": "v720",
+                "height": 720,
+                "fps": 30,
+                "filesize": 40,
+                "vcodec": "avc1",
+                "acodec": "aac",
+            },
+        ]
+        candidates = _format_candidates(
+            {"formats": formats},
+            max_file_bytes=50,
+            quality_policy=VideoQualityPolicy.BEST,
+        )
+        self.assertEqual([candidate.selector for candidate in candidates], ["v1440"])
+
+    def test_balanced_hls_uses_generic_fallback_when_target_is_missing(self) -> None:
+        info = {
+            "duration": 100,
+            "formats": [
+                {
+                    "format_id": "audio",
+                    "protocol": "m3u8_native",
+                    "url": "https://example.com/a.m3u8",
+                    "resolution": "audio only",
+                    "vcodec": "none",
+                    "acodec": "aac",
+                },
+                {
+                    "format_id": "v1080",
+                    "protocol": "m3u8_native",
+                    "url": "https://example.com/v.m3u8",
+                    "height": 1080,
+                    "fps": 30,
+                    "tbr": 500,
+                    "vcodec": "avc1",
+                    "acodec": "none",
+                },
+            ],
+        }
+        self.assertIsNone(
+            _youtube_hls_clip_streams(
+                info,
+                30,
+                45 * 1024 * 1024,
+                VideoQualityPolicy.BALANCED,
+            )
+        )
+
     def test_transfer_projection_requires_bytes_and_uses_total_time(self) -> None:
         self.assertIsNone(_projected_transfer_seconds(5, 0, 100))
         self.assertEqual(_projected_transfer_seconds(5, 10, 100), 50)
@@ -159,6 +247,10 @@ class TestFormatRanking(unittest.TestCase):
         self.assertIsNotNone(candidates[0].estimated_size)
 
 
+@patch(
+    "telegram_share_bot.downloader._probe_video_file",
+    new=lambda *_: _VideoProbe(60, "h264", "yuv420p", "aac", 1280, 720),
+)
 class TestYoutubeHlsClip(unittest.TestCase):
     def test_video_clip_downloads_streams_separately_then_merges(self) -> None:
         info = {
@@ -224,8 +316,7 @@ class TestYoutubeHlsClip(unittest.TestCase):
             self.assertTrue(media.path.exists())
             self.assertTrue(
                 any(
-                    "Clip HLS video transfer started: format=311 quality=720p 60fps avc1"
-                    in line
+                    "Clip HLS video transfer started: format=311 quality=720p 60fps avc1" in line
                     for line in logs.output
                 )
             )
@@ -478,6 +569,7 @@ class TestAudioFormatSelection(unittest.TestCase):
     def test_missing_audio_stream_has_a_clear_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             for error_type in (yt_dlp.utils.DownloadError, yt_dlp.utils.ExtractorError):
+
                 class FakeYdl:
                     def __init__(self, opts: dict[str, object]) -> None:
                         self.params = dict(opts)
@@ -554,9 +646,7 @@ class TestYtDlpOutputTemplate(unittest.TestCase):
 
             self.assertIsInstance(ydl.params["outtmpl"], dict)
             self.assertEqual(ydl.params["outtmpl"]["default"], attempt_template)
-            self.assertEqual(
-                ydl.params["outtmpl"]["chapter"], original_templates["chapter"]
-            )
+            self.assertEqual(ydl.params["outtmpl"]["chapter"], original_templates["chapter"])
             prepared = ydl.prepare_filename(
                 {"title": "Adaptive test", "id": "abc123", "ext": "mp4"}
             )
@@ -591,6 +681,10 @@ class TestYtDlpOutputTemplate(unittest.TestCase):
             self.assertEqual([fmt["format_id"] for fmt in selected], ["audio128"])
 
 
+@patch(
+    "telegram_share_bot.downloader._probe_video_file",
+    new=lambda *_: _VideoProbe(60, "h264", "yuv420p", "aac", 1280, 720),
+)
 class TestMeasuredFallback(unittest.TestCase):
     def test_auto_steps_down_on_slow_transfer_but_forced_modes_hold_quality(self) -> None:
         formats = [
@@ -809,7 +903,108 @@ class TestMediaDurationLimit(unittest.TestCase):
             self.assertEqual(list(Path(tmp).iterdir()), [])
 
 
+class TestVideoIntegrity(unittest.TestCase):
+    def test_best_never_returns_leftover_audio_when_video_is_skipped(self) -> None:
+        for video_size in (None, 200):
+            with self.subTest(video_size=video_size), tempfile.TemporaryDirectory() as tmp:
+                ydl = MagicMock()
+                ydl.params = {}
+                ydl.__enter__.return_value = ydl
+                ydl.prepare_filename.return_value = str(Path(tmp) / "missing.mp4")
+
+                def leave_audio(
+                    *args: object, ydl: MagicMock = ydl, **kwargs: object
+                ) -> dict[str, object]:
+                    directory = Path(_outtmpl_template(ydl.params)).parent
+                    (directory / "leftover.mp4").write_bytes(b"audio")
+                    return {"title": "Test"}
+
+                ydl.process_ie_result.side_effect = leave_audio
+                info = {
+                    "title": "Test",
+                    "duration": 10,
+                    "formats": [
+                        {
+                            "format_id": "video",
+                            "vcodec": "vp9",
+                            "acodec": "none",
+                            "height": 2160,
+                            "filesize": video_size,
+                        },
+                        {"format_id": "audio", "vcodec": "none", "acodec": "opus", "filesize": 2},
+                    ],
+                }
+                with (
+                    patch("telegram_share_bot.downloader.yt_dlp.YoutubeDL", return_value=ydl),
+                    patch("telegram_share_bot.downloader.is_safe_media_url", return_value=True),
+                    patch(
+                        "telegram_share_bot.downloader._safe_dns_resolution", contextlib.nullcontext
+                    ),
+                    patch(
+                        "telegram_share_bot.downloader._extract_info_cached",
+                        return_value=(info, False),
+                    ),
+                    patch("telegram_share_bot.downloader.shutil.which", return_value="ffprobe"),
+                    patch(
+                        "telegram_share_bot.downloader.subprocess.run",
+                        return_value=subprocess.CompletedProcess(
+                            [], 0, b'{"streams":[{"codec_type":"audio"}]}'
+                        ),
+                    ),
+                ):
+                    with self.assertRaisesRegex(DownloadError, "Try Auto or Balanced"):
+                        _download_sync(
+                            "https://youtube.com/watch?v=example",
+                            Path(tmp),
+                            50,
+                            10,
+                            quality_policy=VideoQualityPolicy.BEST,
+                        )
+                self.assertEqual(ydl.process_ie_result.call_count, 1 if video_size is None else 0)
+
+
 class TestVideoOptimization(unittest.TestCase):
+    def test_small_incompatible_sources_are_normalized_without_needless_video_encoding(
+        self,
+    ) -> None:
+        for codec, expected in (("h264", "copy"), ("vp9", "libx264")):
+            with self.subTest(codec=codec), tempfile.TemporaryDirectory() as tmp:
+                source = Path(tmp) / "source.mkv"
+                source.write_bytes(b"source")
+                commands: list[list[str]] = []
+
+                def encode(
+                    argv: list[str],
+                    output: Path,
+                    commands: list[list[str]] = commands,
+                    **kwargs: object,
+                ) -> None:
+                    commands.append(argv)
+                    output.write_bytes(b"normalized")
+
+                with (
+                    patch("telegram_share_bot.downloader.shutil.which", return_value="ffmpeg"),
+                    patch(
+                        "telegram_share_bot.downloader._probe_video_file",
+                        side_effect=[
+                            _VideoProbe(10, codec, "yuv420p", "opus", 1920, 1080),
+                            _VideoProbe(10, "h264", "yuv420p", "aac", 1920, 1080),
+                        ],
+                    ),
+                    patch(
+                        "telegram_share_bot.downloader._run_bounded_clip_ffmpeg", side_effect=encode
+                    ),
+                ):
+                    result = _optimize_video_file(
+                        source,
+                        max_file_bytes=1024 * 1024,
+                        deadline=9999999999,
+                        abort_event=None,
+                        on_optimizing=None,
+                    )
+                self.assertTrue(result.exists())
+                self.assertEqual(commands[0][commands[0].index("-c:v") + 1], expected)
+
     def test_optimizes_at_most_twice_and_calls_status_once(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             source = Path(tmp) / "source.mp4"
@@ -817,12 +1012,13 @@ class TestVideoOptimization(unittest.TestCase):
             calls = 0
             notices: list[bool] = []
 
-            def fake_run(argv: list[str], **kwargs: object) -> object:
+            def fake_run(argv: list[str], output: Path, **kwargs: object) -> None:
                 nonlocal calls
                 calls += 1
-                output = Path(argv[-1])
+                self.assertEqual(argv[argv.index("-i") + 1], str(source))
+                self.assertNotIn("-crf", argv)
+                self.assertNotIn("1280", argv[argv.index("-vf") + 1])
                 output.write_bytes(b"x" * (20 if calls == 1 else 8))
-                return type("Completed", (), {"returncode": 0})()
 
             def notice() -> None:
                 notices.append(True)
@@ -830,7 +1026,14 @@ class TestVideoOptimization(unittest.TestCase):
             with self.assertLogs("telegram_share_bot.downloader", level="INFO") as logs:
                 with (
                     patch("telegram_share_bot.downloader.shutil.which", return_value="ffmpeg"),
-                    patch("telegram_share_bot.downloader.subprocess.run", side_effect=fake_run),
+                    patch(
+                        "telegram_share_bot.downloader._run_bounded_clip_ffmpeg",
+                        side_effect=fake_run,
+                    ),
+                    patch(
+                        "telegram_share_bot.downloader._probe_video_file",
+                        return_value=_VideoProbe(1, "h264", "yuv420p", None, 3840, 2160),
+                    ),
                 ):
                     result = _optimize_video_file(
                         source,
@@ -843,6 +1046,42 @@ class TestVideoOptimization(unittest.TestCase):
             self.assertEqual(result.stat().st_size, 8)
             self.assertLessEqual(calls, 2)
             self.assertEqual(notices, [True])
+
+    def test_rejects_audio_only_file_despite_mp4_extension(self) -> None:
+        with (
+            patch("telegram_share_bot.downloader.shutil.which", return_value="ffprobe"),
+            patch(
+                "telegram_share_bot.downloader.subprocess.run",
+                return_value=subprocess.CompletedProcess(
+                    [],
+                    0,
+                    b'{"streams":[{"codec_type":"audio","codec_name":"opus"}],"format":{"duration":"297"}}',
+                ),
+            ),
+        ):
+            with self.assertRaises(DownloadError):
+                _probe_video_file(Path("audio.mp4"), 9999999999)
+
+    def test_compatible_small_video_is_not_reencoded(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "source.mp4"
+            source.write_bytes(b"video")
+            with (
+                patch(
+                    "telegram_share_bot.downloader._probe_video_file",
+                    return_value=_VideoProbe(10, "h264", "yuv420p", "aac", 1920, 1080),
+                ),
+                patch("telegram_share_bot.downloader._run_bounded_clip_ffmpeg") as encode,
+            ):
+                result = _optimize_video_file(
+                    source,
+                    max_file_bytes=100,
+                    deadline=9999999999,
+                    abort_event=None,
+                    on_optimizing=None,
+                )
+            self.assertEqual(result, source)
+            encode.assert_not_called()
 
 
 if __name__ == "__main__":

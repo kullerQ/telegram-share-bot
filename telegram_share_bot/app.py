@@ -39,11 +39,14 @@ from telegram_share_bot.handlers import (
     help_command,
     inline_query,
     retry_inline_callback,
+    settings_callback,
+    settings_command,
     start_command,
     url_message,
     video_command,
 )
 from telegram_share_bot.logging_filters import configure_logging
+from telegram_share_bot.user_settings import UserSettingsStore
 
 App = Application[
     ExtBot[None],
@@ -121,6 +124,9 @@ def build_application() -> App:
     )
     application.bot_data["settings"] = settings
     application.bot_data["media_cache"] = MediaCache(settings.cache_db_path)
+    user_settings_db_path = getattr(settings, "user_settings_db_path", None)
+    if isinstance(user_settings_db_path, Path):
+        application.bot_data["user_settings"] = UserSettingsStore(user_settings_db_path)
     raw_concurrency = getattr(
         settings, "max_concurrent_downloads", DEFAULT_MAX_CONCURRENT_DOWNLOADS
     )
@@ -136,6 +142,10 @@ def build_application() -> App:
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(
+        CommandHandler("settings", settings_command, filters=filters.ChatType.PRIVATE)
+    )
+    application.add_handler(CallbackQueryHandler(settings_callback, pattern=r"^settings:"))
+    application.add_handler(
         CommandHandler("audio", audio_command, filters=filters.ChatType.PRIVATE)
     )
     application.add_handler(
@@ -146,9 +156,7 @@ def build_application() -> App:
     application.add_handler(
         CallbackQueryHandler(retry_inline_callback, pattern=r"^(retry|fallback):")
     )
-    application.add_handler(
-        CallbackQueryHandler(cancel_callback, pattern=r"^cancel:")
-    )
+    application.add_handler(CallbackQueryHandler(cancel_callback, pattern=r"^cancel:"))
     application.add_handler(
         CallbackQueryHandler(
             direct_format_callback,

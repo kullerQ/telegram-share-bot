@@ -26,14 +26,15 @@ RUN pip install --no-cache-dir -r requirements.txt \
 # ---------------------------------------------------------------------------
 # Compress static ffmpeg with UPX (~4x smaller; same codecs).
 # Source: mwader/static-ffmpeg (hardened static PIE, multi-arch).
-# ffprobe is omitted: yt-dlp and slideshow probing fall back to ffmpeg.
+# ffprobe verifies streams before videos are sent to Telegram.
 # ---------------------------------------------------------------------------
 FROM mwader/static-ffmpeg:9.0.1 AS ffmpeg-src
 FROM alpine:3.21 AS ffmpeg
 
 COPY --from=ffmpeg-src /ffmpeg /ffmpeg
+COPY --from=ffmpeg-src /ffprobe /ffprobe
 RUN apk add --no-cache upx \
-    && upx --best --lzma /ffmpeg
+    && upx --best --lzma /ffmpeg /ffprobe
 
 # ---------------------------------------------------------------------------
 # Runtime: Alpine Python + compressed static ffmpeg (no apt multimedia stack).
@@ -48,12 +49,13 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PATH="/opt/venv/bin:$PATH"
 
 COPY --from=ffmpeg /ffmpeg /usr/local/bin/ffmpeg
+COPY --from=ffmpeg /ffprobe /usr/local/bin/ffprobe
 
 WORKDIR /app
 
 RUN addgroup -g 1000 appgroup \
     && adduser -u 1000 -G appgroup -s /sbin/nologin -D appuser \
-    && mkdir -p /app/downloads /app/logs \
+    && mkdir -p /app/downloads /app/data /app/logs \
     && chown -R appuser:appgroup /app
 
 COPY --from=builder /opt/venv /opt/venv

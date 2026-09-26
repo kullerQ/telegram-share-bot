@@ -18,16 +18,21 @@ from telegram_share_bot.downloader import (
     DownloadedMedia,
     MediaFormat,
     MediaKind,
+    TimeRange,
     VideoQualityPolicy,
 )
 from telegram_share_bot.handlers import (
     PendingClipChoice,
+    _clip_choice_keyboard,
+    _format_choice_keyboard,
     _prepare_inline_media,
     _run_direct_download,
+    clip_choice_callback,
     direct_format_callback,
     url_message,
     video_command,
 )
+from telegram_share_bot.user_settings import UserSettingsStore
 
 
 class TestCacheFallback(unittest.IsolatedAsyncioTestCase):
@@ -53,12 +58,22 @@ class TestCacheFallback(unittest.IsolatedAsyncioTestCase):
     async def test_auto_send_uses_cached_best_video_without_downloading(self) -> None:
         url = "https://youtu.be/quality1234"
         await self.cache.set(
-            url, "AUTO_ID", MediaKind.VIDEO, "Auto", 40,
-            quality_policy=VideoQualityPolicy.AUTO.value, video_height=720,
+            url,
+            "AUTO_ID",
+            MediaKind.VIDEO,
+            "Auto",
+            40,
+            quality_policy=VideoQualityPolicy.AUTO.value,
+            video_height=720,
         )
         await self.cache.set(
-            url, "BEST_ID", MediaKind.VIDEO, "Best", 40,
-            quality_policy=VideoQualityPolicy.BEST.value, video_height=1080,
+            url,
+            "BEST_ID",
+            MediaKind.VIDEO,
+            "Best",
+            40,
+            quality_policy=VideoQualityPolicy.BEST.value,
+            video_height=1080,
         )
         context = MagicMock()
         context.application.bot_data = {
@@ -71,8 +86,13 @@ class TestCacheFallback(unittest.IsolatedAsyncioTestCase):
         status.delete = AsyncMock()
         with patch("telegram_share_bot.handlers.download_media", AsyncMock()) as download:
             await _run_direct_download(
-                context, chat_id=42, user_id=42, url=url,
-                custom_caption=None, time_range=None, status_message=status,
+                context,
+                chat_id=42,
+                user_id=42,
+                url=url,
+                custom_caption=None,
+                time_range=None,
+                status_message=status,
             )
         self.assertEqual(context.bot.send_video.await_args.kwargs["video"], "BEST_ID")
         download.assert_not_awaited()
@@ -116,10 +136,7 @@ class TestCacheFallback(unittest.IsolatedAsyncioTestCase):
             [button.callback_data.split(":", 1)[0] for button in keyboard.inline_keyboard[0]],
             ["video", "audio"],
         )
-        self.assertEqual(
-            [button.callback_data.split(":", 1)[0] for button in keyboard.inline_keyboard[1]],
-            ["video-best", "video-balanced"],
-        )
+        self.assertEqual(len(keyboard.inline_keyboard), 1)
         self.assertEqual(context.bot.send_video.call_count, 0)
 
         choice_id = keyboard.inline_keyboard[0][0].callback_data.split(":", 1)[1]
@@ -151,6 +168,12 @@ class TestCacheFallback(unittest.IsolatedAsyncioTestCase):
             await direct_format_callback(update, context)
 
         self.assertEqual(context.bot.send_video.call_count, 2)
+        self.assertEqual(
+            [call.args[0] for call in status_msg.edit_text.await_args_list].count(
+                strings.DIRECT_DOWNLOADING
+            ),
+            1,
+        )
         updated = await self.cache.get(
             url,
             media_format=MediaFormat.VIDEO,
@@ -159,6 +182,89 @@ class TestCacheFallback(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(updated)
         assert updated is not None
         self.assertEqual(updated.file_id, "NEW_FRESH_FILE_ID")
+
+    async def test_saved_private_format_and_quality_send_automatically(self) -> None:
+        store = UserSettingsStore(Path(self.temp_dir.name) / "data" / "user_settings.db")
+        await store.set_format(42, MediaFormat.VIDEO)
+        await store.set_quality(42, VideoQualityPolicy.BALANCED)
+        context = MagicMock()
+        context.application.bot_data = {
+            "settings": self.settings,
+            "media_cache": self.cache,
+            "user_settings": store,
+        }
+        update = MagicMock()
+        update.effective_user.id = 42
+        update.effective_message.text = "https://youtu.be/example1234"
+        update.effective_message.chat_id = 42
+        status = MagicMock()
+        update.effective_message.reply_text = AsyncMock(return_value=status)
+
+        with patch(
+            "telegram_share_bot.handlers._run_direct_download", new=AsyncMock()
+        ) as run_download:
+            await url_message(update, context)
+
+        run_download.assert_awaited_once()
+        self.assertEqual(run_download.await_args.kwargs["media_format"], MediaFormat.VIDEO)
+        self.assertEqual(
+            run_download.await_args.kwargs["quality_policy"], VideoQualityPolicy.BALANCED
+        )
+        self.assertEqual(run_download.await_args.kwargs["status_message"], status)
+        update.effective_message.reply_text.assert_awaited_once_with(strings.DIRECT_PREPARING)
+
+    async def test_clip_link_keeps_clip_and_full_choice_with_saved_quality(self) -> None:
+        store = UserSettingsStore(Path(self.temp_dir.name) / "data" / "clip_settings.db")
+        await store.set_quality(42, VideoQualityPolicy.BALANCED)
+        context = MagicMock()
+        context.application.bot_data = {
+            "settings": self.settings,
+            "media_cache": self.cache,
+            "user_settings": store,
+        }
+        update = MagicMock()
+        update.effective_user.id = 42
+        update.effective_message.text = "https://youtu.be/example1234?t=60 30"
+        update.effective_message.chat_id = 42
+        update.effective_message.reply_text = AsyncMock()
+
+        with patch(
+            "telegram_share_bot.handlers._run_direct_download", new=AsyncMock()
+        ) as run_download:
+            await url_message(update, context)
+
+        run_download.assert_not_awaited()
+        markup = update.effective_message.reply_text.await_args.kwargs["reply_markup"]
+        self.assertIn("clip-balanced:", markup.inline_keyboard[0][0].callback_data)
+        self.assertIn("full-balanced:", markup.inline_keyboard[1][0].callback_data)
+        self.assertEqual(len(markup.inline_keyboard), 2)
+
+    async def test_private_choices_offer_only_saved_video_quality(self) -> None:
+        for quality, video_prefix, clip_prefix, full_prefix in (
+            (VideoQualityPolicy.AUTO, "video:", "clip:", "full:"),
+            (VideoQualityPolicy.BEST, "video-best:", "clip-best:", "full-best:"),
+            (
+                VideoQualityPolicy.BALANCED,
+                "video-balanced:",
+                "clip-balanced:",
+                "full-balanced:",
+            ),
+        ):
+            with self.subTest(quality=quality):
+                plain = _format_choice_keyboard("id", quality).inline_keyboard
+                self.assertEqual(len(plain), 1)
+                self.assertEqual(len(plain[0]), 2)
+                self.assertEqual(plain[0][0].callback_data, f"{video_prefix}id")
+                self.assertEqual(plain[0][1].callback_data, "audio:id")
+
+                clip = _clip_choice_keyboard("id", TimeRange(60, 120), quality).inline_keyboard
+                self.assertEqual(len(clip), 2)
+                self.assertEqual(clip[0][0].callback_data, f"{clip_prefix}id")
+                self.assertEqual(clip[1][0].callback_data, f"{full_prefix}id")
+                self.assertEqual(clip[0][1].callback_data, "clipaudio:id")
+                self.assertEqual(clip[1][1].callback_data, "fullaudio:id")
+                self.assertIn(quality.name.title(), clip[0][0].text)
+                self.assertIn(quality.name.title(), clip[1][0].text)
 
     async def test_private_quality_buttons_pass_the_selected_policy(self) -> None:
         context = MagicMock()
@@ -173,9 +279,7 @@ class TestCacheFallback(unittest.IsolatedAsyncioTestCase):
             with self.subTest(prefix=prefix):
                 choice_id = prefix
                 context.application.bot_data["pending_clip_choice"] = {
-                    choice_id: PendingClipChoice(
-                        "https://youtu.be/example1234", None, None, 42
-                    )
+                    choice_id: PendingClipChoice("https://youtu.be/example1234", None, None, 42)
                 }
                 update = MagicMock()
                 update.callback_query.from_user = MagicMock(id=42)
@@ -187,6 +291,32 @@ class TestCacheFallback(unittest.IsolatedAsyncioTestCase):
                 ) as run_download:
                     await direct_format_callback(update, context)
                 self.assertEqual(run_download.await_args.kwargs["quality_policy"], expected)
+                status.edit_text.assert_not_awaited()
+
+    async def test_clip_choice_does_not_repeat_download_status(self) -> None:
+        context = MagicMock()
+        context.application.bot_data = {"settings": self.settings}
+        context.application.bot_data["pending_clip_choice"] = {
+            "clip-id": PendingClipChoice(
+                "https://youtu.be/example1234", None, TimeRange(60, 120), 42
+            )
+        }
+        status = MagicMock(spec=__import__("telegram").Message)
+        status.edit_text = AsyncMock()
+        update = MagicMock()
+        update.callback_query.from_user = MagicMock(id=42)
+        update.callback_query.data = "clip:clip-id"
+        update.callback_query.message = status
+        update.callback_query.answer = AsyncMock()
+
+        with patch(
+            "telegram_share_bot.handlers._run_direct_download", new=AsyncMock()
+        ) as run_download:
+            await clip_choice_callback(update, context)
+
+        run_download.assert_awaited_once()
+        self.assertEqual(run_download.await_args.kwargs["time_range"], TimeRange(60, 120))
+        status.edit_text.assert_not_awaited()
 
     async def test_video_command_accepts_best_and_balanced_before_link(self) -> None:
         context = MagicMock()
@@ -437,9 +567,7 @@ class TestCacheFallback(unittest.IsolatedAsyncioTestCase):
         context = MagicMock()
         context.application.bot_data = {"settings": self.settings}
         ok_msg = MagicMock(video=MagicMock(file_id="OK_AFTER_RETRY"))
-        context.bot.send_video = AsyncMock(
-            side_effect=[NetworkError("httpx.ReadError: "), ok_msg]
-        )
+        context.bot.send_video = AsyncMock(side_effect=[NetworkError("httpx.ReadError: "), ok_msg])
 
         with patch("telegram_share_bot.handlers.asyncio.sleep", AsyncMock()):
             result = await _send_media_to_chat(

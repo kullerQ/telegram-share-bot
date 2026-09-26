@@ -155,7 +155,7 @@ class TestMediaCache(unittest.IsolatedAsyncioTestCase):
             assert cached is not None
             self.assertEqual(cached.file_id, file_id)
 
-    async def test_legacy_entry_is_reused_only_for_default_video(self) -> None:
+    async def test_unverified_legacy_video_is_not_reused(self) -> None:
         from telegram_share_bot.cache import _legacy_cache_key
 
         url = "https://www.youtube.com/watch?v=legacy12345"
@@ -171,9 +171,7 @@ class TestMediaCache(unittest.IsolatedAsyncioTestCase):
         )
 
         video = await self.cache.get(url, media_format=MediaFormat.VIDEO)
-        self.assertIsNotNone(video)
-        assert video is not None
-        self.assertEqual(video.file_id, "legacy-video-id")
+        self.assertIsNone(video)
         self.assertIsNone(await self.cache.get(url, media_format=MediaFormat.AUDIO))
         self.assertIsNone(
             await self.cache.get(url, media_format=MediaFormat.VIDEO, quality_policy="720p")
@@ -210,8 +208,14 @@ class TestMediaCache(unittest.IsolatedAsyncioTestCase):
         assert chosen is not None
         self.assertEqual(chosen.file_id, "best")
         await self.cache.set(
-            url, "auto-higher", MediaKind.VIDEO, "Auto", 60,
-            time_range=clip, quality_policy="auto-best", video_height=1440,
+            url,
+            "auto-higher",
+            MediaKind.VIDEO,
+            "Auto",
+            60,
+            time_range=clip,
+            quality_policy="auto-best",
+            video_height=1440,
         )
         higher = await self.cache.get_preferred_video(url, time_range=clip)
         self.assertIsNotNone(higher)
@@ -248,6 +252,43 @@ class TestMediaCache(unittest.IsolatedAsyncioTestCase):
         assert chosen is not None
         self.assertEqual(chosen.file_id, "balanced")
         self.assertIsNone(await self.cache.get_preferred_video(url, quality_policy="1080p"))
+
+    async def test_balanced_prefers_higher_known_cached_video(self) -> None:
+        url = "https://www.youtube.com/watch?v=balanced-cache"
+        await self.cache.set(
+            url,
+            "balanced-id",
+            MediaKind.VIDEO,
+            "Balanced",
+            30,
+            quality_policy="balanced",
+            video_height=720,
+        )
+        await self.cache.set(
+            url,
+            "best-id",
+            MediaKind.VIDEO,
+            "Best",
+            30,
+            quality_policy="source-best",
+            video_height=1080,
+        )
+        cached = await self.cache.get_preferred_video(url, quality_policy="balanced")
+        self.assertIsNotNone(cached)
+        assert cached is not None
+        self.assertEqual(cached.file_id, "best-id")
+
+    async def test_balanced_does_not_infer_quality_from_other_policy(self) -> None:
+        url = "https://www.youtube.com/watch?v=unknown-cache-quality"
+        await self.cache.set(
+            url,
+            "best-without-height",
+            MediaKind.VIDEO,
+            "Best",
+            30,
+            quality_policy="source-best",
+        )
+        self.assertIsNone(await self.cache.get_preferred_video(url, quality_policy="balanced"))
         await self.cache.set(
             url,
             "best-high",
@@ -286,6 +327,8 @@ class TestMediaCache(unittest.IsolatedAsyncioTestCase):
             )
         self.cache._init_db()
         cached = await self.cache.get("https://example.com/video", quality_policy="auto-best")
+        self.assertIsNone(cached)
+        cached = self.cache._get_sync("https://example.com/video#format=video&quality=auto-best")
         self.assertIsNotNone(cached)
         assert cached is not None
         self.assertEqual(cached.file_id, "old")
