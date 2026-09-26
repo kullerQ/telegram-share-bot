@@ -14,8 +14,7 @@ from telegram_share_bot.downloader import MediaFormat, VideoQualityPolicy
 
 class CaptionPreference(str, Enum):
     MEDIA_TITLE = "media-title"
-    ORIGINAL_LINK = "original-link"
-    NONE = "none"
+    CUSTOM = "custom"
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,7 +57,9 @@ class UserSettingsStore:
             return UserSharingSettings()
         try:
             quality = VideoQualityPolicy(row[0])
-            caption = CaptionPreference(row[1]) if row[1] is not None else None
+            # Preserve preferences saved while this branch was being tested.
+            legacy_caption = {"original-link": "media-title", "none": "custom"}.get(row[1], row[1])
+            caption = CaptionPreference(legacy_caption) if legacy_caption is not None else None
             media_format = MediaFormat(row[2]) if row[2] is not None else None
         except ValueError:
             # Recover safely from manually edited or older malformed rows.
@@ -132,3 +133,12 @@ class UserSettingsStore:
             default_format=media_format,
             reset_format=media_format is None,
         )
+
+    def _reset_sync(self, user_id: int) -> UserSharingSettings:
+        with closing(sqlite3.connect(self.db_path, timeout=10.0)) as conn:
+            with conn:
+                conn.execute("DELETE FROM user_settings WHERE user_id = ?", (user_id,))
+        return UserSharingSettings()
+
+    async def reset(self, user_id: int) -> UserSharingSettings:
+        return await asyncio.to_thread(self._reset_sync, user_id)

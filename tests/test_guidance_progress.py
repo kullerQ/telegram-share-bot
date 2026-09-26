@@ -8,6 +8,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from telegram.constants import ParseMode
+
 from telegram_share_bot import strings
 from telegram_share_bot.cache import MediaCache
 from telegram_share_bot.config import Settings
@@ -57,26 +59,38 @@ class TestBotGuidance(unittest.IsolatedAsyncioTestCase):
         await start_command(self.update, self.context)
 
         args = self.message.reply_text.await_args
-        self.assertIn("🎬 Share Bot", args.args[0])
+        self.assertIn("🎬 <b>Share Bot</b>", args.args[0])
         self.assertIn("@share_bot", args.args[0])
-        self.assertIn("YouTube · TikTok · Instagram · X", args.args[0])
+        self.assertIn("YouTube, TikTok, Instagram, X, Reddit, or Facebook", args.args[0])
         self.assertIn("TikTok photo slideshows", args.args[0])
         self.assertIn("YouTube clips or full videos", args.args[0])
         self.assertIn("/help", args.args[0])
+        self.assertIn("<code>@share_bot &lt;link&gt;</code>", args.args[0])
+        self.assertEqual(args.kwargs["parse_mode"], ParseMode.HTML)
         self.assertNotIn("1:20-2:05", args.args[0])
         self.assertNotIn("reply_markup", args.kwargs)
 
-    async def test_help_has_scannable_instructions_and_actual_caption_mode(self) -> None:
+    async def test_start_escapes_the_bot_name_for_html_formatting(self) -> None:
+        self.context.bot.first_name = "Share <Bot> & Friends"
+        await start_command(self.update, self.context)
+
+        text = self.message.reply_text.await_args.args[0]
+        self.assertIn("<b>Share &lt;Bot&gt; &amp; Friends</b>", text)
+
+    async def test_help_has_scannable_instructions_and_formatted_examples(self) -> None:
         await help_command(self.update, self.context)
 
         args = self.message.reply_text.await_args
         text = args.args[0]
-        self.assertIn("📖 How to share", text)
+        self.assertIn("📖 <b>How to share</b>", text)
         self.assertIn("@share_bot", text)
         self.assertIn("1:20-2:05", text)
         self.assertIn("full video", text)
-        self.assertIn(strings.HELP_CAPTION_MEDIA, text)
-        self.assertIn("multi-item collections are not supported", text)
+        self.assertIn("<code>/video &lt;link&gt;</code>", text)
+        self.assertIn("<code>/audio &lt;link&gt;</code>", text)
+        self.assertIn("Choose Media title or Custom in /settings", text)
+        self.assertNotIn("720p", text)
+        self.assertEqual(args.kwargs["parse_mode"], ParseMode.HTML)
         self.assertNotIn("reply_markup", args.kwargs)
 
 
@@ -260,9 +274,7 @@ class TestMediaProgress(unittest.IsolatedAsyncioTestCase):
             ),
             patch(
                 "telegram_share_bot.handlers._upload_for_file_id",
-                new=AsyncMock(
-                    return_value=("FILE_ID", "Example video", MediaKind.VIDEO, 1080)
-                ),
+                new=AsyncMock(return_value=("FILE_ID", "Example video", MediaKind.VIDEO, 1080)),
             ),
         ):
             await _prepare_inline_media(
@@ -274,8 +286,7 @@ class TestMediaProgress(unittest.IsolatedAsyncioTestCase):
             )
 
         states = [
-            call.kwargs["text"]
-            for call in self.context.bot.edit_message_text.await_args_list
+            call.kwargs["text"] for call in self.context.bot.edit_message_text.await_args_list
         ]
         self.assertEqual(
             states,
@@ -471,8 +482,7 @@ class TestMediaProgress(unittest.IsolatedAsyncioTestCase):
             )
 
         states = [
-            call.kwargs["text"]
-            for call in self.context.bot.edit_message_text.await_args_list
+            call.kwargs["text"] for call in self.context.bot.edit_message_text.await_args_list
         ]
         display_url = "https://www.youtube.com/watch?v=GKq9nKZpmu0"
         self.assertEqual(

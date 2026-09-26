@@ -9,6 +9,7 @@ import time
 from collections import deque
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
+from html import escape
 from pathlib import Path
 from typing import Any, cast
 from urllib.parse import urlsplit
@@ -25,9 +26,10 @@ from telegram import (
     InputMediaVideo,
     InputTextMessageContent,
     Message,
+    MessageEntity,
     Update,
 )
-from telegram.constants import ChatType
+from telegram.constants import ChatType, ParseMode
 from telegram.error import BadRequest, NetworkError, TelegramError, TimedOut
 from telegram.ext import ContextTypes
 
@@ -127,6 +129,12 @@ class PendingClipChoice:
     owner_user_id: int | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class _RenderedCaption:
+    text: str | None
+    entities: tuple[MessageEntity, ...] = ()
+
+
 def _settings(context: ContextTypes.DEFAULT_TYPE) -> Settings:
     settings = context.application.bot_data.get("settings")
     if not isinstance(settings, Settings):
@@ -187,25 +195,28 @@ def _preference_quality_label(policy: VideoQualityPolicy) -> str:
     }[policy]
 
 
-def _preference_caption_label(preference: CaptionPreference | None, settings: Settings) -> str:
-    if preference is None:
-        mode = {
-            CaptionMode.MEDIA: "Media title",
-            CaptionMode.CUSTOM: "Custom caption",
-            CaptionMode.OFF: "None",
-        }[settings.caption_mode]
-        return f"Bot default · {mode}"
-    return {
-        CaptionPreference.MEDIA_TITLE: "Media title",
-        CaptionPreference.ORIGINAL_LINK: "Original link",
-        CaptionPreference.NONE: "None",
-    }[preference]
+def _selected_caption(
+    preferences: UserSharingSettings, settings: Settings
+) -> CaptionPreference | None:
+    if preferences.caption is not None:
+        return preferences.caption
+    if settings.caption_mode is CaptionMode.MEDIA:
+        return CaptionPreference.MEDIA_TITLE
+    if settings.caption_mode is CaptionMode.CUSTOM:
+        return CaptionPreference.CUSTOM
+    return None
 
 
-def _preference_format_label(media_format: MediaFormat | None) -> str:
-    if media_format is None:
-        return "Not specified"
-    return "Video" if media_format is MediaFormat.VIDEO else "Audio"
+def _linked_title_caption(media_title: str, original_url: str) -> _RenderedCaption:
+    title = sanitize_caption(media_title)
+    if title is None:
+        return _RenderedCaption(None)
+    if not original_url:
+        return _RenderedCaption(title)
+    # Telegram entity offsets and lengths count UTF-16 code units.
+    title_length = len(title.encode("utf-16-le")) // 2
+    link = MessageEntity(MessageEntity.TEXT_LINK, 0, title_length, url=original_url)
+    return _RenderedCaption(title, (link,))
 
 
 def _resolve_user_caption(
@@ -215,37 +226,86 @@ def _resolve_user_caption(
     media_title: str,
     original_url: str,
     custom_caption: str | None,
-) -> str | None:
+) -> _RenderedCaption:
     if preferences.caption is None:
-        return resolve_caption(
-            settings.caption_mode,
-            media_title=media_title,
-            custom_caption=custom_caption,
-        )
+        if settings.caption_mode is CaptionMode.MEDIA:
+            return _linked_title_caption(media_title, original_url)
+        if settings.caption_mode is CaptionMode.CUSTOM:
+            return _RenderedCaption(
+                sanitize_caption(custom_caption) if custom_caption is not None else None
+            )
+        return _RenderedCaption(None)
     if custom_caption is not None:
-        return sanitize_caption(custom_caption)
+        return _RenderedCaption(sanitize_caption(custom_caption))
     if preferences.caption is CaptionPreference.MEDIA_TITLE:
-        return sanitize_caption(media_title)
-    if preferences.caption is CaptionPreference.ORIGINAL_LINK:
-        return sanitize_caption(original_url)
-    return None
+        return _linked_title_caption(media_title, original_url)
+    return _RenderedCaption(None)
 
 
 def _settings_text(preferences: UserSharingSettings, settings: Settings) -> str:
+    def option(selected: bool, label: str, description: str) -> str:
+        marker = "✅ " if selected else "• "
+        styled = f"<b>{label}</b>" if selected else label
+        return f"{marker}{styled} — {description}"
+
+    caption = _selected_caption(preferences, settings)
     return strings.SETTINGS_MESSAGE.format(
-        quality=_preference_quality_label(preferences.video_quality),
-        caption=_preference_caption_label(preferences.caption, settings),
-        media_format=_preference_format_label(preferences.default_format),
+        quality_auto=option(
+            preferences.video_quality is VideoQualityPolicy.AUTO,
+            "Auto",
+            "adapts to the link and download speed",
+        ),
+        quality_best=option(
+            preferences.video_quality is VideoQualityPolicy.BEST,
+            "Best",
+            "tries the highest quality available",
+        ),
+        quality_balanced=option(
+            preferences.video_quality is VideoQualityPolicy.BALANCED,
+            "Balanced",
+            "good picture with a smaller download",
+        ),
+        caption_custom=option(
+            caption is CaptionPreference.CUSTOM,
+            "Custom",
+            "uses text you add after a link",
+        ),
+        caption_title=option(
+            caption is CaptionPreference.MEDIA_TITLE,
+            "Media title",
+            "a clickable title linked to the original video",
+        ),
+        caption_note=(
+            "\n<i>Captions are off until you choose an option.</i>" if caption is None else ""
+        ),
+        format_unspecified=option(
+            preferences.default_format is None,
+            "Not specified",
+            "choose Video or Audio each time",
+        ),
+        format_video=option(
+            preferences.default_format is MediaFormat.VIDEO,
+            "Video",
+            "send video automatically",
+        ),
+        format_audio=option(
+            preferences.default_format is MediaFormat.AUDIO,
+            "Audio",
+            "send audio automatically",
+        ),
     )
 
 
-def _settings_keyboard(user_id: int, preferences: UserSharingSettings) -> InlineKeyboardMarkup:
+def _settings_keyboard(
+    user_id: int, preferences: UserSharingSettings, settings: Settings
+) -> InlineKeyboardMarkup:
     def choice(field: str, value: str, label: str, selected: bool) -> InlineKeyboardButton:
-        marker = "✓ " if selected else ""
+        marker = "✅ " if selected else ""
         return InlineKeyboardButton(
             f"{marker}{label}", callback_data=f"settings:{user_id}:{field}:{value}"
         )
 
+    caption = _selected_caption(preferences, settings)
     return InlineKeyboardMarkup(
         [
             [
@@ -271,31 +331,25 @@ def _settings_keyboard(user_id: int, preferences: UserSharingSettings) -> Inline
             [
                 choice(
                     "caption",
+                    CaptionPreference.CUSTOM.value,
+                    "Custom",
+                    caption is CaptionPreference.CUSTOM,
+                ),
+                choice(
+                    "caption",
                     CaptionPreference.MEDIA_TITLE.value,
                     "Media title",
-                    preferences.caption is CaptionPreference.MEDIA_TITLE,
-                ),
-                choice(
-                    "caption",
-                    CaptionPreference.ORIGINAL_LINK.value,
-                    "Original link",
-                    preferences.caption is CaptionPreference.ORIGINAL_LINK,
-                ),
-                choice(
-                    "caption",
-                    CaptionPreference.NONE.value,
-                    "None",
-                    preferences.caption is CaptionPreference.NONE,
+                    caption is CaptionPreference.MEDIA_TITLE,
                 ),
             ],
-            [choice("caption", "default", "Bot default", preferences.caption is None)],
             [
-                choice("format", "video", "Video", preferences.default_format is MediaFormat.VIDEO),
-                choice("format", "audio", "Audio", preferences.default_format is MediaFormat.AUDIO),
                 choice(
                     "format", "unspecified", "Not specified", preferences.default_format is None
                 ),
+                choice("format", "video", "Video", preferences.default_format is MediaFormat.VIDEO),
+                choice("format", "audio", "Audio", preferences.default_format is MediaFormat.AUDIO),
             ],
+            [choice("all", "reset", "Reset to default", False)],
         ]
     )
 
@@ -626,7 +680,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     bot_name = context.bot.first_name or strings.BOT_DISPLAY_NAME
     bot_username = context.bot.username or strings.FALLBACK_BOT_USERNAME
     await update.effective_message.reply_text(
-        strings.START_MESSAGE.format(bot_name=bot_name, bot_username=bot_username),
+        strings.START_MESSAGE.format(bot_name=escape(bot_name), bot_username=escape(bot_username)),
+        parse_mode=ParseMode.HTML,
     )
 
 
@@ -640,15 +695,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
 
     bot_username = context.bot.username or strings.FALLBACK_BOT_USERNAME
-    caption_mode = _settings(context).caption_mode
-    if caption_mode is CaptionMode.CUSTOM:
-        caption_help = strings.HELP_CAPTION_CUSTOM
-    elif caption_mode is CaptionMode.OFF:
-        caption_help = strings.HELP_CAPTION_OFF
-    else:
-        caption_help = strings.HELP_CAPTION_MEDIA
     await message.reply_text(
-        strings.HELP_MESSAGE.format(bot_username=bot_username, caption_help=caption_help),
+        strings.HELP_MESSAGE.format(bot_username=escape(bot_username)),
+        parse_mode=ParseMode.HTML,
     )
 
 
@@ -669,7 +718,8 @@ async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     assert user_id is not None
     await message.reply_text(
         _settings_text(preferences, _settings(context)),
-        reply_markup=_settings_keyboard(user_id, preferences),
+        reply_markup=_settings_keyboard(user_id, preferences, _settings(context)),
+        parse_mode=ParseMode.HTML,
     )
 
 
@@ -700,15 +750,12 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             return
         preferences = await store.set_quality(user_id, selected_quality)
     elif field == "caption":
-        if value == "default":
-            preferences = await store.set_caption(user_id, None)
-        else:
-            try:
-                selected_caption = CaptionPreference(value)
-            except ValueError:
-                await query.answer(text=strings.SETTINGS_INVALID_CHOICE, show_alert=True)
-                return
-            preferences = await store.set_caption(user_id, selected_caption)
+        try:
+            selected_caption = CaptionPreference(value)
+        except ValueError:
+            await query.answer(text=strings.SETTINGS_INVALID_CHOICE, show_alert=True)
+            return
+        preferences = await store.set_caption(user_id, selected_caption)
     elif field == "format":
         if value == "unspecified":
             preferences = await store.set_format(user_id, None)
@@ -717,6 +764,8 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         else:
             await query.answer(text=strings.SETTINGS_INVALID_CHOICE, show_alert=True)
             return
+    elif field == "all" and value == "reset":
+        preferences = await store.reset(user_id)
     else:
         await query.answer(text=strings.SETTINGS_INVALID_CHOICE, show_alert=True)
         return
@@ -725,7 +774,8 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     try:
         await query.edit_message_text(
             _settings_text(preferences, _settings(context)),
-            reply_markup=_settings_keyboard(user_id, preferences),
+            reply_markup=_settings_keyboard(user_id, preferences, _settings(context)),
+            parse_mode=ParseMode.HTML,
         )
     except BadRequest as exc:
         if "message is not modified" not in str(exc).lower():
@@ -2113,14 +2163,23 @@ def _input_media(
     title: str,
     kind: MediaKind,
     *,
-    caption: str | None,
+    caption: _RenderedCaption,
 ) -> InputMediaVideo | InputMediaAudio | InputMediaDocument:
-    # Captions are always plain text (no ParseMode) to avoid injection.
+    # Text stays literal; only the media title gets a link entity.
     if kind is MediaKind.VIDEO:
-        return InputMediaVideo(media=file_id, caption=caption)
+        return InputMediaVideo(
+            media=file_id, caption=caption.text, caption_entities=caption.entities or None
+        )
     if kind is MediaKind.AUDIO:
-        return InputMediaAudio(media=file_id, caption=caption, title=title)
-    return InputMediaDocument(media=file_id, caption=caption)
+        return InputMediaAudio(
+            media=file_id,
+            caption=caption.text,
+            caption_entities=caption.entities or None,
+            title=title,
+        )
+    return InputMediaDocument(
+        media=file_id, caption=caption.text, caption_entities=caption.entities or None
+    )
 
 
 def _storage_upload_caption(settings: Settings, media_title: str) -> str | None:
@@ -2232,7 +2291,7 @@ async def _send_media_to_chat(
     )
     path = media.path
     if force_storage_caption:
-        caption = _storage_upload_caption(effective_settings, media.title)
+        caption = _RenderedCaption(_storage_upload_caption(effective_settings, media.title))
     else:
         if preferences is None:
             preferences = UserSharingSettings()
@@ -2253,7 +2312,8 @@ async def _send_media_to_chat(
                     return await context.bot.send_video(
                         chat_id=chat_id,
                         video=upload,
-                        caption=caption,
+                        caption=caption.text,
+                        caption_entities=caption.entities or None,
                         duration=media.duration,
                         supports_streaming=True,
                         disable_notification=True,
@@ -2264,7 +2324,8 @@ async def _send_media_to_chat(
                     return await context.bot.send_audio(
                         chat_id=chat_id,
                         audio=upload,
-                        caption=caption,
+                        caption=caption.text,
+                        caption_entities=caption.entities or None,
                         duration=media.duration,
                         title=media.title,
                         disable_notification=True,
@@ -2274,7 +2335,8 @@ async def _send_media_to_chat(
                 return await context.bot.send_document(
                     chat_id=chat_id,
                     document=upload,
-                    caption=caption,
+                    caption=caption.text,
+                    caption_entities=caption.entities or None,
                     disable_notification=True,
                     read_timeout=timeout,
                     write_timeout=timeout,
@@ -2320,7 +2382,8 @@ async def _send_cached_media_to_chat(
         return await context.bot.send_video(
             chat_id=chat_id,
             video=cached.file_id,
-            caption=caption,
+            caption=caption.text,
+            caption_entities=caption.entities or None,
             duration=cached.duration,
             supports_streaming=True,
             disable_notification=True,
@@ -2329,7 +2392,8 @@ async def _send_cached_media_to_chat(
         return await context.bot.send_audio(
             chat_id=chat_id,
             audio=cached.file_id,
-            caption=caption,
+            caption=caption.text,
+            caption_entities=caption.entities or None,
             duration=cached.duration,
             title=cached.title,
             disable_notification=True,
@@ -2337,7 +2401,8 @@ async def _send_cached_media_to_chat(
     return await context.bot.send_document(
         chat_id=chat_id,
         document=cached.file_id,
-        caption=caption,
+        caption=caption.text,
+        caption_entities=caption.entities or None,
         disable_notification=True,
     )
 
