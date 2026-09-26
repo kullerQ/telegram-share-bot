@@ -322,11 +322,11 @@ class TestMediaProgress(unittest.IsolatedAsyncioTestCase):
         clip_choice, audio_clip, full_choice, full_audio = query.answer.await_args.kwargs["results"]
         self.assertIn("Send video clip 2:30-3:30", clip_choice.title)
         self.assertIn(
-            "YouTube · Video · Q: Auto · 2:30-3:30 · Cached",
+            "YouTube · Video · Q: Auto · Cached",
             clip_choice.description,
         )
         self.assertIn("Send audio clip 2:30-3:30", audio_clip.title)
-        self.assertIn("YouTube · Audio · 2:30-3:30 · Download", audio_clip.description)
+        self.assertIn("YouTube · Audio · Download", audio_clip.description)
         self.assertIn("Checking clip", clip_choice.input_message_content.message_text)
         self.assertEqual(
             clip_choice.thumbnail_url,
@@ -336,7 +336,7 @@ class TestMediaProgress(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(clip_choice.thumbnail_height, 180)
         self.assertIn("Send full video", full_choice.title)
         self.assertIn(
-            "YouTube · Video · Q: Auto · 6:00 · Cached",
+            "YouTube · Video · Q: Auto · Cached",
             full_choice.description,
         )
         self.assertIn("Send full audio", full_audio.title)
