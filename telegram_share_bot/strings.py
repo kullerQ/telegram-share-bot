@@ -18,6 +18,10 @@ ACCESS_DENIED = "You are not authorized to use this bot."
 INLINE_ACCESS_DENIED_TITLE = "Access denied"
 INLINE_ACCESS_DENIED_DESCRIPTION = "You are not authorized to use this bot."
 RATE_LIMITED = "Too many downloads in progress. Please wait and try again."
+DOWNLOADS_PER_MINUTE_LIMITED = (
+    "You've reached the limit of {limit} download requests per minute. "
+    "Please wait before trying again."
+)
 COOLDOWN_LIMITED = "Please wait a moment before requesting another download."
 INLINE_RATE_LIMITED_TITLE = "Busy"
 INLINE_RATE_LIMITED_DESCRIPTION = "Too many downloads in progress. Please wait."

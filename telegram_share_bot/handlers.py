@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import logging
 import time
+from collections import deque
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any, cast
@@ -79,6 +80,8 @@ _CANCELLED_KEY = "cancelled_inline"
 _USER_DOWNLOADS_KEY = "user_download_counts"
 _USER_DOWNLOADS_LOCK_KEY = "user_download_lock"
 _USER_COOLDOWN_KEY = "user_download_cooldowns"
+_USER_REQUEST_TIMES_KEY = "user_download_request_times"
+_USER_REQUEST_CLEANUP_KEY = "user_download_request_cleanup"
 _EMPTY_KEYBOARD = InlineKeyboardMarkup([])
 
 _MAX_PENDING_INLINE = 1000
@@ -86,6 +89,7 @@ _MAX_PENDING_CLIP = 500
 _MAX_CANCELLED_INLINE = 500
 _UPLOAD_MAX_ATTEMPTS = 3
 _UPLOAD_RETRY_BASE_DELAY_SECONDS = 1.5
+_DOWNLOAD_REQUEST_WINDOW_SECONDS = 60.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -161,21 +165,60 @@ def _user_cooldowns(context: ContextTypes.DEFAULT_TYPE) -> dict[int, float]:
     return cast(dict[int, float], raw)
 
 
+def _user_request_times(
+    context: ContextTypes.DEFAULT_TYPE,
+) -> dict[int, deque[float]]:
+    raw = context.application.bot_data.setdefault(_USER_REQUEST_TIMES_KEY, {})
+    return cast(dict[int, deque[float]], raw)
+
+
 async def _try_acquire_user_download_slot(
     context: ContextTypes.DEFAULT_TYPE, user_id: int | None
 ) -> str | None:
-    """Reserve a per-user download slot.
+    """Apply per-user request and in-flight limits.
 
     Returns None on success, or a user-facing error string on denial.
     ``max_downloads_per_user == 0`` disables the per-user in-flight cap.
+    Requests denied by the cooldown or in-flight cap still count toward the
+    rolling request limit.
     """
     if user_id is None:
         return strings.ACCESS_DENIED
     settings = _settings(context)
     max_per_user = settings.max_downloads_per_user
+    max_per_minute = settings.max_downloads_per_minute
     cooldown = settings.download_cooldown_seconds
     now = time.monotonic()
     async with _user_download_lock(context):
+        if max_per_minute > 0:
+            request_times = _user_request_times(context)
+            last_cleanup = context.application.bot_data.get(
+                _USER_REQUEST_CLEANUP_KEY, now
+            )
+            if now - last_cleanup >= _DOWNLOAD_REQUEST_WINDOW_SECONDS:
+                cutoff = now - _DOWNLOAD_REQUEST_WINDOW_SECONDS
+                for tracked_user_id, tracked_timestamps in tuple(
+                    request_times.items()
+                ):
+                    while tracked_timestamps and tracked_timestamps[0] <= cutoff:
+                        tracked_timestamps.popleft()
+                    if not tracked_timestamps:
+                        request_times.pop(tracked_user_id, None)
+                context.application.bot_data[_USER_REQUEST_CLEANUP_KEY] = now
+
+            timestamps = request_times.get(user_id)
+            if timestamps is None:
+                timestamps = deque()
+                request_times[user_id] = timestamps
+            cutoff = now - _DOWNLOAD_REQUEST_WINDOW_SECONDS
+            while timestamps and timestamps[0] <= cutoff:
+                timestamps.popleft()
+            if len(timestamps) >= max_per_minute:
+                return strings.DOWNLOADS_PER_MINUTE_LIMITED.format(
+                    limit=max_per_minute
+                )
+            timestamps.append(now)
+
         counts = _user_download_counts(context)
         cooldowns = _user_cooldowns(context)
         last_started = cooldowns.get(user_id)

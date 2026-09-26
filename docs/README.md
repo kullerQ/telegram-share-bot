@@ -133,7 +133,8 @@ Tap a Video or Audio result (or a clip / full-length choice). A placeholder appe
 
 - Max file size ≈ 45 MB (Telegram Bot API upload limit is 50 MB). Video quality is adapted to fit this limit rather than capped at one fixed resolution.
 - Download timeout defaults to 90 seconds; source transfers are bounded to twice the output size limit.
-- Global concurrent downloads default to 2; each user may have 1 active request. Set either limit to `0` to disable it. The per-user cooldown defaults to 2 seconds.
+- Global concurrent downloads default to 6; each user may have 3 active requests. Set either limit to `0` to disable it. The per-user cooldown defaults to 2 seconds.
+- Each user may make 10 download requests per rolling 60-second window by default (`MAX_DOWNLOADS_PER_MINUTE`); rejected requests due to cooldown or active-download limits count too. Set it to `0` to disable this rate limit.
 - New full video and audio requests are limited to 30 minutes when source metadata provides a duration (`MAX_MEDIA_DURATION_SECONDS=1800`). Set `0` to disable this limit. Short YouTube clips from longer videos remain available under the 10-minute clip limit. Unknown durations still have the byte and timeout limits.
 - User URLs are limited to YouTube / X / Instagram / TikTok by default (`ALLOWED_MEDIA_HOSTS=*` allows any host).
 - TikTok (including `vm.tiktok.com` / `vt.tiktok.com` short links) needs `curl-cffi` for browser impersonation — it is pinned in `requirements.txt`.

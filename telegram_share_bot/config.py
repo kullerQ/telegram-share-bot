@@ -28,8 +28,9 @@ DEFAULT_MAX_FILE_BYTES = 45 * 1024 * 1024
 DEFAULT_DOWNLOAD_TIMEOUT_SECONDS = 90
 DEFAULT_UPLOAD_TIMEOUT_SECONDS = 180
 DEFAULT_DELETE_STORAGE_MESSAGES = True
-DEFAULT_MAX_CONCURRENT_DOWNLOADS = 2
-DEFAULT_MAX_DOWNLOADS_PER_USER = 1
+DEFAULT_MAX_CONCURRENT_DOWNLOADS = 6
+DEFAULT_MAX_DOWNLOADS_PER_USER = 3
+DEFAULT_MAX_DOWNLOADS_PER_MINUTE = 10
 DEFAULT_MAX_MEDIA_DURATION_SECONDS = 30 * 60
 DEFAULT_DOWNLOAD_COOLDOWN_SECONDS = 2
 DEFAULT_ALLOW_PUBLIC = False
@@ -98,6 +99,7 @@ class Settings:
     upload_timeout_seconds: int = DEFAULT_UPLOAD_TIMEOUT_SECONDS
     max_concurrent_downloads: int = DEFAULT_MAX_CONCURRENT_DOWNLOADS
     max_downloads_per_user: int = DEFAULT_MAX_DOWNLOADS_PER_USER
+    max_downloads_per_minute: int = DEFAULT_MAX_DOWNLOADS_PER_MINUTE
     max_media_duration_seconds: int = DEFAULT_MAX_MEDIA_DURATION_SECONDS
     download_cooldown_seconds: int = DEFAULT_DOWNLOAD_COOLDOWN_SECONDS
     allowed_user_ids: frozenset[int] = frozenset()
@@ -424,6 +426,15 @@ def load_settings(env_file: Path = _ENV_PATH) -> Settings:
         env_file=env_file,
     )
 
+    max_downloads_per_minute = parse_int(
+        "MAX_DOWNLOADS_PER_MINUTE",
+        os.getenv("MAX_DOWNLOADS_PER_MINUTE"),
+        default=DEFAULT_MAX_DOWNLOADS_PER_MINUTE,
+        min_value=0,
+        max_value=1000,
+        env_file=env_file,
+    )
+
     max_media_duration_seconds = parse_int(
         "MAX_MEDIA_DURATION_SECONDS",
         os.getenv("MAX_MEDIA_DURATION_SECONDS"),
@@ -538,6 +549,7 @@ def load_settings(env_file: Path = _ENV_PATH) -> Settings:
         upload_timeout_seconds=upload_timeout,
         max_concurrent_downloads=max_concurrent_downloads,
         max_downloads_per_user=max_downloads_per_user,
+        max_downloads_per_minute=max_downloads_per_minute,
         max_media_duration_seconds=max_media_duration_seconds,
         download_cooldown_seconds=download_cooldown_seconds,
         allowed_user_ids=allowed_user_ids,
