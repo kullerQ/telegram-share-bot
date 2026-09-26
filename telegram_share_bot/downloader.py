@@ -433,6 +433,40 @@ def _format_bytes(
     return None
 
 
+def _video_quality_label(format_info: dict[str, Any]) -> str:
+    """Format known progressive video quality details for safe operational logs."""
+    height = format_info.get("height")
+    fps = format_info.get("fps")
+    video_codec = format_info.get("vcodec")
+    height_label = (
+        f"{int(height)}p"
+        if isinstance(height, (int, float)) and height > 0
+        else "unknown-resolution"
+    )
+    fps_label = (
+        f"{float(fps):g}fps"
+        if isinstance(fps, (int, float)) and fps > 0
+        else "unknown-fps"
+    )
+    codec_label = "unknown-codec"
+    if isinstance(video_codec, str):
+        codec_prefix = re.split(r"[.\s]", video_codec, maxsplit=1)[0]
+        if re.fullmatch(r"[A-Za-z0-9_-]+", codec_prefix):
+            codec_label = codec_prefix
+    return f"{height_label} {fps_label} {codec_label}"
+
+
+def _video_quality_for_selector(info: dict[str, Any], selector: str) -> str:
+    """Return resolution, frame rate, and codec for the selector's video stream."""
+    formats = info.get("formats")
+    video_format_id = selector.split("+", maxsplit=1)[0]
+    if isinstance(formats, list):
+        for item in formats:
+            if isinstance(item, dict) and item.get("format_id") == video_format_id:
+                return _video_quality_label(item)
+    return "unknown-resolution unknown-fps unknown-codec"
+
+
 def _format_candidates(
     info: dict[str, Any],
     *,
@@ -1228,7 +1262,11 @@ def _download_youtube_hls_clip(
             for item in videos:
                 video_path.unlink(missing_ok=True)
                 format_id = str(item.get("format_id") or "unknown")
-                logger.info("Clip HLS video transfer started: format=%s", format_id)
+                logger.info(
+                    "Clip HLS video transfer started: format=%s quality=%s",
+                    format_id,
+                    _video_quality_label(item),
+                )
                 try:
                     stage_timeout = min(30, max(1, int(deadline - time.monotonic())))
                     _download_hls_clip_stream(
@@ -1769,7 +1807,7 @@ def _download_sync(
                     source_bytes.clear()
                     source_too_large.clear()
                     transfer_started_at = time.monotonic()
-                    if effective_range is not None:
+                    if media_format is MediaFormat.VIDEO:
                         estimate = next(
                             (
                                 candidate.estimated_size
@@ -1778,6 +1816,17 @@ def _download_sync(
                             ),
                             None,
                         )
+                        logger.info(
+                            "Video format attempt started: "
+                            "format=%s quality=%s estimated_bytes=%s range=%s",
+                            selector,
+                            _video_quality_for_selector(info, selector),
+                            estimate if estimate is not None else "unknown",
+                            format_time_range(effective_range)
+                            if effective_range is not None
+                            else "full",
+                        )
+                    if effective_range is not None:
                         logger.info(
                             "Clip transfer started: format=%s estimated_bytes=%s range=%s",
                             selector,

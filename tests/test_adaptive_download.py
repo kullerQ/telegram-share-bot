@@ -190,16 +190,24 @@ class TestYoutubeHlsClip(unittest.TestCase):
                     side_effect=fake_ffmpeg,
                 ),
             ):
-                media = _download_sync(
-                    "https://youtu.be/example1234",
-                    Path(tmp),
-                    max_file_bytes=45 * 1024 * 1024,
-                    timeout_seconds=90,
-                    time_range=TimeRange(60, 120),
-                )
+                with self.assertLogs("telegram_share_bot.downloader", level="INFO") as logs:
+                    media = _download_sync(
+                        "https://youtu.be/example1234",
+                        Path(tmp),
+                        max_file_bytes=45 * 1024 * 1024,
+                        timeout_seconds=90,
+                        time_range=TimeRange(60, 120),
+                    )
             self.assertEqual(media.kind, MediaKind.VIDEO)
             self.assertEqual(media.duration, 60)
             self.assertTrue(media.path.exists())
+            self.assertTrue(
+                any(
+                    "Clip HLS video transfer started: format=311 quality=720p 60fps avc1"
+                    in line
+                    for line in logs.output
+                )
+            )
             self.assertEqual(len(commands), 3)
             self.assertIn("0:v:0", commands[0])
             self.assertIn("0:a:0", commands[1])
@@ -585,16 +593,19 @@ class TestMeasuredFallback(unittest.TestCase):
                     ),
                 ),
             ):
-                media = _download_sync(
-                    "https://youtube.com/watch?v=example",
-                    root,
-                    max_file_bytes=50,
-                    timeout_seconds=10,
-                )
+                with self.assertLogs("telegram_share_bot.downloader", level="INFO") as logs:
+                    media = _download_sync(
+                        "https://youtube.com/watch?v=example",
+                        root,
+                        max_file_bytes=50,
+                        timeout_seconds=10,
+                    )
             self.assertIsInstance(media, DownloadedMedia)
             self.assertEqual(selectors[:2], ["v720+audio", "v480+audio"])
             self.assertEqual(media.path.stat().st_size, 40)
             self.assertEqual(media.kind, MediaKind.VIDEO)
+            self.assertTrue(any("quality=720p 30fps h264" in line for line in logs.output))
+            self.assertTrue(any("quality=480p 30fps h264" in line for line in logs.output))
 
 
 class TestMediaDurationLimit(unittest.TestCase):
