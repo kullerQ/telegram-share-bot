@@ -131,6 +131,7 @@ Tap a Video or Audio result (or a clip / full-length choice). A placeholder appe
 
 ## Limits
 
+- Video outputs are checked with `ffprobe` before sending. Compatible files that fit are kept intact. When encoding is needed, the bot preserves the source dimensions and targets the available size budget, with at most two attempts from the original source. Best can fail if its source exceeds the download bound; it never silently substitutes a lower source. Local installations need both `ffmpeg` and `ffprobe`; Docker includes them.
 - Max file size ≈ 45 MB (Telegram Bot API upload limit is 50 MB). Video quality is adapted to fit this limit rather than capped at one fixed resolution.
 - Download timeout defaults to 120 seconds; source transfers are bounded to twice the output size limit.
 - Auto video checks elapsed time and transferred bytes from five seconds onward. `MAX_ESTIMATED_DOWNLOAD_SECONDS=45` sets the projected total download target; `0` disables this speed-based step-down. Every retry shares the 120-second overall deadline. Best and Balanced use the full deadline without Auto's speed-based step-down. Best does not change source format; Balanced may fall back when its preferred format cannot be delivered.
@@ -150,5 +151,5 @@ Tap a Video or Audio result (or a clip / full-length choice). A placeholder appe
 
 - Users should `/start` the bot once before relying on inline mode.
 - Respect platform Terms of Service for downloaded content; this project is for personal/lightweight use.
-- Previously uploaded videos are reused when their recorded output quality is compatible with the requested policy. Auto prefers a cached Best upload when it is at least as good as the cached Auto upload. Clip ranges and full videos remain separate cache entries; captions are applied when sent.
+- Previously uploaded videos are reused when their recorded output quality is compatible with the requested policy. Auto prefers a cached Best upload when it is at least as good as the cached Auto upload. Clip ranges and full videos remain separate cache entries; captions are applied when sent. Older video cache entries created before stream validation are downloaded again once; cached audio is unaffected.
 - Signed / credentialed URLs are not stored in the shared media cache.

@@ -56,6 +56,23 @@ class TestPartFileRejection(unittest.TestCase):
             resolved = _resolve_downloaded_path({}, work_dir, mock_ydl)
             self.assertEqual(resolved, complete_file)
 
+    def test_final_video_selected_over_downloaded_audio_component(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            work_dir = Path(tmp_dir)
+            final_video = work_dir / "merged.mp4"
+            final_video.write_bytes(b"complete video")
+            audio_component = work_dir / "audio.m4a"
+            audio_component.write_bytes(b"audio component")
+
+            mock_ydl = MagicMock()
+            mock_ydl.prepare_filename.return_value = str(final_video)
+            info = {
+                "filepath": str(final_video),
+                "requested_downloads": [{"filepath": str(audio_component)}],
+            }
+
+            self.assertEqual(_resolve_downloaded_path(info, work_dir, mock_ydl), final_video)
+
     def test_empty_work_dir_raises_no_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             work_dir = Path(tmp_dir)

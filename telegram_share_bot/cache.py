@@ -51,7 +51,9 @@ def _cache_key(
     if not norm_url:
         return None
     clip_suffix = time_range.cache_suffix() if time_range is not None else ""
-    return f"{norm_url}#format={media_format.value}&quality={quality}{clip_suffix}"
+    # Earlier video entries could contain an unchecked audio component or codec.
+    delivery = "&delivery=2" if media_format is MediaFormat.VIDEO else ""
+    return f"{norm_url}#format={media_format.value}&quality={quality}{delivery}{clip_suffix}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -266,10 +268,6 @@ class MediaCache:
             cached = await asyncio.to_thread(self._get_with_recovery, key)
             if cached is not None:
                 return cached
-            if media_format is MediaFormat.VIDEO and quality_policy == "best-fit":
-                legacy_key = _legacy_cache_key(url, time_range)
-                if legacy_key is not None and legacy_key != key:
-                    return await asyncio.to_thread(self._get_with_recovery, legacy_key)
             return None
         except _RECOVERABLE_DB_ERRORS:
             return None

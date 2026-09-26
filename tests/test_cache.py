@@ -155,7 +155,7 @@ class TestMediaCache(unittest.IsolatedAsyncioTestCase):
             assert cached is not None
             self.assertEqual(cached.file_id, file_id)
 
-    async def test_legacy_entry_is_reused_only_for_default_video(self) -> None:
+    async def test_unverified_legacy_video_is_not_reused(self) -> None:
         from telegram_share_bot.cache import _legacy_cache_key
 
         url = "https://www.youtube.com/watch?v=legacy12345"
@@ -171,9 +171,7 @@ class TestMediaCache(unittest.IsolatedAsyncioTestCase):
         )
 
         video = await self.cache.get(url, media_format=MediaFormat.VIDEO)
-        self.assertIsNotNone(video)
-        assert video is not None
-        self.assertEqual(video.file_id, "legacy-video-id")
+        self.assertIsNone(video)
         self.assertIsNone(await self.cache.get(url, media_format=MediaFormat.AUDIO))
         self.assertIsNone(
             await self.cache.get(url, media_format=MediaFormat.VIDEO, quality_policy="720p")
@@ -329,6 +327,8 @@ class TestMediaCache(unittest.IsolatedAsyncioTestCase):
             )
         self.cache._init_db()
         cached = await self.cache.get("https://example.com/video", quality_policy="auto-best")
+        self.assertIsNone(cached)
+        cached = self.cache._get_sync("https://example.com/video#format=video&quality=auto-best")
         self.assertIsNotNone(cached)
         assert cached is not None
         self.assertEqual(cached.file_id, "old")

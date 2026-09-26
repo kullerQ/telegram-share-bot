@@ -6,7 +6,9 @@ import asyncio
 import contextlib
 import copy
 import ipaddress
+import json
 import logging
+import math
 import re
 import shutil
 import socket
@@ -960,6 +962,15 @@ def _is_complete_file(path: Path) -> bool:
 
 
 def _resolve_downloaded_path(info: Any, work_dir: Path, ydl: yt_dlp.YoutubeDL) -> Path:
+    # Prefer the postprocessor's final output over individual download components.
+    final_path = info.get("filepath") if isinstance(info, dict) else None
+    if isinstance(final_path, str):
+        final = Path(final_path)
+        if final.is_file() and _is_complete_file(final):
+            return final
+    prepared = Path(ydl.prepare_filename(info))
+    if prepared.is_file() and _is_complete_file(prepared):
+        return prepared
     requested = info.get("requested_downloads") if isinstance(info, dict) else None
     if isinstance(requested, list) and requested:
         first = requested[0]
@@ -969,10 +980,6 @@ def _resolve_downloaded_path(info: Any, work_dir: Path, ydl: yt_dlp.YoutubeDL) -
                 p = Path(filepath)
                 if p.exists() and _is_complete_file(p):
                     return p
-
-    prepared = Path(ydl.prepare_filename(info))
-    if prepared.exists() and _is_complete_file(prepared):
-        return prepared
 
     completed_files = [p for p in work_dir.glob("*") if p.is_file() and _is_complete_file(p)]
     if not completed_files:
@@ -1441,14 +1448,13 @@ def _download_youtube_hls_clip(
             source_limit=source_limit,
             timeout_seconds=timeout_seconds,
         )
-        if merged.stat().st_size > max_file_bytes:
-            merged = _optimize_video_file(
-                merged,
-                max_file_bytes=max_file_bytes,
-                deadline=deadline,
-                abort_event=abort_event,
-                on_optimizing=on_optimizing,
-            )
+        merged = _optimize_video_file(
+            merged,
+            max_file_bytes=max_file_bytes,
+            deadline=deadline,
+            abort_event=abort_event,
+            on_optimizing=on_optimizing,
+        )
         selected = work_dir / "selected.mp4"
         merged.replace(selected)
         logger.info(
@@ -1530,6 +1536,74 @@ def _convert_audio_for_telegram(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class _VideoProbe:
+    duration: float
+    video_codec: str
+    pixel_format: str
+    audio_codec: str | None
+    width: int
+    height: int
+
+    @property
+    def compatible(self) -> bool:
+        return (
+            self.video_codec == "h264"
+            and self.pixel_format == "yuv420p"
+            and self.audio_codec in (None, "aac")
+        )
+
+
+def _probe_video_file(path: Path, deadline: float) -> _VideoProbe:
+    """Verify actual streams; an MP4 extension alone does not imply video."""
+    probe_bin = shutil.which("ffprobe")
+    remaining = deadline - time.monotonic()
+    if probe_bin is None:
+        raise DownloadError(strings.DOWNLOAD_FIT_FFMPEG_MISSING)
+    if remaining <= 0:
+        raise DownloadError(strings.DOWNLOAD_TIMED_OUT.format(timeout_seconds=0))
+    try:
+        result = subprocess.run(
+            [probe_bin, "-v", "error", "-show_streams", "-show_format", "-of", "json", str(path)],
+            check=False,
+            capture_output=True,
+            timeout=min(10.0, remaining),
+        )
+        if result.returncode != 0:
+            raise ValueError("ffprobe rejected the output")
+        info = json.loads(result.stdout)
+        streams = info.get("streams", [])
+        video = next(
+            stream
+            for stream in streams
+            if stream.get("codec_type") == "video"
+            and not stream.get("disposition", {}).get("attached_pic")
+        )
+        audio = next((s for s in streams if s.get("codec_type") == "audio"), None)
+        duration = float(info.get("format", {}).get("duration") or video.get("duration") or 0)
+        width, height = int(video.get("width") or 0), int(video.get("height") or 0)
+        if width <= 0 or height <= 0 or not math.isfinite(duration):
+            raise ValueError("invalid video dimensions or duration")
+        return _VideoProbe(
+            duration,
+            str(video.get("codec_name") or ""),
+            str(video.get("pix_fmt") or ""),
+            str(audio.get("codec_name") or "") if audio is not None else None,
+            width,
+            height,
+        )
+    except (
+        OSError,
+        subprocess.TimeoutExpired,
+        ValueError,
+        TypeError,
+        AttributeError,
+        StopIteration,
+    ) as exc:
+        logger.warning("Downloaded output is not a complete video: %s", path.name)
+        raise DownloadError(strings.DOWNLOAD_FAILED_INCOMPLETE) from exc
+
+
 def _optimize_video_file(
     path: Path,
     *,
@@ -1538,25 +1612,41 @@ def _optimize_video_file(
     abort_event: threading.Event | None,
     on_optimizing: Callable[[], None] | None,
 ) -> Path:
-    """Re-encode an oversized video at most twice, keeping the smallest result."""
-    if path.stat().st_size <= max_file_bytes:
+    """Verify video and fit H.264/AAC output to the budget in at most two encodes."""
+    probe = _probe_video_file(path, deadline)
+    source_size = path.stat().st_size
+    if source_size <= max_file_bytes and probe.compatible and path.suffix.lower() == ".mp4":
+        logger.info(
+            "Video verified for Telegram: bytes=%d quality=%dx%d codec=%s",
+            source_size,
+            probe.width,
+            probe.height,
+            probe.video_codec,
+        )
         return path
     ffmpeg_bin = shutil.which("ffmpeg")
     if ffmpeg_bin is None:
         raise DownloadError(strings.DOWNLOAD_FIT_FFMPEG_MISSING)
-    source_size = path.stat().st_size
+    if probe.duration <= 0:
+        raise DownloadError(strings.DOWNLOAD_FIT_FFMPEG_FAILED)
+    audio_rate = 192_000 if probe.audio_codec is not None else 0
+    video_rate = int(max_file_bytes * 8 * 0.94 / probe.duration) - audio_rate
+    if video_rate <= 0:
+        raise DownloadError(strings.DOWNLOAD_FIT_FFMPEG_FAILED)
     logger.info(
-        "Optimizing video for Telegram: source_bytes=%d limit_bytes=%d",
+        "Optimizing video for Telegram: source_bytes=%d limit_bytes=%d "
+        "quality=%dx%d source_codec=%s target_video_bps=%d",
         source_size,
         max_file_bytes,
+        probe.width,
+        probe.height,
+        probe.video_codec,
+        video_rate,
     )
     if on_optimizing is not None:
         on_optimizing()
 
-    best_path = path
-    best_size = source_size
-    attempts = ((28, "128k"), (33, "96k"))
-    for index, (crf, audio_rate) in enumerate(attempts, start=1):
+    for index in range(1, 3):
         if abort_event is not None and abort_event.is_set():
             raise DownloadError(strings.DOWNLOAD_FAILED_GENERIC)
         remaining = deadline - time.monotonic()
@@ -1564,6 +1654,28 @@ def _optimize_video_file(
             raise DownloadError(strings.DOWNLOAD_TIMED_OUT.format(timeout_seconds=0))
         output = path.parent / f"optimized_{index}.mp4"
         output.unlink(missing_ok=True)
+        copy_video = (
+            index == 1
+            and source_size <= max_file_bytes
+            and probe.video_codec == "h264"
+            and probe.pixel_format == "yuv420p"
+        )
+        video_options = (
+            ["-c:v", "copy"]
+            if copy_video
+            else [
+                "-vf",
+                "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "veryfast",
+                "-b:v",
+                str(video_rate),
+                "-pix_fmt",
+                "yuv420p",
+            ]
+        )
         argv = [
             ffmpeg_bin,
             "-nostdin",
@@ -1572,68 +1684,51 @@ def _optimize_video_file(
             "-loglevel",
             "error",
             "-i",
-            str(best_path),
+            str(path),
             "-map",
             "0:v:0",
             "-map",
-            "0:a?",
+            "0:a:0?",
             "-sn",
             "-dn",
-            "-vf",
-            "scale=w='min(1280,iw)':h='min(1280,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2",
-            "-c:v",
-            "libx264",
-            "-preset",
-            "veryfast",
-            "-crf",
-            str(crf),
-            "-pix_fmt",
-            "yuv420p",
+            *video_options,
             "-c:a",
-            "aac",
+            "copy" if copy_video and probe.audio_codec in (None, "aac") else "aac",
             "-b:a",
-            audio_rate,
+            str(audio_rate or 192_000),
             "-movflags",
             "+faststart",
             str(output),
         ]
-        try:
-            completed = subprocess.run(
-                argv,
-                check=False,
-                capture_output=True,
-                timeout=remaining,
-            )
-        except subprocess.TimeoutExpired as exc:
-            raise DownloadError(strings.DOWNLOAD_TIMED_OUT.format(timeout_seconds=0)) from exc
-        except OSError as exc:
-            raise DownloadError(strings.DOWNLOAD_FIT_FFMPEG_FAILED) from exc
-        if abort_event is not None and abort_event.is_set():
-            output.unlink(missing_ok=True)
-            raise DownloadError(strings.DOWNLOAD_FAILED_GENERIC)
-        if completed.returncode != 0 or not output.exists():
-            output.unlink(missing_ok=True)
-            continue
+        _run_bounded_clip_ffmpeg(
+            argv,
+            output,
+            deadline=deadline,
+            abort_event=abort_event,
+            source_limit=max_file_bytes * _SOURCE_SIZE_MULTIPLIER,
+            timeout_seconds=max(1, int(remaining)),
+        )
+        output_probe = _probe_video_file(output, deadline)
+        if not output_probe.compatible or (probe.audio_codec and not output_probe.audio_codec):
+            raise DownloadError(strings.DOWNLOAD_FIT_FFMPEG_FAILED)
         output_size = output.stat().st_size
-        if output_size < best_size:
-            if best_path != path:
-                best_path.unlink(missing_ok=True)
-            best_path = output
-            best_size = output_size
-            if best_size <= max_file_bytes:
-                path.unlink(missing_ok=True)
-                return best_path
-        else:
-            output.unlink(missing_ok=True)
-    if best_size <= max_file_bytes:
-        if best_path != path:
+        logger.info(
+            "Video optimization attempt %d: output_bytes=%d limit_bytes=%d quality=%dx%d",
+            index,
+            output_size,
+            max_file_bytes,
+            output_probe.width,
+            output_probe.height,
+        )
+        if 0 < output_size <= max_file_bytes:
             path.unlink(missing_ok=True)
-        return best_path
-    if best_path != path:
-        best_path.unlink(missing_ok=True)
+            return output
+        # Retry from the original source, never from an already lossy encode.
+        video_rate = max(1, int(video_rate * max_file_bytes / max(1, output_size) * 0.94))
+        output.unlink(missing_ok=True)
     raise DownloadError(
         strings.DOWNLOAD_TOO_LARGE.format(
-            size_mb=best_size // (1024 * 1024),
+            size_mb=source_size // (1024 * 1024),
             max_mb=max_file_bytes // (1024 * 1024),
         )
     )
@@ -1951,6 +2046,20 @@ def _download_sync(
                         ),
                         None,
                     )
+                    if estimate is not None and estimate > source_limit:
+                        logger.info(
+                            "Selected source exceeds download bound: "
+                            "format=%s estimated_bytes=%d limit_bytes=%d",
+                            selector,
+                            estimate,
+                            source_limit,
+                        )
+                        last_error = DownloadError(
+                            strings.DOWNLOAD_EXCEEDS_LIMIT.format(
+                                max_mb=source_limit // (1024 * 1024)
+                            )
+                        )
+                        continue
                     video_estimated_bytes = None
                     if media_format is MediaFormat.VIDEO:
                         video_format_id = selector.split("+", maxsplit=1)[0]
@@ -2042,6 +2151,14 @@ def _download_sync(
                                 )
                             )
                         if size <= max_file_bytes:
+                            if media_format is MediaFormat.VIDEO:
+                                path = _optimize_video_file(
+                                    path,
+                                    max_file_bytes=max_file_bytes,
+                                    deadline=deadline,
+                                    abort_event=abort_event,
+                                    on_optimizing=on_optimizing,
+                                )
                             if is_clip:
                                 logger.info(
                                     "Clip transfer and processing took %.1fs for %s",

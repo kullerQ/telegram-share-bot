@@ -18,6 +18,7 @@ from telegram_share_bot.downloader import (
     VideoQualityPolicy,
     _clamp_time_range,
     _download_sync,
+    _VideoProbe,
     extract_media_request,
     format_time_range,
     parse_duration_seconds_token,
@@ -346,6 +347,10 @@ class TestInlineClipChoice(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([result.title for result in results], ["▶ Send video", "♫ Send audio"])
 
 
+@patch(
+    "telegram_share_bot.downloader._probe_video_file",
+    new=lambda *_: _VideoProbe(60, "h264", "yuv420p", "aac", 1280, 720),
+)
 class TestClipDownloadOpts(unittest.TestCase):
     def test_section_download_sets_ranges_omits_max_filesize(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
