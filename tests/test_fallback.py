@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from telegram.constants import ChatType
+from telegram.constants import ChatType, KeyboardButtonStyle
 from telegram.error import BadRequest, NetworkError
 
 from telegram_share_bot import strings
@@ -23,9 +23,11 @@ from telegram_share_bot.downloader import (
 )
 from telegram_share_bot.handlers import (
     PendingClipChoice,
+    _cancel_keyboard,
     _clip_choice_keyboard,
     _format_choice_keyboard,
     _prepare_inline_media,
+    _retry_keyboard,
     _run_direct_download,
     clip_choice_callback,
     direct_format_callback,
@@ -256,6 +258,8 @@ class TestCacheFallback(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(plain[0]), 2)
                 self.assertEqual(plain[0][0].callback_data, f"{video_prefix}id")
                 self.assertEqual(plain[0][1].callback_data, "audio:id")
+                self.assertEqual(plain[0][0].to_dict()["style"], KeyboardButtonStyle.PRIMARY)
+                self.assertNotIn("style", plain[0][1].to_dict())
 
                 clip = _clip_choice_keyboard("id", TimeRange(60, 120), quality).inline_keyboard
                 self.assertEqual(len(clip), 2)
@@ -265,6 +269,25 @@ class TestCacheFallback(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(clip[1][1].callback_data, "fullaudio:id")
                 self.assertIn(quality.name.title(), clip[0][0].text)
                 self.assertIn(quality.name.title(), clip[1][0].text)
+                self.assertEqual(clip[0][0].to_dict()["style"], KeyboardButtonStyle.PRIMARY)
+                self.assertNotIn("style", clip[0][1].to_dict())
+                self.assertNotIn("style", clip[1][0].to_dict())
+                self.assertNotIn("style", clip[1][1].to_dict())
+
+    async def test_button_styles_follow_action_and_saved_format(self) -> None:
+        clip = _clip_choice_keyboard(
+            "id", TimeRange(60, 120), VideoQualityPolicy.AUTO, MediaFormat.AUDIO
+        ).inline_keyboard
+        self.assertNotIn("style", clip[0][0].to_dict())
+        self.assertEqual(clip[0][1].to_dict()["style"], KeyboardButtonStyle.PRIMARY)
+        self.assertNotIn("style", clip[1][0].to_dict())
+        self.assertNotIn("style", clip[1][1].to_dict())
+
+        cancel = _cancel_keyboard("id").inline_keyboard[0][0]
+        retry = _retry_keyboard("id", TimeRange(60, 120)).inline_keyboard[0]
+        self.assertEqual(cancel.to_dict()["style"], KeyboardButtonStyle.DANGER)
+        self.assertEqual(retry[0].to_dict()["style"], KeyboardButtonStyle.PRIMARY)
+        self.assertNotIn("style", retry[1].to_dict())
 
     async def test_private_quality_buttons_pass_the_selected_policy(self) -> None:
         context = MagicMock()

@@ -29,7 +29,7 @@ from telegram import (
     MessageEntity,
     Update,
 )
-from telegram.constants import ChatType, ParseMode
+from telegram.constants import ChatType, KeyboardButtonStyle, ParseMode
 from telegram.error import BadRequest, NetworkError, TelegramError, TimedOut
 from telegram.ext import ContextTypes
 
@@ -536,6 +536,7 @@ def _format_choice_keyboard(
                     quality=_preference_quality_label(preferred_quality)
                 ),
                 callback_data=f"{preferred_prefix}{choice_id}",
+                style=KeyboardButtonStyle.PRIMARY,
             ),
             InlineKeyboardButton(
                 strings.DIRECT_AUDIO_BUTTON,
@@ -550,42 +551,61 @@ def _clip_choice_keyboard(
     choice_id: str,
     time_range: TimeRange,
     preferred_quality: VideoQualityPolicy = VideoQualityPolicy.AUTO,
+    preferred_format: MediaFormat | None = None,
 ) -> InlineKeyboardMarkup:
     range_label = format_time_range(time_range)
     rows: list[list[InlineKeyboardButton]] = []
-    for quality_options, audio_prefix, video_label, audio_label in (
+    for row_index, (quality_options, audio_prefix, video_label, audio_label) in enumerate(
         (
             (
-                (VideoQualityPolicy.BEST, _CLIP_BEST_CALLBACK_PREFIX),
-                (VideoQualityPolicy.BALANCED, _CLIP_BALANCED_CALLBACK_PREFIX),
-                (VideoQualityPolicy.AUTO, _CLIP_CALLBACK_PREFIX),
+                (
+                    (VideoQualityPolicy.BEST, _CLIP_BEST_CALLBACK_PREFIX),
+                    (VideoQualityPolicy.BALANCED, _CLIP_BALANCED_CALLBACK_PREFIX),
+                    (VideoQualityPolicy.AUTO, _CLIP_CALLBACK_PREFIX),
+                ),
+                _CLIP_AUDIO_CALLBACK_PREFIX,
+                strings.DIRECT_CLIP_VIDEO_BUTTON.format(
+                    quality=_preference_quality_label(preferred_quality), range_label=range_label
+                ),
+                strings.DIRECT_CLIP_AUDIO_BUTTON.format(range_label=range_label),
             ),
-            _CLIP_AUDIO_CALLBACK_PREFIX,
-            strings.DIRECT_CLIP_VIDEO_BUTTON.format(
-                quality=_preference_quality_label(preferred_quality), range_label=range_label
-            ),
-            strings.DIRECT_CLIP_AUDIO_BUTTON.format(range_label=range_label),
-        ),
-        (
             (
-                (VideoQualityPolicy.BEST, _FULL_BEST_CALLBACK_PREFIX),
-                (VideoQualityPolicy.BALANCED, _FULL_BALANCED_CALLBACK_PREFIX),
-                (VideoQualityPolicy.AUTO, _FULL_CALLBACK_PREFIX),
+                (
+                    (VideoQualityPolicy.BEST, _FULL_BEST_CALLBACK_PREFIX),
+                    (VideoQualityPolicy.BALANCED, _FULL_BALANCED_CALLBACK_PREFIX),
+                    (VideoQualityPolicy.AUTO, _FULL_CALLBACK_PREFIX),
+                ),
+                _FULL_AUDIO_CALLBACK_PREFIX,
+                strings.DIRECT_FULL_VIDEO_BUTTON.format(
+                    quality=_preference_quality_label(preferred_quality)
+                ),
+                strings.DIRECT_FULL_AUDIO_BUTTON,
             ),
-            _FULL_AUDIO_CALLBACK_PREFIX,
-            strings.DIRECT_FULL_VIDEO_BUTTON.format(
-                quality=_preference_quality_label(preferred_quality)
-            ),
-            strings.DIRECT_FULL_AUDIO_BUTTON,
-        ),
+        )
     ):
         video_prefix = next(
             prefix for policy, prefix in quality_options if policy is preferred_quality
         )
         rows.append(
             [
-                InlineKeyboardButton(video_label, callback_data=f"{video_prefix}{choice_id}"),
-                InlineKeyboardButton(audio_label, callback_data=f"{audio_prefix}{choice_id}"),
+                InlineKeyboardButton(
+                    video_label,
+                    callback_data=f"{video_prefix}{choice_id}",
+                    style=(
+                        KeyboardButtonStyle.PRIMARY
+                        if row_index == 0 and preferred_format is not MediaFormat.AUDIO
+                        else None
+                    ),
+                ),
+                InlineKeyboardButton(
+                    audio_label,
+                    callback_data=f"{audio_prefix}{choice_id}",
+                    style=(
+                        KeyboardButtonStyle.PRIMARY
+                        if row_index == 0 and preferred_format is MediaFormat.AUDIO
+                        else None
+                    ),
+                ),
             ]
         )
     return InlineKeyboardMarkup(rows)
@@ -797,7 +817,9 @@ async def url_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
         await message.reply_text(
             strings.DIRECT_CLIP_FORMAT_PROMPT.format(range_label=format_time_range(time_range)),
-            reply_markup=_clip_choice_keyboard(choice_id, time_range, preferences.video_quality),
+            reply_markup=_clip_choice_keyboard(
+                choice_id, time_range, preferences.video_quality, preferences.default_format
+            ),
         )
         return
 
@@ -1942,6 +1964,7 @@ def _cancel_keyboard(result_id: str) -> InlineKeyboardMarkup:
                 InlineKeyboardButton(
                     strings.INLINE_CANCEL_BUTTON,
                     callback_data=f"{_CALLBACK_PREFIX}{result_id}",
+                    style=KeyboardButtonStyle.DANGER,
                 )
             ]
         ]
@@ -1960,6 +1983,7 @@ def _retry_keyboard(
         InlineKeyboardButton(
             retry_label,
             callback_data=f"{_RETRY_PREFIX}{result_id}",
+            style=KeyboardButtonStyle.PRIMARY,
         )
     ]
     if time_range is not None:
