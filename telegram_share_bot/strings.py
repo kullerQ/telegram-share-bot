@@ -46,7 +46,7 @@ HELP_MESSAGE = (
     "makes a choice for one send.\n\n"
     "<b>Video quality</b>\n"
     "• Auto adjusts to the link and download speed.\n"
-    "• Best tries the highest quality available and may be too large.\n"
+    "• Best tries the highest quality available (fail if it's >45MB).\n"
     "• Balanced aims for a good picture with a smaller download.\n"
     "Change your usual choice in /settings, or use "
     "<code>/video best &lt;link&gt;</code> (also auto or balanced) for one video.\n\n"
@@ -63,7 +63,7 @@ HELP_MESSAGE = (
 
 # --- Direct private-chat URL handling ----------------------------------------
 
-DIRECT_URL_HINT = "Send a media URL, or use me inline: @BotName <url>"
+DIRECT_URL_HINT = "Send a media URL, or use me inline: @{bot_username} <url>"
 DIRECT_PREPARING = "Checking the media link…"
 DIRECT_DOWNLOADING = "Downloading media…"
 OPTIMIZING_FOR_TELEGRAM = "Optimizing for Telegram…"
