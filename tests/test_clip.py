@@ -15,6 +15,7 @@ from telegram_share_bot.downloader import (
     MediaFormat,
     MediaKind,
     TimeRange,
+    VideoQualityPolicy,
     _clamp_time_range,
     _download_sync,
     extract_media_request,
@@ -25,6 +26,7 @@ from telegram_share_bot.downloader import (
 )
 from telegram_share_bot.handlers import inline_query
 from telegram_share_bot.normalizer import is_youtube_url
+from telegram_share_bot.user_settings import UserSettingsStore
 
 
 class TestParseTimeRangeToken(unittest.TestCase):
@@ -38,9 +40,7 @@ class TestParseTimeRangeToken(unittest.TestCase):
         self.assertEqual(parse_time_range_token("90:12-91:00"), TimeRange(5412, 5460))
 
     def test_h_mm_ss(self) -> None:
-        self.assertEqual(
-            parse_time_range_token("1:02:03-1:05:00"), TimeRange(3723, 3900)
-        )
+        self.assertEqual(parse_time_range_token("1:02:03-1:05:00"), TimeRange(3723, 3900))
 
     def test_mixed(self) -> None:
         self.assertEqual(parse_time_range_token("90-2:05"), TimeRange(90, 125))
@@ -66,47 +66,35 @@ class TestParseTimeRangeToken(unittest.TestCase):
 
 class TestClampOpenEnded(unittest.TestCase):
     def test_clamp_open_ended_to_duration(self) -> None:
-        resolved = _clamp_time_range(
-            TimeRange(100, None), {"duration": 250}
-        )
+        resolved = _clamp_time_range(TimeRange(100, None), {"duration": 250})
         self.assertEqual(resolved, TimeRange(100, 250))
 
     def test_clamp_open_ended_over_max_checked_by_resolve(self) -> None:
         from telegram_share_bot.downloader import _resolve_clip_range
 
         with self.assertRaises(DownloadError):
-            _resolve_clip_range(
-                TimeRange(0, None), {"duration": MAX_CLIP_SECONDS + 100}
-            )
+            _resolve_clip_range(TimeRange(0, None), {"duration": MAX_CLIP_SECONDS + 100})
 
 
 class TestExtractMediaRequest(unittest.TestCase):
     def test_youtube_with_range(self) -> None:
-        req = extract_media_request(
-            "https://www.youtube.com/watch?v=dQw4w9WgXcQ 1:20-2:05"
-        )
+        req = extract_media_request("https://www.youtube.com/watch?v=dQw4w9WgXcQ 1:20-2:05")
         self.assertIsNotNone(req.url)
         self.assertEqual(req.time_range, TimeRange(80, 125))
         self.assertIsNone(req.custom_caption)
 
     def test_youtube_range_then_caption(self) -> None:
-        req = extract_media_request(
-            "https://youtu.be/dQw4w9WgXcQ 1:20-2:05 my caption"
-        )
+        req = extract_media_request("https://youtu.be/dQw4w9WgXcQ 1:20-2:05 my caption")
         self.assertEqual(req.time_range, TimeRange(80, 125))
         self.assertEqual(req.custom_caption, "my caption")
 
     def test_youtube_caption_without_range(self) -> None:
-        req = extract_media_request(
-            "https://youtube.com/watch?v=dQw4w9WgXcQ my caption here"
-        )
+        req = extract_media_request("https://youtube.com/watch?v=dQw4w9WgXcQ my caption here")
         self.assertIsNone(req.time_range)
         self.assertEqual(req.custom_caption, "my caption here")
 
     def test_range_not_first_token(self) -> None:
-        req = extract_media_request(
-            "https://youtube.com/watch?v=dQw4w9WgXcQ hello 1:20-2:05"
-        )
+        req = extract_media_request("https://youtube.com/watch?v=dQw4w9WgXcQ hello 1:20-2:05")
         self.assertIsNone(req.time_range)
         self.assertEqual(req.custom_caption, "hello 1:20-2:05")
 
@@ -128,9 +116,7 @@ class TestExtractMediaRequest(unittest.TestCase):
         self.assertIsNone(req.custom_caption)
 
     def test_youtube_t_plus_duration_then_caption(self) -> None:
-        req = extract_media_request(
-            "https://youtu.be/-gLCzX0WlpY?t=2022 30 optional caption"
-        )
+        req = extract_media_request("https://youtu.be/-gLCzX0WlpY?t=2022 30 optional caption")
         self.assertEqual(req.time_range, TimeRange(2022, 2052))
         self.assertEqual(req.custom_caption, "optional caption")
 
@@ -140,29 +126,21 @@ class TestExtractMediaRequest(unittest.TestCase):
         self.assertIsNone(req.custom_caption)
 
     def test_youtube_t_alone_with_caption(self) -> None:
-        req = extract_media_request(
-            "https://youtu.be/-gLCzX0WlpY?t=2022 hello world"
-        )
+        req = extract_media_request("https://youtu.be/-gLCzX0WlpY?t=2022 hello world")
         self.assertEqual(req.time_range, TimeRange(2022, None))
         self.assertEqual(req.custom_caption, "hello world")
 
     def test_youtube_duration_without_t_is_caption(self) -> None:
-        req = extract_media_request(
-            "https://www.youtube.com/watch?v=dQw4w9WgXcQ 30"
-        )
+        req = extract_media_request("https://www.youtube.com/watch?v=dQw4w9WgXcQ 30")
         self.assertIsNone(req.time_range)
         self.assertEqual(req.custom_caption, "30")
 
     def test_absolute_range_preferred_over_t(self) -> None:
-        req = extract_media_request(
-            "https://youtu.be/-gLCzX0WlpY?t=2022 1:20-2:05"
-        )
+        req = extract_media_request("https://youtu.be/-gLCzX0WlpY?t=2022 1:20-2:05")
         self.assertEqual(req.time_range, TimeRange(80, 125))
 
     def test_youtube_clock_t_plus_duration(self) -> None:
-        req = extract_media_request(
-            "https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=1h2m3s 45"
-        )
+        req = extract_media_request("https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=1h2m3s 45")
         self.assertEqual(req.time_range, TimeRange(3723, 3768))
 
 
@@ -175,23 +153,17 @@ class TestYoutubeStartAndDuration(unittest.TestCase):
 
     def test_parse_start_clock(self) -> None:
         self.assertEqual(
-            parse_youtube_start_seconds(
-                "https://www.youtube.com/watch?v=abc&t=33m42s"
-            ),
+            parse_youtube_start_seconds("https://www.youtube.com/watch?v=abc&t=33m42s"),
             2022,
         )
         self.assertEqual(
-            parse_youtube_start_seconds(
-                "https://www.youtube.com/watch?v=abc&t=1h2m3s"
-            ),
+            parse_youtube_start_seconds("https://www.youtube.com/watch?v=abc&t=1h2m3s"),
             3723,
         )
 
     def test_parse_start_param(self) -> None:
         self.assertEqual(
-            parse_youtube_start_seconds(
-                "https://www.youtube.com/watch?v=abc&start=90"
-            ),
+            parse_youtube_start_seconds("https://www.youtube.com/watch?v=abc&start=90"),
             90,
         )
 
@@ -202,9 +174,7 @@ class TestYoutubeStartAndDuration(unittest.TestCase):
         )
 
     def test_parse_start_missing(self) -> None:
-        self.assertIsNone(
-            parse_youtube_start_seconds("https://youtu.be/abc")
-        )
+        self.assertIsNone(parse_youtube_start_seconds("https://youtu.be/abc"))
 
     def test_duration_token(self) -> None:
         self.assertEqual(parse_duration_seconds_token("30"), 30)
@@ -238,9 +208,7 @@ class TestCacheKeyWithRange(unittest.IsolatedAsyncioTestCase):
         url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
         video = _cache_key(url, None, media_format=MediaFormat.VIDEO)
         audio = _cache_key(url, None, media_format=MediaFormat.AUDIO)
-        lower_quality = _cache_key(
-            url, None, media_format=MediaFormat.VIDEO, quality_policy="720p"
-        )
+        lower_quality = _cache_key(url, None, media_format=MediaFormat.VIDEO, quality_policy="720p")
         self.assertNotEqual(video, audio)
         self.assertNotEqual(video, lower_quality)
 
@@ -249,12 +217,8 @@ class TestCacheKeyWithRange(unittest.IsolatedAsyncioTestCase):
             cache = MediaCache(Path(tmp) / "cache.db")
             url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
             range_ = TimeRange(10, 20)
-            await cache.set(
-                url, "fid-full", MediaKind.VIDEO, "Full", 100, time_range=None
-            )
-            await cache.set(
-                url, "fid-clip", MediaKind.VIDEO, "Clip", 10, time_range=range_
-            )
+            await cache.set(url, "fid-full", MediaKind.VIDEO, "Full", 100, time_range=None)
+            await cache.set(url, "fid-clip", MediaKind.VIDEO, "Clip", 10, time_range=range_)
             full = await cache.get(url, time_range=None)
             clip = await cache.get(url, time_range=range_)
             assert full is not None and clip is not None
@@ -338,14 +302,37 @@ class TestInlineClipChoice(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(results[0].id.startswith("video:"))
         self.assertTrue(results[1].id.startswith("audio:"))
 
+    async def test_inline_choices_follow_saved_format_and_video_quality(self) -> None:
+        context = self._context()
+        settings = context.application.bot_data["settings"]
+        store = UserSettingsStore(settings.download_dir / "user_settings.db")
+        await store.set_format(1, MediaFormat.AUDIO)
+        await store.set_quality(1, VideoQualityPolicy.BEST)
+        context.application.bot_data["user_settings"] = store
+        update = MagicMock()
+        query = MagicMock()
+        query.from_user = MagicMock(id=1)
+        query.query = "https://youtu.be/-gLCzX0WlpY"
+        query.answer = AsyncMock()
+        update.inline_query = query
+
+        with patch(
+            "telegram_share_bot.handlers.platform_previews.resolve_preview",
+            new=AsyncMock(return_value=None),
+        ):
+            await inline_query(update, context)
+
+        results = query.answer.await_args.kwargs["results"]
+        self.assertTrue(results[0].id.startswith("audio:"))
+        self.assertTrue(results[1].id.startswith("video:"))
+        self.assertIn("Best", results[1].description)
+
     async def test_tiktok_range_token_offers_video_and_audio(self) -> None:
         context = self._context()
         update = MagicMock()
         query = MagicMock()
         query.from_user = MagicMock(id=1)
-        query.query = (
-            "https://www.tiktok.com/@user/video/1234567890123456789 1:20-2:05 hello"
-        )
+        query.query = "https://www.tiktok.com/@user/video/1234567890123456789 1:20-2:05 hello"
         query.answer = AsyncMock()
         update.inline_query = query
 

@@ -27,6 +27,7 @@ from telegram_share_bot.downloader import (
     _run_bounded_clip_ffmpeg,
     _set_attempt_format_selector,
     _set_attempt_output_template,
+    _youtube_hls_clip_streams,
 )
 
 
@@ -94,6 +95,91 @@ class TestFormatRanking(unittest.TestCase):
             quality_policy=VideoQualityPolicy.BALANCED,
         )
         self.assertEqual(candidates[0].selector, "v720-avc")
+
+    def test_balanced_falls_back_to_highest_available_quality(self) -> None:
+        formats = [
+            {
+                "format_id": "v480",
+                "height": 480,
+                "fps": 30,
+                "filesize": 10,
+                "vcodec": "avc1",
+                "acodec": "aac",
+            },
+            {
+                "format_id": "v1080",
+                "height": 1080,
+                "fps": 30,
+                "filesize": 30,
+                "vcodec": "vp9",
+                "acodec": "aac",
+            },
+        ]
+        candidates = _format_candidates(
+            {"formats": formats},
+            max_file_bytes=45 * 1024 * 1024,
+            quality_policy=VideoQualityPolicy.BALANCED,
+        )
+        self.assertEqual(candidates[0].selector, "v1080")
+
+    def test_best_keeps_top_source_without_lower_quality_fallback(self) -> None:
+        formats = [
+            {
+                "format_id": "v1440",
+                "height": 1440,
+                "fps": 60,
+                "filesize": 200,
+                "vcodec": "avc1",
+                "acodec": "aac",
+            },
+            {
+                "format_id": "v720",
+                "height": 720,
+                "fps": 30,
+                "filesize": 40,
+                "vcodec": "avc1",
+                "acodec": "aac",
+            },
+        ]
+        candidates = _format_candidates(
+            {"formats": formats},
+            max_file_bytes=50,
+            quality_policy=VideoQualityPolicy.BEST,
+        )
+        self.assertEqual([candidate.selector for candidate in candidates], ["v1440"])
+
+    def test_balanced_hls_uses_generic_fallback_when_target_is_missing(self) -> None:
+        info = {
+            "duration": 100,
+            "formats": [
+                {
+                    "format_id": "audio",
+                    "protocol": "m3u8_native",
+                    "url": "https://example.com/a.m3u8",
+                    "resolution": "audio only",
+                    "vcodec": "none",
+                    "acodec": "aac",
+                },
+                {
+                    "format_id": "v1080",
+                    "protocol": "m3u8_native",
+                    "url": "https://example.com/v.m3u8",
+                    "height": 1080,
+                    "fps": 30,
+                    "tbr": 500,
+                    "vcodec": "avc1",
+                    "acodec": "none",
+                },
+            ],
+        }
+        self.assertIsNone(
+            _youtube_hls_clip_streams(
+                info,
+                30,
+                45 * 1024 * 1024,
+                VideoQualityPolicy.BALANCED,
+            )
+        )
 
     def test_transfer_projection_requires_bytes_and_uses_total_time(self) -> None:
         self.assertIsNone(_projected_transfer_seconds(5, 0, 100))
@@ -224,8 +310,7 @@ class TestYoutubeHlsClip(unittest.TestCase):
             self.assertTrue(media.path.exists())
             self.assertTrue(
                 any(
-                    "Clip HLS video transfer started: format=311 quality=720p 60fps avc1"
-                    in line
+                    "Clip HLS video transfer started: format=311 quality=720p 60fps avc1" in line
                     for line in logs.output
                 )
             )
@@ -478,6 +563,7 @@ class TestAudioFormatSelection(unittest.TestCase):
     def test_missing_audio_stream_has_a_clear_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             for error_type in (yt_dlp.utils.DownloadError, yt_dlp.utils.ExtractorError):
+
                 class FakeYdl:
                     def __init__(self, opts: dict[str, object]) -> None:
                         self.params = dict(opts)
@@ -554,9 +640,7 @@ class TestYtDlpOutputTemplate(unittest.TestCase):
 
             self.assertIsInstance(ydl.params["outtmpl"], dict)
             self.assertEqual(ydl.params["outtmpl"]["default"], attempt_template)
-            self.assertEqual(
-                ydl.params["outtmpl"]["chapter"], original_templates["chapter"]
-            )
+            self.assertEqual(ydl.params["outtmpl"]["chapter"], original_templates["chapter"])
             prepared = ydl.prepare_filename(
                 {"title": "Adaptive test", "id": "abc123", "ext": "mp4"}
             )

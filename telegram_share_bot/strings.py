@@ -41,8 +41,10 @@ HELP_MESSAGE = (
     "📩 In this chat\n"
     "Paste a media link and choose Video Auto, Best, Balanced, or Audio. "
     "Auto starts with the best source and switches quality when the download looks slow. "
-    "Best holds the top feasible source; Balanced prefers a 720p-class stream. "
-    "Use /video <link>, /video best <link>, /video balanced <link>, or /audio <link>.\n\n"
+    "Best never switches to a lower source format; Balanced prefers 720p, 60 fps, AVC "
+    "when available and otherwise tries the best alternative. "
+    "Use /video <link>, /video best <link>, /video balanced <link>, or /audio <link>. "
+    "Set personal quality, caption, and format defaults with /settings.\n\n"
     "↗️ In another chat\n"
     "Type @{bot_username} followed by a link, then choose Video Auto or Audio.\n\n"
     "✂️ YouTube clips\n"
@@ -66,15 +68,18 @@ OPTIMIZING_FOR_TELEGRAM = "Optimizing for Telegram…"
 DIRECT_UPLOADING = "Sending media to Telegram…"
 DIRECT_FORMAT_PROMPT = "Choose what to send:"
 DIRECT_CLIP_FORMAT_PROMPT = "Choose clip or full media, then a video quality or audio:"
-DIRECT_VIDEO_BUTTON = "▶ Video · Auto"
+DIRECT_VIDEO_BUTTON = "▶ Video · {quality}"
+DIRECT_VIDEO_QUALITY_BUTTON = "▶ Video · {quality}"
 DIRECT_BEST_VIDEO_BUTTON = "✨ Video · Best"
 DIRECT_BALANCED_VIDEO_BUTTON = "⚡ Video · Balanced"
 DIRECT_AUDIO_BUTTON = "♫ Audio"
-DIRECT_CLIP_VIDEO_BUTTON = "✂ Clip · Auto"
+DIRECT_CLIP_VIDEO_BUTTON = "✂ Clip · {quality}"
+CLIP_VIDEO_QUALITY_BUTTON = "✂ Clip · {quality}"
 DIRECT_CLIP_BEST_VIDEO_BUTTON = "✂ Clip · Best"
 DIRECT_CLIP_BALANCED_VIDEO_BUTTON = "✂ Clip · Balanced"
 DIRECT_CLIP_AUDIO_BUTTON = "✂ Audio clip"
-DIRECT_FULL_VIDEO_BUTTON = "▶ Full · Auto"
+DIRECT_FULL_VIDEO_BUTTON = "▶ Full · {quality}"
+FULL_VIDEO_QUALITY_BUTTON = "▶ Full · {quality}"
 DIRECT_FULL_BEST_VIDEO_BUTTON = "▶ Full · Best"
 DIRECT_FULL_BALANCED_VIDEO_BUTTON = "▶ Full · Balanced"
 DIRECT_FULL_AUDIO_BUTTON = "♫ Full audio"
@@ -92,6 +97,21 @@ DIRECT_CLIP_PROMPT = (
 )
 DIRECT_CLIP_EXPIRED = "That choice expired. Send the link again."
 DIRECT_CLIP_CHOICE_ANSWER = "Got it"
+
+# --- Personal settings -------------------------------------------------------
+
+SETTINGS_MESSAGE = (
+    "⚙️ Settings\n\n"
+    "Video quality: {quality}\n"
+    "Caption: {caption}\n"
+    "Default format: {media_format}\n\n"
+    "Auto adjusts quality to fit Telegram. Best keeps the top source and can fail if it is too "
+    "large. Balanced prefers 720p, 60 fps, AVC when available.\n"
+    "Bot default caption follows this bot's caption setting."
+)
+SETTINGS_SAVED = "Saved"
+SETTINGS_INVALID_CHOICE = "That settings choice is invalid. Open /settings again."
+SETTINGS_NOT_YOURS = "These settings belong to another user."
 
 # --- Inline query (fast answer) ----------------------------------------------
 
@@ -150,6 +170,10 @@ DOWNLOAD_PLAYLIST_UNSUPPORTED = "Playlist/empty result is not supported."
 DOWNLOAD_EMPTY_FILE = "Downloaded file is empty."
 DOWNLOAD_FIT_FFMPEG_MISSING = "ffmpeg is required to fit this video within Telegram's size limit."
 DOWNLOAD_FIT_FFMPEG_FAILED = "Could not optimize the video for Telegram delivery."
+DOWNLOAD_BEST_QUALITY_FAILED = (
+    "The best source quality could not be delivered within Telegram's limit. "
+    "Try Auto or Balanced quality."
+)
 DOWNLOAD_TOO_LARGE = (
     "File is too large ({size_mb} MB). Max is {max_mb} MB."
 )
