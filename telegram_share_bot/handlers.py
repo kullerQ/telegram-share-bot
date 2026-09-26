@@ -910,6 +910,15 @@ async def _explicit_format_command(
     )
 
 
+async def _edit_direct_status(status_message: Message, text: str) -> None:
+    """A repeated progress stage is already visible; continue the send."""
+    try:
+        await status_message.edit_text(text)
+    except BadRequest as exc:
+        if "message is not modified" not in str(exc).lower():
+            raise
+
+
 async def _remove_completed_direct_status(status_message: Message) -> None:
     """Remove transient progress text after its media has been delivered."""
     try:
@@ -952,7 +961,7 @@ async def _run_direct_download(
         if cached is not None:
             logger.info("Cache hit for direct URL: %s", display_url)
             try:
-                await status_message.edit_text(strings.DIRECT_UPLOADING)
+                await _edit_direct_status(status_message, strings.DIRECT_UPLOADING)
                 await _send_cached_media_to_chat(
                     context,
                     chat_id,
@@ -976,7 +985,7 @@ async def _run_direct_download(
 
     denial = await _try_acquire_user_download_slot(context, user_id)
     if denial is not None:
-        await status_message.edit_text(denial)
+        await _edit_direct_status(status_message, denial)
         return
 
     media: DownloadedMedia | None = None
@@ -995,7 +1004,7 @@ async def _run_direct_download(
                 ensure_full_media_duration(
                     direct_stream.duration, settings.max_media_duration_seconds
                 )
-                await status_message.edit_text(strings.DIRECT_UPLOADING)
+                await _edit_direct_status(status_message, strings.DIRECT_UPLOADING)
                 file_id_info = await _upload_direct_url_for_file_id(
                     context, settings, direct_stream
                 )
@@ -1028,12 +1037,12 @@ async def _run_direct_download(
                     await _remove_completed_direct_status(status_message)
                     return
 
-        await status_message.edit_text(strings.DIRECT_DOWNLOADING)
+        await _edit_direct_status(status_message, strings.DIRECT_DOWNLOADING)
         loop = asyncio.get_running_loop()
 
         def show_optimization_status() -> None:
             future = asyncio.run_coroutine_threadsafe(
-                status_message.edit_text(strings.OPTIMIZING_FOR_TELEGRAM), loop
+                _edit_direct_status(status_message, strings.OPTIMIZING_FOR_TELEGRAM), loop
             )
             with contextlib.suppress(Exception):
                 future.result(timeout=5)
@@ -1056,7 +1065,7 @@ async def _run_direct_download(
                 max_media_duration_seconds=settings.max_media_duration_seconds,
                 on_optimizing=show_optimization_status,
             )
-            await status_message.edit_text(strings.DIRECT_UPLOADING)
+            await _edit_direct_status(status_message, strings.DIRECT_UPLOADING)
             sent_msg = await _send_media_to_chat(
                 context,
                 chat_id,
@@ -1081,13 +1090,13 @@ async def _run_direct_download(
         await _remove_completed_direct_status(status_message)
     except DownloadError as exc:
         logger.warning("Direct download failed for %s: %s", display_url, exc)
-        await status_message.edit_text(str(exc) or strings.DIRECT_DOWNLOAD_FAILED)
+        await _edit_direct_status(status_message, str(exc) or strings.DIRECT_DOWNLOAD_FAILED)
     except (NetworkError, TimedOut) as exc:
         logger.warning("Direct upload failed for %s: %s", display_url, exc)
-        await status_message.edit_text(strings.DIRECT_UPLOAD_FAILED)
+        await _edit_direct_status(status_message, strings.DIRECT_UPLOAD_FAILED)
     except Exception:
         logger.exception("Failed to handle direct URL message")
-        await status_message.edit_text(strings.DIRECT_SEND_FAILED)
+        await _edit_direct_status(status_message, strings.DIRECT_SEND_FAILED)
     finally:
         await _release_user_download_slot(context, user_id)
         if media is not None:
@@ -1489,7 +1498,6 @@ async def direct_format_callback(update: Update, context: ContextTypes.DEFAULT_T
         await query.answer()
         return
     await query.answer(text=strings.DIRECT_CLIP_CHOICE_ANSWER)
-    await msg.edit_text(strings.DIRECT_DOWNLOADING, reply_markup=None)
     await _run_direct_download(
         context,
         chat_id=pending.chat_id,
@@ -1564,11 +1572,6 @@ async def clip_choice_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     msg = query.message
     if not isinstance(msg, Message):
         return
-    await msg.edit_text(
-        strings.DIRECT_DOWNLOADING,
-        reply_markup=None,
-    )
-
     await _run_direct_download(
         context,
         chat_id=pending.chat_id,

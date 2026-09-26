@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from telegram.constants import ParseMode
+from telegram.error import BadRequest
 
 from telegram_share_bot import strings
 from telegram_share_bot.cache import MediaCache
@@ -23,6 +24,7 @@ from telegram_share_bot.downloader import (
     VideoQualityPolicy,
 )
 from telegram_share_bot.handlers import (
+    _edit_direct_status,
     _prepare_inline_media,
     _run_direct_download,
     help_command,
@@ -177,6 +179,49 @@ class TestMediaProgress(unittest.IsolatedAsyncioTestCase):
             ],
         )
         status.delete.assert_awaited_once()
+
+    async def test_repeated_downloading_stage_does_not_abort_video_send(self) -> None:
+        status = MagicMock()
+        status.edit_text = AsyncMock(
+            side_effect=[BadRequest("Message is not modified"), None]
+        )
+        status.delete = AsyncMock()
+        media = self._media("repeated-stage")
+        send = AsyncMock(return_value=MagicMock())
+
+        with (
+            patch(
+                "telegram_share_bot.handlers.download_media",
+                new=AsyncMock(return_value=media),
+            ),
+            patch("telegram_share_bot.handlers._send_media_to_chat", new=send),
+            patch(
+                "telegram_share_bot.handlers._file_id_and_kind_from_message",
+                return_value=("FILE_ID", MediaKind.VIDEO),
+            ),
+        ):
+            await _run_direct_download(
+                self.context,
+                chat_id=42,
+                user_id=42,
+                url="https://example.com/video",
+                custom_caption=None,
+                time_range=None,
+                status_message=status,
+            )
+
+        send.assert_awaited_once()
+        status.delete.assert_awaited_once()
+        self.assertEqual(
+            [call.args[0] for call in status.edit_text.await_args_list],
+            [strings.DIRECT_DOWNLOADING, strings.DIRECT_UPLOADING],
+        )
+
+    async def test_other_status_edit_errors_remain_visible(self) -> None:
+        status = MagicMock()
+        status.edit_text = AsyncMock(side_effect=BadRequest("Message to edit not found"))
+        with self.assertRaises(BadRequest):
+            await _edit_direct_status(status, strings.DIRECT_DOWNLOADING)
 
     async def test_direct_audio_without_a_stream_shows_specific_feedback(self) -> None:
         status = MagicMock()

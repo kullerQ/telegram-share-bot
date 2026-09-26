@@ -27,6 +27,7 @@ from telegram_share_bot.handlers import (
     _format_choice_keyboard,
     _prepare_inline_media,
     _run_direct_download,
+    clip_choice_callback,
     direct_format_callback,
     url_message,
     video_command,
@@ -167,6 +168,12 @@ class TestCacheFallback(unittest.IsolatedAsyncioTestCase):
             await direct_format_callback(update, context)
 
         self.assertEqual(context.bot.send_video.call_count, 2)
+        self.assertEqual(
+            [call.args[0] for call in status_msg.edit_text.await_args_list].count(
+                strings.DIRECT_DOWNLOADING
+            ),
+            1,
+        )
         updated = await self.cache.get(
             url,
             media_format=MediaFormat.VIDEO,
@@ -284,6 +291,32 @@ class TestCacheFallback(unittest.IsolatedAsyncioTestCase):
                 ) as run_download:
                     await direct_format_callback(update, context)
                 self.assertEqual(run_download.await_args.kwargs["quality_policy"], expected)
+                status.edit_text.assert_not_awaited()
+
+    async def test_clip_choice_does_not_repeat_download_status(self) -> None:
+        context = MagicMock()
+        context.application.bot_data = {"settings": self.settings}
+        context.application.bot_data["pending_clip_choice"] = {
+            "clip-id": PendingClipChoice(
+                "https://youtu.be/example1234", None, TimeRange(60, 120), 42
+            )
+        }
+        status = MagicMock(spec=__import__("telegram").Message)
+        status.edit_text = AsyncMock()
+        update = MagicMock()
+        update.callback_query.from_user = MagicMock(id=42)
+        update.callback_query.data = "clip:clip-id"
+        update.callback_query.message = status
+        update.callback_query.answer = AsyncMock()
+
+        with patch(
+            "telegram_share_bot.handlers._run_direct_download", new=AsyncMock()
+        ) as run_download:
+            await clip_choice_callback(update, context)
+
+        run_download.assert_awaited_once()
+        self.assertEqual(run_download.await_args.kwargs["time_range"], TimeRange(60, 120))
+        status.edit_text.assert_not_awaited()
 
     async def test_video_command_accepts_best_and_balanced_before_link(self) -> None:
         context = MagicMock()
