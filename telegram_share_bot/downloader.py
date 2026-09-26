@@ -10,10 +10,11 @@ import logging
 import re
 import shutil
 import socket
+import subprocess
 import threading
 import time
 import uuid
-from collections.abc import Generator, Sequence
+from collections.abc import Callable, Generator, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -28,6 +29,8 @@ if TYPE_CHECKING:
 
 from telegram_share_bot import strings
 from telegram_share_bot.config import (
+    DEFAULT_MAX_ESTIMATED_DOWNLOAD_SECONDS,
+    DEFAULT_MAX_MEDIA_DURATION_SECONDS,
     DEFAULT_SLIDESHOW_IMAGES_LOOP,
     TELEGRAM_CAPTION_MAX_LENGTH,
     CaptionMode,
@@ -371,6 +374,21 @@ class MediaKind(str, Enum):
     DOCUMENT = "document"
 
 
+class MediaFormat(str, Enum):
+    """The requested output form, independent of the resulting file type."""
+
+    VIDEO = "video"
+    AUDIO = "audio"
+
+
+class VideoQualityPolicy(str, Enum):
+    """Per-send video selection policy; audio requests ignore this value."""
+
+    AUTO = "auto-best"
+    BEST = "source-best"
+    BALANCED = "balanced"
+
+
 @dataclass(frozen=True, slots=True)
 class DownloadedMedia:
     path: Path
@@ -385,6 +403,285 @@ class DirectMediaStream:
     title: str
     kind: MediaKind
     duration: int | None = None
+    size_bytes: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _FormatCandidate:
+    selector: str
+    quality: tuple[float, float, float]
+    estimated_size: int | None
+    clip_transport_priority: int = 0
+    codec_priority: int = 0
+
+
+_SOURCE_SIZE_MULTIPLIER = 2
+_MAX_FORMAT_ATTEMPTS = 4
+_QUALITY_SAMPLE_SECONDS = 5.0
+
+
+def _projected_transfer_seconds(elapsed: float, downloaded: int, total: int) -> float | None:
+    """Project full transfer time from measured bytes and elapsed wall time."""
+    if elapsed <= 0 or downloaded <= 0 or total <= 0:
+        return None
+    return elapsed * max(total, downloaded) / downloaded
+
+
+def _format_bytes(
+    format_info: dict[str, Any],
+    duration_scale: float,
+    fallback_duration: float | None = None,
+) -> int | None:
+    for key in ("filesize", "filesize_approx"):
+        size = format_info.get(key)
+        if isinstance(size, (int, float)) and size > 0:
+            return max(1, int(size * duration_scale))
+    bitrate = format_info.get("tbr") or format_info.get("abr")
+    duration = format_info.get("duration")
+    if not isinstance(duration, (int, float)) or duration <= 0:
+        duration = fallback_duration
+        duration_scale = 1.0
+    if (
+        isinstance(bitrate, (int, float))
+        and bitrate > 0
+        and isinstance(duration, (int, float))
+        and duration > 0
+    ):
+        return max(1, int(float(bitrate) * 1000 * float(duration) * duration_scale / 8))
+    return None
+
+
+def _video_quality_label(format_info: dict[str, Any]) -> str:
+    """Format known progressive video quality details for safe operational logs."""
+    height = format_info.get("height")
+    fps = format_info.get("fps")
+    video_codec = format_info.get("vcodec")
+    height_label = (
+        f"{int(height)}p"
+        if isinstance(height, (int, float)) and height > 0
+        else "unknown-resolution"
+    )
+    fps_label = (
+        f"{float(fps):g}fps"
+        if isinstance(fps, (int, float)) and fps > 0
+        else "unknown-fps"
+    )
+    codec_label = "unknown-codec"
+    if isinstance(video_codec, str):
+        codec_prefix = re.split(r"[.\s]", video_codec, maxsplit=1)[0]
+        if re.fullmatch(r"[A-Za-z0-9_-]+", codec_prefix):
+            codec_label = codec_prefix
+    return f"{height_label} {fps_label} {codec_label}"
+
+
+def _video_quality_for_selector(info: dict[str, Any], selector: str) -> str:
+    """Return resolution, frame rate, and codec for the selector's video stream."""
+    formats = info.get("formats")
+    video_format_id = selector.split("+", maxsplit=1)[0]
+    if isinstance(formats, list):
+        for item in formats:
+            if isinstance(item, dict) and item.get("format_id") == video_format_id:
+                return _video_quality_label(item)
+    return "unknown-resolution unknown-fps unknown-codec"
+
+
+def _format_candidates(
+    info: dict[str, Any],
+    *,
+    max_file_bytes: int,
+    duration_scale: float = 1.0,
+    quality_policy: VideoQualityPolicy = VideoQualityPolicy.AUTO,
+) -> list[_FormatCandidate]:
+    """Rank bounded sources by quality or proximity to the balanced tier."""
+    formats = info.get("formats")
+    if not isinstance(formats, list):
+        return []
+    usable = [item for item in formats if isinstance(item, dict)]
+    source_duration = info.get("duration")
+    fallback_duration = (
+        float(source_duration) * duration_scale
+        if isinstance(source_duration, (int, float)) and source_duration > 0
+        else None
+    )
+
+    def format_id(item: dict[str, Any]) -> str | None:
+        value = item.get("format_id")
+        if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_.-]+", value):
+            return value
+        return None
+
+    audio_only = [
+        item
+        for item in usable
+        if item.get("acodec") not in (None, "none")
+        and item.get("vcodec") == "none"
+        and format_id(item) is not None
+    ]
+    best_audio = max(
+        audio_only,
+        key=lambda item: float(item.get("abr") or item.get("tbr") or 0),
+        default=None,
+    )
+    candidates: dict[str, _FormatCandidate] = {}
+    for item in usable:
+        identifier = format_id(item)
+        if identifier is None or item.get("vcodec") in (None, "none"):
+            continue
+        has_audio = item.get("acodec") not in (None, "none")
+        selector = identifier
+        estimated = _format_bytes(item, duration_scale, fallback_duration)
+        if not has_audio:
+            if best_audio is None:
+                continue
+            audio_id = format_id(best_audio)
+            if audio_id is None:
+                continue
+            selector = f"{identifier}+{audio_id}"
+            audio_size = _format_bytes(best_audio, duration_scale, fallback_duration)
+            if estimated is not None and audio_size is not None:
+                estimated += audio_size
+            elif estimated is not None:
+                estimated = None
+        if estimated is not None and estimated > max_file_bytes * _SOURCE_SIZE_MULTIPLIER:
+            continue
+        height = item.get("height")
+        fps = item.get("fps")
+        bitrate = item.get("tbr") or item.get("vbr")
+        quality = (
+            float(height) if isinstance(height, (int, float)) else 0.0,
+            float(fps) if isinstance(fps, (int, float)) else 0.0,
+            float(bitrate) if isinstance(bitrate, (int, float)) else 0.0,
+        )
+        protocol = str(item.get("protocol") or "")
+        clip_transport_priority = (
+            0
+            if duration_scale >= 1.0 or protocol in {"m3u8", "m3u8_native"}
+            else 1
+        )
+        candidates[selector] = _FormatCandidate(
+            selector,
+            quality,
+            estimated,
+            clip_transport_priority,
+            0 if str(item.get("vcodec") or "").lower().startswith(("avc1", "h264")) else 1,
+        )
+
+    def rank(candidate: _FormatCandidate) -> tuple[float, ...]:
+        if quality_policy is VideoQualityPolicy.BALANCED:
+            return (
+                abs(candidate.quality[0] - 720) if candidate.quality[0] else float("inf"),
+                abs(candidate.quality[1] - 60) if candidate.quality[1] else float("inf"),
+                candidate.codec_priority,
+                candidate.estimated_size is not None
+                and candidate.estimated_size > max_file_bytes,
+                -candidate.quality[2],
+            )
+        return (
+            candidate.clip_transport_priority,
+            -candidate.quality[0],
+            -candidate.quality[1],
+            -candidate.quality[2],
+            candidate.codec_priority,
+        )
+
+    return sorted(candidates.values(), key=rank)[:_MAX_FORMAT_ATTEMPTS]
+
+
+def _audio_format_candidates(
+    info: dict[str, Any],
+    *,
+    max_file_bytes: int,
+    duration_scale: float = 1.0,
+) -> list[_FormatCandidate]:
+    """Rank audio-only source formats by bitrate while avoiding implausible sizes."""
+    formats = info.get("formats")
+    if not isinstance(formats, list):
+        return []
+    source_duration = info.get("duration")
+    fallback_duration = (
+        float(source_duration) * duration_scale
+        if isinstance(source_duration, (int, float)) and source_duration > 0
+        else None
+    )
+    candidates: dict[str, _FormatCandidate] = {}
+    source_limit = max_file_bytes * _SOURCE_SIZE_MULTIPLIER
+    for item in formats:
+        if not isinstance(item, dict):
+            continue
+        identifier = item.get("format_id")
+        if (
+            not isinstance(identifier, str)
+            or not re.fullmatch(r"[A-Za-z0-9_.-]+", identifier)
+            or item.get("vcodec") != "none"
+            or item.get("acodec") in (None, "none")
+        ):
+            continue
+        estimated = _format_bytes(item, duration_scale, fallback_duration)
+        if estimated is not None and estimated > source_limit:
+            continue
+        bitrate = item.get("abr") or item.get("tbr")
+        quality = (
+            0.0,
+            0.0,
+            float(bitrate) if isinstance(bitrate, (int, float)) else 0.0,
+        )
+        candidates[identifier] = _FormatCandidate(identifier, quality, estimated)
+    return sorted(
+        candidates.values(),
+        key=lambda candidate: (
+            candidate.estimated_size is not None
+            and candidate.estimated_size > max_file_bytes,
+            -candidate.quality[2],
+        ),
+    )[:_MAX_FORMAT_ATTEMPTS]
+
+
+def _set_attempt_format_selector(ydl: yt_dlp.YoutubeDL, selector: str) -> None:
+    """Rebuild yt-dlp's cached selector after changing the requested format."""
+    ydl.params["format"] = selector
+    ydl.format_selector = ydl.build_format_selector(selector)
+
+
+def _set_attempt_output_template(ydl: yt_dlp.YoutubeDL, template: str) -> None:
+    """Update yt-dlp's default output template without discarding its type mapping."""
+    current = ydl.params.get("outtmpl")
+    templates = dict(current) if isinstance(current, dict) else {}
+    templates["default"] = template
+    ydl.params["outtmpl"] = templates
+
+
+def _is_audio_unavailable_error(error: BaseException | str) -> bool:
+    """Recognize extractor errors that mean a link has no usable audio."""
+    message = str(error).lower()
+    return any(
+        marker in message
+        for marker in (
+            "requested format is not available",
+            "no video formats found",
+            "no audio formats found",
+            "only images are available",
+        )
+    )
+
+
+def _default_audio_selector(time_range: TimeRange | None, source_limit: int) -> str:
+    if time_range is not None:
+        return "ba"
+    return f"ba[filesize<{source_limit}]/ba[filesize_approx<{source_limit}]/ba"
+
+
+def _default_video_selector(time_range: TimeRange | None, source_limit: int) -> str:
+    if time_range is not None:
+        return "bv*+ba/b"
+    return (
+        f"bv*[filesize<{source_limit}]+ba/"
+        f"b[filesize<{source_limit}]/"
+        f"bv*[filesize_approx<{source_limit}]+ba/"
+        f"b[filesize_approx<{source_limit}]/"
+        "b/"
+        "bv*[acodec=none][protocol=https]/"
+        "bv*[acodec=none]"
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -752,6 +1049,26 @@ def _ensure_clip_within_max(time_range: TimeRange) -> None:
         )
 
 
+def ensure_full_media_duration(
+    duration: object, max_duration_seconds: int
+) -> None:
+    """Reject known overlong full media before transfer or conversion."""
+    if (
+        max_duration_seconds <= 0
+        or not isinstance(duration, (int, float))
+        or duration <= max_duration_seconds
+    ):
+        return
+    duration_limit = (
+        f"{max_duration_seconds // 60} min"
+        if max_duration_seconds % 60 == 0
+        else f"{max_duration_seconds} sec"
+    )
+    raise DownloadError(
+        strings.DOWNLOAD_MEDIA_TOO_LONG.format(duration_limit=duration_limit)
+    )
+
+
 def _resolve_clip_range(time_range: TimeRange, info: dict[str, Any]) -> TimeRange:
     """Clamp to video length, enforce max clip, return a closed range."""
     resolved = _clamp_time_range(time_range, info)
@@ -772,6 +1089,575 @@ def _download_ranges_param(time_range: TimeRange) -> Any:
     )
 
 
+def _youtube_hls_clip_streams(
+    info: dict[str, Any],
+    clip_duration: int,
+    max_file_bytes: int,
+    quality_policy: VideoQualityPolicy = VideoQualityPolicy.AUTO,
+) -> tuple[dict[str, Any], list[dict[str, Any]]] | None:
+    """Find HLS audio and bounded H.264 video streams for a YouTube clip."""
+    formats = info.get("formats")
+    if not isinstance(formats, list):
+        return None
+    usable = [item for item in formats if isinstance(item, dict)]
+    hls_protocols = {"m3u8", "m3u8_native"}
+    audio = next(
+        (
+            item
+            for item in reversed(usable)
+            if item.get("protocol") in hls_protocols
+            and item.get("vcodec") == "none"
+            and item.get("resolution") == "audio only"
+            and isinstance(item.get("url"), str)
+        ),
+        None,
+    )
+    if audio is None:
+        return None
+
+    source_duration = info.get("duration")
+    duration_scale = (
+        min(1.0, clip_duration / float(source_duration))
+        if isinstance(source_duration, (int, float)) and source_duration > 0
+        else 1.0
+    )
+    audio_allowance = max(1, int(192_000 * clip_duration / 8))
+    ranked: list[tuple[tuple[float, ...], dict[str, Any]]] = []
+    for item in usable:
+        codec = str(item.get("vcodec") or "").lower()
+        if (
+            item.get("protocol") not in hls_protocols
+            or not codec.startswith(("avc1", "h264"))
+            or not isinstance(item.get("url"), str)
+        ):
+            continue
+        estimated = _format_bytes(item, duration_scale, float(clip_duration))
+        if (
+            estimated is None
+            or estimated + audio_allowance > max_file_bytes * _SOURCE_SIZE_MULTIPLIER
+        ):
+            continue
+        height = item.get("height")
+        fps = item.get("fps")
+        bitrate = item.get("tbr")
+        height_value = float(height) if isinstance(height, (int, float)) else 0.0
+        fps_value = float(fps) if isinstance(fps, (int, float)) else 0.0
+        bitrate_value = float(bitrate) if isinstance(bitrate, (int, float)) else 0.0
+        rank = (
+            (
+                abs(height_value - 720) if height_value else float("inf"),
+                abs(fps_value - 60) if fps_value else float("inf"),
+                -bitrate_value,
+            )
+            if quality_policy is VideoQualityPolicy.BALANCED
+            else (-height_value, -fps_value, -bitrate_value)
+        )
+        ranked.append((rank, item))
+    ranked.sort(key=lambda candidate: candidate[0])
+    limit = 1 if quality_policy is not VideoQualityPolicy.AUTO else _MAX_FORMAT_ATTEMPTS
+    return audio, [item for _, item in ranked[:limit]]
+
+
+def _run_bounded_clip_ffmpeg(
+    argv: list[str],
+    output: Path,
+    *,
+    deadline: float,
+    abort_event: threading.Event | None,
+    source_limit: int,
+    timeout_seconds: int,
+    expected_bytes: int | None = None,
+    speed_limit_seconds: int = 0,
+    format_id: str = "unknown",
+) -> None:
+    """Stop the actual ffmpeg process when a clip stage times out or is cancelled."""
+    try:
+        process = subprocess.Popen(
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError as exc:
+        raise DownloadError(strings.DOWNLOAD_FAILED_GENERIC) from exc
+    started_at = time.monotonic()
+    next_speed_sample = _QUALITY_SAMPLE_SECONDS
+    try:
+        while True:
+            if abort_event is not None and abort_event.is_set():
+                raise DownloadError(strings.DOWNLOAD_FAILED_GENERIC)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise DownloadError(
+                    strings.DOWNLOAD_TIMED_OUT.format(timeout_seconds=timeout_seconds)
+                )
+            output_size = output.stat().st_size if output.exists() else 0
+            if output_size > source_limit:
+                raise DownloadError(
+                    strings.DOWNLOAD_EXCEEDS_LIMIT.format(
+                        max_mb=source_limit // (1024 * 1024)
+                    )
+                )
+            elapsed = time.monotonic() - started_at
+            if (
+                speed_limit_seconds > 0
+                and expected_bytes is not None
+                and elapsed >= next_speed_sample
+                and output_size > 0
+            ):
+                projected = _projected_transfer_seconds(elapsed, output_size, expected_bytes)
+                if projected is not None:
+                    logger.info(
+                        "Clip video transfer estimate: format=%s projected=%.1fs target=%ds",
+                        format_id,
+                        projected,
+                        speed_limit_seconds,
+                    )
+                    if projected > speed_limit_seconds:
+                        raise DownloadError(strings.DOWNLOAD_SLOW_SOURCE, retryable=True)
+                next_speed_sample = elapsed + _QUALITY_SAMPLE_SECONDS
+            try:
+                return_code = process.wait(timeout=min(0.25, remaining))
+                break
+            except subprocess.TimeoutExpired:
+                continue
+        if return_code != 0 or not output.exists() or output.stat().st_size <= 0:
+            raise DownloadError(strings.DOWNLOAD_FAILED_GENERIC, retryable=True)
+        if output.stat().st_size > source_limit:
+            raise DownloadError(
+                strings.DOWNLOAD_EXCEEDS_LIMIT.format(
+                    max_mb=source_limit // (1024 * 1024)
+                )
+            )
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+
+
+def _download_hls_clip_stream(
+    format_info: dict[str, Any],
+    *,
+    ffmpeg_bin: str,
+    time_range: TimeRange,
+    media_type: str,
+    output: Path,
+    deadline: float,
+    abort_event: threading.Event | None,
+    source_limit: int,
+    timeout_seconds: int,
+    expected_bytes: int | None = None,
+    speed_limit_seconds: int = 0,
+) -> None:
+    stream_url = format_info.get("url")
+    if not isinstance(stream_url, str) or not is_safe_media_url(stream_url, https_only=True):
+        raise DownloadError(strings.DOWNLOAD_UNSAFE_URL)
+    headers = format_info.get("http_headers")
+    argv = [ffmpeg_bin, "-nostdin", "-y", "-hide_banner", "-loglevel", "error"]
+    if isinstance(headers, dict):
+        safe_headers = [
+            f"{key}: {value}\r\n"
+            for key, value in headers.items()
+            if isinstance(key, str)
+            and isinstance(value, str)
+            and "\r" not in key + value
+            and "\n" not in key + value
+        ]
+        if safe_headers:
+            argv.extend(["-headers", "".join(safe_headers)])
+    argv.extend(
+        [
+            "-ss",
+            str(time_range.start),
+            "-i",
+            stream_url,
+            "-t",
+            str(time_range.duration_seconds),
+            "-map",
+            f"0:{'a' if media_type == 'audio' else 'v'}:0",
+            "-c",
+            "copy",
+        ]
+    )
+    if media_type == "audio":
+        argv.extend(["-f", "ipod"])
+    else:
+        argv.extend(["-movflags", "+faststart"])
+    argv.append(str(output))
+    _run_bounded_clip_ffmpeg(
+        argv,
+        output,
+        deadline=deadline,
+        abort_event=abort_event,
+        source_limit=source_limit,
+        timeout_seconds=timeout_seconds,
+        expected_bytes=expected_bytes,
+        speed_limit_seconds=speed_limit_seconds,
+        format_id=str(format_info.get("format_id") or "unknown"),
+    )
+
+
+def _download_youtube_hls_clip(
+    info: dict[str, Any],
+    *,
+    work_dir: Path,
+    time_range: TimeRange,
+    media_format: MediaFormat,
+    max_file_bytes: int,
+    deadline: float,
+    timeout_seconds: int,
+    abort_event: threading.Event | None,
+    on_optimizing: Callable[[], None] | None,
+    quality_policy: VideoQualityPolicy = VideoQualityPolicy.AUTO,
+    max_estimated_download_seconds: int = 45,
+) -> DownloadedMedia | None:
+    clip_duration = time_range.duration_seconds
+    if clip_duration is None:
+        return None
+    streams = _youtube_hls_clip_streams(
+        info, clip_duration, max_file_bytes, quality_policy
+    )
+    if streams is None:
+        return None
+    audio, videos = streams
+    if media_format is MediaFormat.VIDEO and not videos:
+        return None
+    ffmpeg_bin = shutil.which("ffmpeg")
+    if ffmpeg_bin is None:
+        raise DownloadError(strings.DOWNLOAD_CLIP_FFMPEG_MISSING)
+    source_limit = max_file_bytes * _SOURCE_SIZE_MULTIPLIER
+    hls_dir = work_dir / "hls_clip"
+    hls_dir.mkdir(parents=True, exist_ok=True)
+    title = str(info.get("title") or "Media")[:64]
+    started_at = time.monotonic()
+    try:
+        video_path = hls_dir / "video.mp4"
+        if media_format is MediaFormat.VIDEO:
+            last_error: DownloadError | None = None
+            source_duration = info.get("duration")
+            duration_scale = (
+                min(1.0, clip_duration / float(source_duration))
+                if isinstance(source_duration, (int, float)) and source_duration > 0
+                else 1.0
+            )
+            for index, item in enumerate(videos):
+                video_path.unlink(missing_ok=True)
+                format_id = str(item.get("format_id") or "unknown")
+                logger.info(
+                    "Clip HLS video transfer started: format=%s quality=%s",
+                    format_id,
+                    _video_quality_label(item),
+                )
+                try:
+                    stage_deadline = deadline
+                    can_step_down = (
+                        quality_policy is VideoQualityPolicy.AUTO
+                        and max_estimated_download_seconds > 0
+                        and index < len(videos) - 1
+                    )
+                    if can_step_down:
+                        stage_deadline = min(
+                            deadline,
+                            time.monotonic() + max_estimated_download_seconds,
+                        )
+                    stage_timeout = max(1, int(stage_deadline - time.monotonic()))
+                    _download_hls_clip_stream(
+                        item,
+                        ffmpeg_bin=ffmpeg_bin,
+                        time_range=time_range,
+                        media_type="video",
+                        output=video_path,
+                        deadline=stage_deadline,
+                        abort_event=abort_event,
+                        source_limit=source_limit,
+                        timeout_seconds=stage_timeout,
+                        expected_bytes=(
+                            _format_bytes(item, duration_scale, float(clip_duration))
+                            if can_step_down
+                            else None
+                        ),
+                        speed_limit_seconds=(
+                            max_estimated_download_seconds if can_step_down else 0
+                        ),
+                    )
+                    logger.info(
+                        "Clip HLS video ready: format=%s bytes=%d",
+                        format_id,
+                        video_path.stat().st_size,
+                    )
+                    break
+                except DownloadError as exc:
+                    last_error = exc
+                    logger.info("Clip HLS video format %s failed: %s", format_id, exc)
+                    if abort_event is not None and abort_event.is_set():
+                        raise
+            else:
+                raise last_error or DownloadError(strings.DOWNLOAD_FAILED_GENERIC)
+
+        audio_path = hls_dir / "audio.m4a"
+        audio_id = str(audio.get("format_id") or "unknown")
+        logger.info("Clip HLS audio transfer started: format=%s", audio_id)
+        _download_hls_clip_stream(
+            audio,
+            ffmpeg_bin=ffmpeg_bin,
+            time_range=time_range,
+            media_type="audio",
+            output=audio_path,
+            deadline=deadline,
+            abort_event=abort_event,
+            source_limit=source_limit,
+            timeout_seconds=timeout_seconds,
+        )
+        logger.info(
+            "Clip HLS audio ready: format=%s bytes=%d",
+            audio_id,
+            audio_path.stat().st_size,
+        )
+        if media_format is MediaFormat.AUDIO:
+            selected = work_dir / "selected.m4a"
+            if audio_path.stat().st_size > max_file_bytes:
+                audio_path = _convert_audio_for_telegram(
+                    audio_path,
+                    max_file_bytes=max_file_bytes,
+                    deadline=deadline,
+                    abort_event=abort_event,
+                )
+            audio_path.replace(selected)
+            return DownloadedMedia(selected, title, MediaKind.AUDIO, clip_duration)
+
+        if video_path.stat().st_size + audio_path.stat().st_size > source_limit:
+            raise DownloadError(
+                strings.DOWNLOAD_EXCEEDS_LIMIT.format(
+                    max_mb=source_limit // (1024 * 1024)
+                )
+            )
+        merged = hls_dir / "merged.mp4"
+        _run_bounded_clip_ffmpeg(
+            [
+                ffmpeg_bin,
+                "-nostdin",
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-i",
+                str(video_path),
+                "-i",
+                str(audio_path),
+                "-map",
+                "0:v:0",
+                "-map",
+                "1:a:0",
+                "-c",
+                "copy",
+                "-movflags",
+                "+faststart",
+                str(merged),
+            ],
+            merged,
+            deadline=deadline,
+            abort_event=abort_event,
+            source_limit=source_limit,
+            timeout_seconds=timeout_seconds,
+        )
+        if merged.stat().st_size > max_file_bytes:
+            merged = _optimize_video_file(
+                merged,
+                max_file_bytes=max_file_bytes,
+                deadline=deadline,
+                abort_event=abort_event,
+                on_optimizing=on_optimizing,
+            )
+        selected = work_dir / "selected.mp4"
+        merged.replace(selected)
+        logger.info(
+            "Clip HLS video and audio merged in %.1fs: bytes=%d",
+            time.monotonic() - started_at,
+            selected.stat().st_size,
+        )
+        return DownloadedMedia(selected, title, MediaKind.VIDEO, clip_duration)
+    finally:
+        _cleanup_dir(hls_dir)
+
+
+def _convert_audio_for_telegram(
+    path: Path,
+    *,
+    max_file_bytes: int,
+    deadline: float,
+    abort_event: threading.Event | None,
+) -> Path:
+    """Return MP3/M4A audio, transcoding incompatible or oversized sources."""
+    if path.suffix.lower() in {".m4a", ".mp3"} and path.stat().st_size <= max_file_bytes:
+        return path
+    ffmpeg_bin = shutil.which("ffmpeg")
+    if ffmpeg_bin is None:
+        raise DownloadError(strings.DOWNLOAD_AUDIO_FFMPEG_MISSING)
+    for index, bitrate in enumerate(("128k", "96k"), start=1):
+        if abort_event is not None and abort_event.is_set():
+            raise DownloadError(strings.DOWNLOAD_FAILED_GENERIC)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise DownloadError(strings.DOWNLOAD_TIMED_OUT.format(timeout_seconds=0))
+        output = path.parent / f"telegram_audio_{index}.m4a"
+        output.unlink(missing_ok=True)
+        try:
+            completed = subprocess.run(
+                [
+                    ffmpeg_bin,
+                    "-nostdin",
+                    "-y",
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-i",
+                    str(path),
+                    "-vn",
+                    "-c:a",
+                    "aac",
+                    "-b:a",
+                    bitrate,
+                    "-movflags",
+                    "+faststart",
+                    str(output),
+                ],
+                check=False,
+                capture_output=True,
+                timeout=remaining,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise DownloadError(strings.DOWNLOAD_TIMED_OUT.format(timeout_seconds=0)) from exc
+        except OSError as exc:
+            raise DownloadError(strings.DOWNLOAD_AUDIO_CONVERT_FAILED) from exc
+        if abort_event is not None and abort_event.is_set():
+            output.unlink(missing_ok=True)
+            raise DownloadError(strings.DOWNLOAD_FAILED_GENERIC)
+        if (
+            completed.returncode == 0
+            and output.exists()
+            and 0 < output.stat().st_size <= max_file_bytes
+        ):
+            if output != path:
+                path.unlink(missing_ok=True)
+            return output
+        output.unlink(missing_ok=True)
+    raise DownloadError(
+        strings.DOWNLOAD_TOO_LARGE.format(
+            size_mb=path.stat().st_size // (1024 * 1024),
+            max_mb=max_file_bytes // (1024 * 1024),
+        )
+    )
+
+
+def _optimize_video_file(
+    path: Path,
+    *,
+    max_file_bytes: int,
+    deadline: float,
+    abort_event: threading.Event | None,
+    on_optimizing: Callable[[], None] | None,
+) -> Path:
+    """Re-encode an oversized video at most twice, keeping the smallest result."""
+    if path.stat().st_size <= max_file_bytes:
+        return path
+    ffmpeg_bin = shutil.which("ffmpeg")
+    if ffmpeg_bin is None:
+        raise DownloadError(strings.DOWNLOAD_FIT_FFMPEG_MISSING)
+    source_size = path.stat().st_size
+    logger.info(
+        "Optimizing video for Telegram: source_bytes=%d limit_bytes=%d",
+        source_size,
+        max_file_bytes,
+    )
+    if on_optimizing is not None:
+        on_optimizing()
+
+    best_path = path
+    best_size = source_size
+    attempts = ((28, "128k"), (33, "96k"))
+    for index, (crf, audio_rate) in enumerate(attempts, start=1):
+        if abort_event is not None and abort_event.is_set():
+            raise DownloadError(strings.DOWNLOAD_FAILED_GENERIC)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise DownloadError(strings.DOWNLOAD_TIMED_OUT.format(timeout_seconds=0))
+        output = path.parent / f"optimized_{index}.mp4"
+        output.unlink(missing_ok=True)
+        argv = [
+            ffmpeg_bin,
+            "-nostdin",
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            str(best_path),
+            "-map",
+            "0:v:0",
+            "-map",
+            "0:a?",
+            "-sn",
+            "-dn",
+            "-vf",
+            "scale=w='min(1280,iw)':h='min(1280,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            str(crf),
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-b:a",
+            audio_rate,
+            "-movflags",
+            "+faststart",
+            str(output),
+        ]
+        try:
+            completed = subprocess.run(
+                argv,
+                check=False,
+                capture_output=True,
+                timeout=remaining,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise DownloadError(strings.DOWNLOAD_TIMED_OUT.format(timeout_seconds=0)) from exc
+        except OSError as exc:
+            raise DownloadError(strings.DOWNLOAD_FIT_FFMPEG_FAILED) from exc
+        if abort_event is not None and abort_event.is_set():
+            output.unlink(missing_ok=True)
+            raise DownloadError(strings.DOWNLOAD_FAILED_GENERIC)
+        if completed.returncode != 0 or not output.exists():
+            output.unlink(missing_ok=True)
+            continue
+        output_size = output.stat().st_size
+        if output_size < best_size:
+            if best_path != path:
+                best_path.unlink(missing_ok=True)
+            best_path = output
+            best_size = output_size
+            if best_size <= max_file_bytes:
+                path.unlink(missing_ok=True)
+                return best_path
+        else:
+            output.unlink(missing_ok=True)
+    if best_size <= max_file_bytes:
+        if best_path != path:
+            path.unlink(missing_ok=True)
+        return best_path
+    if best_path != path:
+        best_path.unlink(missing_ok=True)
+    raise DownloadError(
+        strings.DOWNLOAD_TOO_LARGE.format(
+            size_mb=best_size // (1024 * 1024),
+            max_mb=max_file_bytes // (1024 * 1024),
+        )
+    )
+
+
 def _download_sync(
     url: str,
     download_dir: Path,
@@ -786,7 +1672,15 @@ def _download_sync(
     slideshow_max_images: int = 35,
     slideshow_images_loop: bool = DEFAULT_SLIDESHOW_IMAGES_LOOP,
     time_range: TimeRange | None = None,
+    media_format: MediaFormat = MediaFormat.VIDEO,
+    quality_policy: VideoQualityPolicy = VideoQualityPolicy.AUTO,
+    max_estimated_download_seconds: int = DEFAULT_MAX_ESTIMATED_DOWNLOAD_SECONDS,
+    max_media_duration_seconds: int = DEFAULT_MAX_MEDIA_DURATION_SECONDS,
+    on_optimizing: Callable[[], None] | None = None,
 ) -> DownloadedMedia:
+    started_at = time.monotonic()
+    deadline = started_at + timeout_seconds
+    source_limit = max_file_bytes * _SOURCE_SIZE_MULTIPLIER
     if https_only and not is_https_url(url):
         raise DownloadError(strings.DOWNLOAD_HTTPS_REQUIRED)
     if not is_safe_media_url(url, https_only=https_only):
@@ -811,54 +1705,113 @@ def _download_sync(
             slideshow = download_tiktok_slideshow(
                 url,
                 work_dir,
-                max_file_bytes=max_file_bytes,
-                timeout_seconds=timeout_seconds,
+                max_file_bytes=source_limit,
+                timeout_seconds=max(1, int(deadline - time.monotonic())),
                 slide_ms=slideshow_slide_ms,
                 max_images=slideshow_max_images,
                 images_loop=slideshow_images_loop,
                 abort_event=abort_event,
                 https_only=https_only,
                 allowed_hosts=allowed_hosts,
+                media_format=media_format,
+                max_media_duration_seconds=max_media_duration_seconds,
             )
             if slideshow is not None:
-                return slideshow
+                ensure_full_media_duration(
+                    slideshow.duration, max_media_duration_seconds
+                )
+                if media_format is MediaFormat.AUDIO:
+                    result_path = _convert_audio_for_telegram(
+                        slideshow.path,
+                        max_file_bytes=max_file_bytes,
+                        deadline=deadline,
+                        abort_event=abort_event,
+                    )
+                    result_kind = MediaKind.AUDIO
+                else:
+                    result_path = _optimize_video_file(
+                        slideshow.path,
+                        max_file_bytes=max_file_bytes,
+                        deadline=deadline,
+                        abort_event=abort_event,
+                        on_optimizing=on_optimizing,
+                    )
+                    result_kind = slideshow.kind
+                return DownloadedMedia(
+                    path=result_path,
+                    title=slideshow.title,
+                    kind=result_kind,
+                    duration=slideshow.duration,
+                )
         except DownloadError:
             _cleanup_dir(work_dir)
             raise
         except Exception as exc:
             _cleanup_dir(work_dir)
-            logger.warning(
-                "Slideshow path failed for %s: %s", safe_url_for_log(url), exc
-            )
+            logger.warning("Slideshow path failed for %s: %s", safe_url_for_log(url), exc)
             raise DownloadError(strings.DOWNLOAD_FAILED_GENERIC) from exc
 
     outtmpl = str(work_dir / "%(title).80B [%(id)s].%(ext)s")
     is_clip = time_range is not None
 
+    source_bytes: dict[str, int] = {}
+    source_too_large = threading.Event()
+    slow_source = threading.Event()
+    transfer_started_at = 0.0
+    video_estimated_bytes: int | None = None
+    can_step_down = False
+    next_quality_sample = _QUALITY_SAMPLE_SECONDS
+
     def _progress_hook(d: dict[str, Any]) -> None:
+        nonlocal next_quality_sample
         if abort_event is not None and abort_event.is_set():
-            raise DownloadError(
+            raise yt_dlp.utils.DownloadError(
                 strings.DOWNLOAD_TIMED_OUT.format(timeout_seconds=timeout_seconds)
             )
         downloaded = d.get("downloaded_bytes") or 0
-        if isinstance(downloaded, (int, float)) and downloaded > max_file_bytes:
-            raise DownloadError(
-                strings.DOWNLOAD_EXCEEDS_LIMIT.format(
-                    max_mb=max_file_bytes // (1024 * 1024)
-                )
-            )
-        if is_clip:
-            return
         total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
-        if isinstance(total, (int, float)) and total > max_file_bytes:
-            raise DownloadError(
-                strings.DOWNLOAD_EXCEEDS_LIMIT.format(
-                    max_mb=max_file_bytes // (1024 * 1024)
-                )
+        if isinstance(downloaded, (int, float)):
+            key = str(d.get("filename") or d.get("tmpfilename") or d.get("format_id") or "source")
+            source_bytes[key] = int(downloaded)
+        if isinstance(total, (int, float)) and total > 0 and not is_clip:
+            key = str(d.get("filename") or d.get("tmpfilename") or d.get("format_id") or "source")
+            source_bytes[key] = max(source_bytes.get(key, 0), int(total))
+        if sum(source_bytes.values()) > source_limit:
+            source_too_large.set()
+            raise yt_dlp.utils.DownloadError("Source size bound exceeded")
+        if (
+            not can_step_down
+            or d.get("status") != "downloading"
+            or not isinstance(downloaded, (int, float))
+            or downloaded <= 0
+        ):
+            return
+        stream_info = d.get("info_dict")
+        if isinstance(stream_info, dict) and stream_info.get("vcodec") == "none":
+            return
+        elapsed = time.monotonic() - transfer_started_at
+        if elapsed < next_quality_sample:
+            return
+        total_bytes = d.get("total_bytes") or d.get("total_bytes_estimate")
+        if not isinstance(total_bytes, (int, float)) or total_bytes <= 0:
+            total_bytes = video_estimated_bytes
+        if isinstance(total_bytes, (int, float)):
+            projected = _projected_transfer_seconds(
+                elapsed, int(downloaded), int(total_bytes)
             )
+            if projected is not None:
+                logger.info(
+                    "Video transfer estimate: projected=%.1fs target=%ds",
+                    projected,
+                    max_estimated_download_seconds,
+                )
+                if projected > max_estimated_download_seconds:
+                    slow_source.set()
+                    raise yt_dlp.utils.DownloadError("Video transfer exceeds time target")
+        next_quality_sample = elapsed + _QUALITY_SAMPLE_SECONDS
 
-    # Size-bounded formats for full downloads; height-capped for clips (full
-    # filesize filters would reject short slices of long videos).
+    # yt-dlp selectors are chosen from ranked metadata and retried at lower
+    # quality when the measured output exceeds Telegram's limit.
     ydl_opts: dict[str, Any] = {
         "outtmpl": outtmpl,
         "noplaylist": True,
@@ -868,20 +1821,11 @@ def _download_sync(
         "retries": 2,
         "merge_output_format": "mp4",
         "progress_hooks": [_progress_hook],
+        "format": _default_video_selector(time_range, source_limit),
     }
-    if is_clip:
-        ydl_opts["format"] = "bv*[height<=1080]+ba/bv*[height<=720]+ba/b"
-    else:
-        ydl_opts["max_filesize"] = max_file_bytes
-        ydl_opts["format"] = (
-            f"bv*[filesize<{max_file_bytes}]+ba/"
-            f"b[filesize<{max_file_bytes}]/"
-            f"bv*[filesize_approx<{max_file_bytes}]+ba/"
-            f"b[filesize_approx<{max_file_bytes}]/"
-            "b[height<=720]/"
-            "bv*[acodec=none][protocol=https][height<=720]/"
-            "bv*[acodec=none][height<=720]"
-        )
+
+    if not is_clip:
+        ydl_opts["max_filesize"] = source_limit
 
     effective_range = time_range
 
@@ -890,9 +1834,7 @@ def _download_sync(
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:  # type: ignore[arg-type]
                 if abort_event is not None and abort_event.is_set():
                     raise DownloadError(
-                        strings.DOWNLOAD_TIMED_OUT.format(
-                            timeout_seconds=timeout_seconds
-                        )
+                        strings.DOWNLOAD_TIMED_OUT.format(timeout_seconds=timeout_seconds)
                     )
 
                 # Probe metadata first so live streams abort before any media bytes land.
@@ -900,6 +1842,10 @@ def _download_sync(
                 metadata_started_at = time.monotonic()
                 extracted, from_cache = _extract_info_cached(ydl, url)
                 info = _pick_info(extracted)
+                if effective_range is None:
+                    ensure_full_media_duration(
+                        info.get("duration"), max_media_duration_seconds
+                    )
                 if is_clip:
                     logger.info(
                         "Clip metadata resolved in %.1fs (%s) for %s",
@@ -910,112 +1856,296 @@ def _download_sync(
 
                 if effective_range is not None:
                     effective_range = _resolve_clip_range(effective_range, info)
-                    ydl.params["download_ranges"] = _download_ranges_param(
-                        effective_range
+                    ydl.params["download_ranges"] = _download_ranges_param(effective_range)
+
+                if effective_range is not None and is_youtube_url(url):
+                    hls_clip = _download_youtube_hls_clip(
+                        info,
+                        work_dir=work_dir,
+                        time_range=effective_range,
+                        media_format=media_format,
+                        max_file_bytes=max_file_bytes,
+                        deadline=deadline,
+                        timeout_seconds=timeout_seconds,
+                        abort_event=abort_event,
+                        on_optimizing=on_optimizing,
+                        quality_policy=quality_policy,
+                        max_estimated_download_seconds=max_estimated_download_seconds,
                     )
+                    if hls_clip is not None:
+                        return hls_clip
 
                 if abort_event is not None and abort_event.is_set():
                     raise DownloadError(
-                        strings.DOWNLOAD_TIMED_OUT.format(
-                            timeout_seconds=timeout_seconds
-                        )
+                        strings.DOWNLOAD_TIMED_OUT.format(timeout_seconds=timeout_seconds)
                     )
 
-                transfer_started_at = time.monotonic()
-                try:
-                    processed = ydl.process_ie_result(extracted, download=True)
-                except yt_dlp.utils.DownloadError as download_exc:
-                    # Cached extracts carry time-/IP-bound CDN URLs; one fresh
-                    # re-extract recovers from 403/expired signatures.
-                    if not (from_cache and _looks_like_stale_cdn_url(download_exc)):
-                        raise
-                    logger.info(
-                        "Cached extract stale for %s; re-extracting: %s",
-                        safe_url_for_log(url),
-                        str(download_exc).split("\n")[-1].strip(),
+                duration_scale = 1.0
+                source_duration = info.get("duration")
+                if (
+                    effective_range is not None
+                    and effective_range.duration_seconds is not None
+                    and isinstance(source_duration, (int, float))
+                    and source_duration > 0
+                ):
+                    duration_scale = min(
+                        1.0, effective_range.duration_seconds / float(source_duration)
                     )
-                    _evict_extract_info(url)
-                    extracted, _ = _extract_info_cached(
-                        ydl, url, force_refresh=True
+                candidates = (
+                    _audio_format_candidates(
+                        info,
+                        max_file_bytes=max_file_bytes,
+                        duration_scale=duration_scale,
                     )
-                    info = _pick_info(extracted)
-                    if effective_range is not None:
-                        effective_range = _resolve_clip_range(effective_range, info)
-                        ydl.params["download_ranges"] = _download_ranges_param(
-                            effective_range
+                    if media_format is MediaFormat.AUDIO
+                    else _format_candidates(
+                        info,
+                        max_file_bytes=max_file_bytes,
+                        duration_scale=duration_scale,
+                        quality_policy=quality_policy,
+                    )
+                )
+                selectors = [candidate.selector for candidate in candidates]
+                if (
+                    media_format is MediaFormat.VIDEO
+                    and quality_policy is not VideoQualityPolicy.AUTO
+                ):
+                    selectors = selectors[:1]
+                fallback_selector = (
+                    _default_audio_selector(effective_range, source_limit)
+                    if media_format is MediaFormat.AUDIO
+                    else _default_video_selector(effective_range, source_limit)
+                )
+                if not selectors or (
+                    media_format is MediaFormat.AUDIO and fallback_selector not in selectors
+                ):
+                    selectors.append(fallback_selector)
+
+                duration_raw = info.get("duration")
+                duration = (
+                    effective_range.duration_seconds
+                    if effective_range is not None
+                    else int(duration_raw)
+                    if isinstance(duration_raw, (int, float))
+                    else None
+                )
+                title = str(info.get("title") or "Media")[:64]
+                best_oversized: tuple[Path, int] | None = None
+                last_error: BaseException | None = None
+                refreshed = False
+
+                for attempt, selector in enumerate(selectors, start=1):
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise DownloadError(
+                            strings.DOWNLOAD_TIMED_OUT.format(timeout_seconds=timeout_seconds)
                         )
                     if abort_event is not None and abort_event.is_set():
                         raise DownloadError(
-                            strings.DOWNLOAD_TIMED_OUT.format(
-                                timeout_seconds=timeout_seconds
+                            strings.DOWNLOAD_TIMED_OUT.format(timeout_seconds=timeout_seconds)
+                        )
+                    attempt_dir = work_dir / f"attempt_{attempt}"
+                    attempt_dir.mkdir(parents=True, exist_ok=True)
+                    _set_attempt_output_template(
+                        ydl, str(attempt_dir / "%(title).80B [%(id)s].%(ext)s")
+                    )
+                    _set_attempt_format_selector(ydl, selector)
+                    source_bytes.clear()
+                    source_too_large.clear()
+                    slow_source.clear()
+                    transfer_started_at = time.monotonic()
+                    next_quality_sample = _QUALITY_SAMPLE_SECONDS
+                    can_step_down = (
+                        media_format is MediaFormat.VIDEO
+                        and quality_policy is VideoQualityPolicy.AUTO
+                        and max_estimated_download_seconds > 0
+                        and attempt < len(selectors)
+                    )
+                    estimate = next(
+                        (
+                            candidate.estimated_size
+                            for candidate in candidates
+                            if candidate.selector == selector
+                        ),
+                        None,
+                    )
+                    video_estimated_bytes = None
+                    if media_format is MediaFormat.VIDEO:
+                        video_format_id = selector.split("+", maxsplit=1)[0]
+                        formats = info.get("formats")
+                        if isinstance(formats, list):
+                            for item in formats:
+                                if (
+                                    isinstance(item, dict)
+                                    and item.get("format_id") == video_format_id
+                                ):
+                                    video_estimated_bytes = _format_bytes(
+                                        item,
+                                        duration_scale,
+                                        (
+                                            float(effective_range.duration_seconds)
+                                            if effective_range is not None
+                                            and effective_range.duration_seconds is not None
+                                            else None
+                                        ),
+                                    )
+                                    break
+                        logger.info(
+                            "Video format attempt started: "
+                            "format=%s quality=%s estimated_bytes=%s range=%s",
+                            selector,
+                            _video_quality_for_selector(info, selector),
+                            estimate if estimate is not None else "unknown",
+                            format_time_range(effective_range)
+                            if effective_range is not None
+                            else "full",
+                        )
+                    if effective_range is not None:
+                        logger.info(
+                            "Clip transfer started: format=%s estimated_bytes=%s range=%s",
+                            selector,
+                            estimate if estimate is not None else "unknown",
+                            format_time_range(effective_range),
+                        )
+                    try:
+                        try:
+                            processed = ydl.process_ie_result(
+                                copy.deepcopy(extracted), download=True
                             )
-                        ) from download_exc
-                    processed = ydl.process_ie_result(extracted, download=True)
+                        except yt_dlp.utils.DownloadError as download_exc:
+                            if (
+                                from_cache
+                                and not refreshed
+                                and _looks_like_stale_cdn_url(download_exc)
+                            ):
+                                logger.info(
+                                    "Cached extract stale for %s; refreshing before retry",
+                                    safe_url_for_log(url),
+                                )
+                                _evict_extract_info(url)
+                                extracted, _ = _extract_info_cached(ydl, url, force_refresh=True)
+                                info = _pick_info(extracted)
+                                refreshed = True
+                                if effective_range is not None:
+                                    effective_range = _resolve_clip_range(effective_range, info)
+                                    ydl.params["download_ranges"] = _download_ranges_param(
+                                        effective_range
+                                    )
+                                processed = ydl.process_ie_result(
+                                    copy.deepcopy(extracted), download=True
+                                )
+                            else:
+                                raise
+                        if isinstance(processed, dict):
+                            attempt_info = _pick_info(processed)
+                        else:
+                            attempt_info = info
+                        path = _resolve_downloaded_path(attempt_info, attempt_dir, ydl)
+                        if not path.exists():
+                            raise DownloadError(strings.DOWNLOAD_NO_FILE)
+                        if media_format is MediaFormat.AUDIO:
+                            path = _convert_audio_for_telegram(
+                                path,
+                                max_file_bytes=max_file_bytes,
+                                deadline=deadline,
+                                abort_event=abort_event,
+                            )
+                        size = path.stat().st_size
+                        if size <= 0:
+                            raise DownloadError(strings.DOWNLOAD_EMPTY_FILE)
+                        if size > source_limit:
+                            raise DownloadError(
+                                strings.DOWNLOAD_EXCEEDS_LIMIT.format(
+                                    max_mb=source_limit // (1024 * 1024)
+                                )
+                            )
+                        if size <= max_file_bytes:
+                            if is_clip:
+                                logger.info(
+                                    "Clip transfer and processing took %.1fs for %s",
+                                    time.monotonic() - transfer_started_at,
+                                    safe_url_for_log(url),
+                                )
+                            result_path = work_dir / f"selected{path.suffix}"
+                            path.replace(result_path)
+                            return DownloadedMedia(
+                                path=result_path,
+                                title=str(attempt_info.get("title") or title)[:64],
+                                kind=(
+                                    MediaKind.AUDIO
+                                    if media_format is MediaFormat.AUDIO
+                                    else _classify(result_path)
+                                ),
+                                duration=duration,
+                            )
+                        preserved = work_dir / f"oversized_{attempt}{path.suffix}"
+                        path.replace(preserved)
+                        if best_oversized is None or size < best_oversized[1]:
+                            if best_oversized is not None:
+                                best_oversized[0].unlink(missing_ok=True)
+                            best_oversized = (preserved, size)
+                        else:
+                            preserved.unlink(missing_ok=True)
+                    except (yt_dlp.utils.DownloadError, DownloadError) as exc:
+                        last_error = exc
+                        if slow_source.is_set():
+                            logger.info(
+                                "Video format %s exceeded the %ds estimated download target; "
+                                "trying a lower quality",
+                                selector,
+                                max_estimated_download_seconds,
+                            )
+                        if not source_too_large.is_set() and not isinstance(exc, DownloadError):
+                            message = str(exc).split("\n")[-1].strip()
+                            logger.debug(
+                                "Format candidate %s failed for %s: %s",
+                                selector,
+                                safe_url_for_log(url),
+                                message,
+                            )
+                    finally:
+                        _cleanup_dir(attempt_dir)
 
-                if is_clip:
-                    logger.info(
-                        "Clip section transfer and ffmpeg processing took %.1fs for %s",
-                        time.monotonic() - transfer_started_at,
-                        safe_url_for_log(url),
+                if best_oversized is not None and media_format is MediaFormat.VIDEO:
+                    optimized_path = _optimize_video_file(
+                        best_oversized[0],
+                        max_file_bytes=max_file_bytes,
+                        deadline=deadline,
+                        abort_event=abort_event,
+                        on_optimizing=on_optimizing,
                     )
-                if isinstance(processed, dict):
-                    info = _pick_info(processed)
-
-                path = _resolve_downloaded_path(info, work_dir, ydl)
-                if not path.exists():
-                    raise DownloadError(strings.DOWNLOAD_NO_FILE)
-
-                size = path.stat().st_size
-                if size <= 0:
-                    raise DownloadError(strings.DOWNLOAD_EMPTY_FILE)
-                if size > max_file_bytes:
-                    path.unlink(missing_ok=True)
+                    return DownloadedMedia(
+                        path=optimized_path,
+                        title=title,
+                        kind=_classify(optimized_path),
+                        duration=duration,
+                    )
+                if isinstance(last_error, DownloadError):
+                    raise last_error
+                if last_error is not None:
+                    message = str(last_error).split("\n")[-1].strip()
+                    if media_format is MediaFormat.AUDIO and _is_audio_unavailable_error(
+                        message
+                    ):
+                        raise DownloadError(strings.AUDIO_UNAVAILABLE) from last_error
                     raise DownloadError(
-                        strings.DOWNLOAD_TOO_LARGE.format(
-                            size_mb=size // (1024 * 1024),
-                            max_mb=max_file_bytes // (1024 * 1024),
-                        )
-                    )
-
-                title = str(info.get("title") or path.stem)[:64]
-                duration: int | None
-                if effective_range is not None:
-                    duration = effective_range.duration_seconds
-                else:
-                    duration_raw = info.get("duration")
-                    duration = (
-                        int(duration_raw)
-                        if isinstance(duration_raw, (int, float))
-                        else None
-                    )
-
-                if abort_event is not None and abort_event.is_set():
-                    raise DownloadError(
-                        strings.DOWNLOAD_TIMED_OUT.format(
-                            timeout_seconds=timeout_seconds
-                        )
-                    )
-
-                return DownloadedMedia(
-                    path=path,
-                    title=title,
-                    kind=_classify(path),
-                    duration=duration,
-                )
+                        strings.DOWNLOAD_FAILED_GENERIC,
+                        retryable=_is_transient_download_error(message),
+                    ) from last_error
+                raise DownloadError(strings.DOWNLOAD_NO_FILE)
     except DownloadError:
         _cleanup_dir(work_dir)
         raise
     except yt_dlp.utils.DownloadError as exc:
         _cleanup_dir(work_dir)
         message = str(exc).split("\n")[-1].strip() or strings.DOWNLOAD_FAILED_GENERIC
-        logger.warning(
-            "yt-dlp download error for %s: %s", safe_url_for_log(url), message
-        )
+        if media_format is MediaFormat.AUDIO and _is_audio_unavailable_error(message):
+            logger.info("No compatible audio stream available for %s", safe_url_for_log(url))
+            raise DownloadError(strings.AUDIO_UNAVAILABLE) from exc
+        logger.warning("yt-dlp download error for %s: %s", safe_url_for_log(url), message)
         if "File is larger than max-filesize" in message or "filesize" in message.lower():
             raise DownloadError(
-                strings.DOWNLOAD_EXCEEDS_LIMIT.format(
-                    max_mb=max_file_bytes // (1024 * 1024)
-                )
+                strings.DOWNLOAD_EXCEEDS_LIMIT.format(max_mb=max_file_bytes // (1024 * 1024))
             ) from exc
         raise DownloadError(
             strings.DOWNLOAD_FAILED_GENERIC,
@@ -1023,12 +2153,14 @@ def _download_sync(
         ) from exc
     except Exception as exc:
         _cleanup_dir(work_dir)
-        logger.warning(
-            "Download failed for %s: %s", safe_url_for_log(url), exc
-        )
+        message = str(exc).split("\n")[-1].strip() or strings.DOWNLOAD_FAILED_GENERIC
+        if media_format is MediaFormat.AUDIO and _is_audio_unavailable_error(message):
+            logger.info("No compatible audio stream available for %s", safe_url_for_log(url))
+            raise DownloadError(strings.AUDIO_UNAVAILABLE) from exc
+        logger.warning("Download failed for %s: %s", safe_url_for_log(url), message)
         raise DownloadError(
             strings.DOWNLOAD_FAILED_GENERIC,
-            retryable=_is_transient_download_error(str(exc)),
+            retryable=_is_transient_download_error(message),
         ) from exc
 
 
@@ -1046,6 +2178,22 @@ def _cleanup_dir(directory: Path) -> None:
         directory.rmdir()
 
 
+def _cleanup_finished_download(
+    worker: asyncio.Task[DownloadedMedia], work_dir_holder: list[Path]
+) -> None:
+    """Clean an aborted worker's files only after its thread has stopped."""
+    try:
+        worker.result()
+    except (asyncio.CancelledError, Exception):
+        pass
+
+    if work_dir_holder:
+        try:
+            _cleanup_dir(work_dir_holder[0])
+        except OSError:
+            logger.debug("Could not clean completed download directory", exc_info=True)
+
+
 async def download_media(
     url: str,
     download_dir: Path,
@@ -1058,6 +2206,11 @@ async def download_media(
     slideshow_max_images: int = 35,
     slideshow_images_loop: bool = DEFAULT_SLIDESHOW_IMAGES_LOOP,
     time_range: TimeRange | None = None,
+    media_format: MediaFormat = MediaFormat.VIDEO,
+    quality_policy: VideoQualityPolicy = VideoQualityPolicy.AUTO,
+    max_estimated_download_seconds: int = DEFAULT_MAX_ESTIMATED_DOWNLOAD_SECONDS,
+    max_media_duration_seconds: int = DEFAULT_MAX_MEDIA_DURATION_SECONDS,
+    on_optimizing: Callable[[], None] | None = None,
 ) -> DownloadedMedia:
     if not is_allowed_media_host(url, allowed_hosts):
         raise DownloadError(strings.DOWNLOAD_HOST_NOT_ALLOWED)
@@ -1068,37 +2221,46 @@ async def download_media(
 
     abort_event = threading.Event()
     work_dir_holder: list[Path] = []
-    try:
-        return await asyncio.wait_for(
-            asyncio.to_thread(
-                _download_sync,
-                url,
-                download_dir,
-                max_file_bytes,
-                timeout_seconds,
-                abort_event,
-                work_dir_holder,
-                https_only=https_only,
-                allowed_hosts=allowed_hosts,
-                slideshow_slide_ms=slideshow_slide_ms,
-                slideshow_max_images=slideshow_max_images,
-                slideshow_images_loop=slideshow_images_loop,
-                time_range=time_range,
-            ),
-            timeout=timeout_seconds,
+    worker = asyncio.create_task(
+        asyncio.to_thread(
+            _download_sync,
+            url,
+            download_dir,
+            max_file_bytes,
+            timeout_seconds,
+            abort_event,
+            work_dir_holder,
+            https_only=https_only,
+            allowed_hosts=allowed_hosts,
+            slideshow_slide_ms=slideshow_slide_ms,
+            slideshow_max_images=slideshow_max_images,
+            slideshow_images_loop=slideshow_images_loop,
+            time_range=time_range,
+            media_format=media_format,
+            quality_policy=quality_policy,
+            max_estimated_download_seconds=max_estimated_download_seconds,
+            max_media_duration_seconds=max_media_duration_seconds,
+            on_optimizing=on_optimizing,
         )
-    except TimeoutError as exc:
-        abort_event.set()
-        if work_dir_holder:
-            _cleanup_dir(work_dir_holder[0])
-        raise DownloadError(
-            strings.DOWNLOAD_TIMED_OUT.format(timeout_seconds=timeout_seconds)
-        ) from exc
+    )
+    try:
+        completed, _ = await asyncio.wait({worker}, timeout=timeout_seconds)
     except asyncio.CancelledError:
         abort_event.set()
-        if work_dir_holder:
-            _cleanup_dir(work_dir_holder[0])
+        worker.add_done_callback(
+            lambda task: _cleanup_finished_download(task, work_dir_holder)
+        )
         raise
+
+    if worker not in completed:
+        abort_event.set()
+        worker.add_done_callback(
+            lambda task: _cleanup_finished_download(task, work_dir_holder)
+        )
+        raise DownloadError(
+            strings.DOWNLOAD_TIMED_OUT.format(timeout_seconds=timeout_seconds)
+        )
+    return worker.result()
 
 
 def cleanup_media(media: DownloadedMedia) -> None:
@@ -1142,6 +2304,7 @@ def _extract_direct_stream_sync(
     url: str,
     max_file_bytes: int,
     *,
+    media_format: MediaFormat = MediaFormat.VIDEO,
     https_only: bool = False,
 ) -> DirectMediaStream | None:
     if https_only and not is_https_url(url):
@@ -1177,18 +2340,30 @@ def _extract_direct_stream_sync(
                 )
 
                 direct = info.get("url")
-                selected_size = info.get("filesize") or info.get("filesize_approx")
+                selected_size = info.get("filesize")
                 if (
                     isinstance(direct, str)
                     and direct.startswith("http")
                     and is_safe_media_url(direct, https_only=https_only)
                     and ".m3u8" not in direct
                     and ".mpd" not in direct
-                    and info.get("vcodec") != "none"
                     and (
-                        not isinstance(selected_size, (int, float))
-                        or selected_size <= max_file_bytes
+                        info.get("vcodec") == "none"
+                        if media_format is MediaFormat.AUDIO
+                        else info.get("vcodec") not in (None, "none")
                     )
+                    and (
+                        info.get("acodec") not in (None, "none")
+                        if media_format is MediaFormat.AUDIO
+                        else True
+                    )
+                    and (
+                        str(info.get("ext") or "").lower() in {"mp3", "m4a"}
+                        if media_format is MediaFormat.AUDIO
+                        else True
+                    )
+                    and isinstance(selected_size, (int, float))
+                    and 0 < selected_size <= max_file_bytes
                 ):
                     ext = str(info.get("ext") or "mp4")
                     kind = _classify_ext(ext)
@@ -1198,6 +2373,7 @@ def _extract_direct_stream_sync(
                             title=title,
                             kind=kind,
                             duration=duration,
+                            size_bytes=int(selected_size),
                         )
 
                 formats = info.get("formats") or []
@@ -1223,16 +2399,22 @@ def _extract_direct_stream_sync(
                     kind = _classify_ext(ext)
                     if kind is MediaKind.DOCUMENT:
                         continue
-                    if f.get("vcodec") == "none" or f.get("acodec") == "none":
+                    if media_format is MediaFormat.AUDIO:
+                        if f.get("vcodec") != "none" or f.get("acodec") in (None, "none"):
+                            continue
+                        if ext.lower().lstrip(".") not in {"mp3", "m4a"}:
+                            continue
+                    elif f.get("vcodec") in (None, "none"):
                         continue
-                    size = f.get("filesize") or f.get("filesize_approx")
-                    if size and isinstance(size, (int, float)) and size > max_file_bytes:
+                    size = f.get("filesize")
+                    if not isinstance(size, (int, float)) or not 0 < size <= max_file_bytes:
                         continue
                     return DirectMediaStream(
                         direct_url=u,
                         title=title,
                         kind=kind,
                         duration=duration,
+                        size_bytes=int(size),
                     )
     except Exception as exc:
         logger.debug(
@@ -1249,6 +2431,7 @@ async def get_direct_stream(
     timeout_seconds: int = 15,
     allowed_hosts: frozenset[str] | None = None,
     *,
+    media_format: MediaFormat = MediaFormat.VIDEO,
     https_only: bool = False,
 ) -> DirectMediaStream | None:
     if not is_allowed_media_host(url, allowed_hosts):
@@ -1264,6 +2447,7 @@ async def get_direct_stream(
                 _extract_direct_stream_sync,
                 url,
                 max_file_bytes,
+                media_format=media_format,
                 https_only=https_only,
             ),
             timeout=timeout_seconds,

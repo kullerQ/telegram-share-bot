@@ -11,7 +11,7 @@ from collections.abc import Generator
 from dataclasses import dataclass
 from pathlib import Path
 
-from telegram_share_bot.downloader import MediaKind, TimeRange
+from telegram_share_bot.downloader import MediaFormat, MediaKind, TimeRange
 from telegram_share_bot.normalizer import is_public_cacheable_url, normalize_url, safe_url_for_log
 
 logger = logging.getLogger(__name__)
@@ -23,14 +23,35 @@ _RECOVERABLE_DB_ERRORS = (
 )
 
 
-def _cache_key(url: str, time_range: TimeRange | None = None) -> str | None:
-    """Normalized URL, with an optional clip suffix so clips do not collide."""
+def _legacy_cache_key(url: str, time_range: TimeRange | None = None) -> str | None:
+    """Key format used before requested format and quality were cache dimensions."""
     norm_url = normalize_url(url)
     if not norm_url:
         return None
     if time_range is None:
         return norm_url
     return f"{norm_url}{time_range.cache_suffix()}"
+
+
+def _cache_key(
+    url: str,
+    time_range: TimeRange | None = None,
+    *,
+    media_format: MediaFormat = MediaFormat.VIDEO,
+    quality_policy: str = "best-fit",
+) -> str | None:
+    """Key cached Telegram files by clip range, requested format, and quality."""
+    legacy_key = _legacy_cache_key(url, time_range)
+    if legacy_key is None:
+        return None
+    quality = quality_policy.strip().lower()
+    if not quality or any(char not in "abcdefghijklmnopqrstuvwxyz0123456789-" for char in quality):
+        quality = "best-fit"
+    norm_url = normalize_url(url)
+    if not norm_url:
+        return None
+    clip_suffix = time_range.cache_suffix() if time_range is not None else ""
+    return f"{norm_url}#format={media_format.value}&quality={quality}{clip_suffix}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +61,7 @@ class CachedMedia:
     kind: MediaKind
     title: str
     duration: int | None
+    video_height: int | None = None
 
 
 class MediaCache:
@@ -76,11 +98,15 @@ class MediaCache:
                         media_kind TEXT NOT NULL,
                         title TEXT NOT NULL,
                         duration INTEGER,
+                        video_height INTEGER,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         last_used_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     );
                     """
                 )
+                columns = {row[1] for row in conn.execute("PRAGMA table_info(media_cache)")}
+                if "video_height" not in columns:
+                    conn.execute("ALTER TABLE media_cache ADD COLUMN video_height INTEGER")
                 conn.execute(
                     """
                     CREATE INDEX IF NOT EXISTS idx_media_cache_last_used
@@ -122,7 +148,7 @@ class MediaCache:
             cursor = conn.cursor()
             cursor.execute(
                 """
-                SELECT file_id, media_kind, title, duration
+                SELECT file_id, media_kind, title, duration, video_height
                 FROM media_cache
                 WHERE url = ?
                 """,
@@ -147,6 +173,7 @@ class MediaCache:
                 kind=MediaKind(row[1]),
                 title=row[2],
                 duration=row[3],
+                video_height=row[4],
             )
 
     def _set_sync(
@@ -156,20 +183,24 @@ class MediaCache:
         kind: MediaKind,
         title: str,
         duration: int | None,
+        video_height: int | None = None,
     ) -> None:
         with self._connection() as conn:
             conn.execute(
                 """
-                INSERT INTO media_cache (url, file_id, media_kind, title, duration, last_used_at)
-                VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                INSERT INTO media_cache (
+                    url, file_id, media_kind, title, duration, video_height, last_used_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                 ON CONFLICT(url) DO UPDATE SET
                     file_id = excluded.file_id,
                     media_kind = excluded.media_kind,
                     title = excluded.title,
                     duration = excluded.duration,
+                    video_height = excluded.video_height,
                     last_used_at = CURRENT_TIMESTAMP
                 """,
-                (norm_url, file_id, kind.value, title, duration),
+                (norm_url, file_id, kind.value, title, duration, video_height),
             )
 
     def _evict_sync(self, norm_url: str) -> bool:
@@ -192,13 +223,14 @@ class MediaCache:
         kind: MediaKind,
         title: str,
         duration: int | None,
+        video_height: int | None = None,
     ) -> None:
         try:
-            self._set_sync(norm_url, file_id, kind, title, duration)
+            self._set_sync(norm_url, file_id, kind, title, duration, video_height)
         except _RECOVERABLE_DB_ERRORS as exc:
             if not self._recover_db(exc):
                 raise
-            self._set_sync(norm_url, file_id, kind, title, duration)
+            self._set_sync(norm_url, file_id, kind, title, duration, video_height)
 
     def _evict_with_recovery(self, norm_url: str) -> bool:
         try:
@@ -209,7 +241,12 @@ class MediaCache:
             return self._evict_sync(norm_url)
 
     async def get(
-        self, url: str, *, time_range: TimeRange | None = None
+        self,
+        url: str,
+        *,
+        time_range: TimeRange | None = None,
+        media_format: MediaFormat = MediaFormat.VIDEO,
+        quality_policy: str = "best-fit",
     ) -> CachedMedia | None:
         """Fetch cached media by raw or normalized URL.
 
@@ -217,13 +254,77 @@ class MediaCache:
         """
         if not is_public_cacheable_url(url):
             return None
-        key = _cache_key(url, time_range)
+        key = _cache_key(
+            url,
+            time_range,
+            media_format=media_format,
+            quality_policy=quality_policy,
+        )
         if not key:
             return None
         try:
-            return await asyncio.to_thread(self._get_with_recovery, key)
+            cached = await asyncio.to_thread(self._get_with_recovery, key)
+            if cached is not None:
+                return cached
+            if media_format is MediaFormat.VIDEO and quality_policy == "best-fit":
+                legacy_key = _legacy_cache_key(url, time_range)
+                if legacy_key is not None and legacy_key != key:
+                    return await asyncio.to_thread(self._get_with_recovery, legacy_key)
+            return None
         except _RECOVERABLE_DB_ERRORS:
             return None
+
+    async def get_preferred_video(
+        self,
+        url: str,
+        *,
+        time_range: TimeRange | None = None,
+        quality_policy: str = "auto-best",
+    ) -> CachedMedia | None:
+        """Reuse a prepared video when it meets the requested quality tier.
+
+        A Best upload is preferable to Auto. For a named progressive tier,
+        cross-policy reuse requires Telegram's measured output height.
+        """
+        if quality_policy == "source-best":
+            return await self.get(url, time_range=time_range, quality_policy=quality_policy)
+        if quality_policy == "auto-best":
+            best = await self.get(url, time_range=time_range, quality_policy="source-best")
+            auto = await self.get(url, time_range=time_range, quality_policy=quality_policy)
+            if best is None or best.kind is not MediaKind.VIDEO:
+                return auto
+            if auto is None or auto.kind is not MediaKind.VIDEO:
+                return best
+            if best.video_height is None:
+                return auto if auto.video_height is not None else best
+            if auto.video_height is not None and auto.video_height > best.video_height:
+                return auto
+            return best
+
+        target_height = 720 if quality_policy == "balanced" else None
+        if quality_policy.endswith("p") and quality_policy[:-1].isdigit():
+            target_height = int(quality_policy[:-1])
+        if target_height is not None:
+            candidates: list[CachedMedia] = []
+            for policy in ("source-best", "auto-best", quality_policy):
+                candidate = await self.get(url, time_range=time_range, quality_policy=policy)
+                if (
+                    candidate is not None
+                    and candidate.kind is MediaKind.VIDEO
+                    and candidate.video_height is not None
+                    and candidate.video_height >= target_height
+                ):
+                    candidates.append(candidate)
+            if candidates:
+                return max(candidates, key=lambda item: item.video_height or 0)
+        return await self.get(url, time_range=time_range, quality_policy=quality_policy)
+
+    async def evict_entry(self, cached: CachedMedia) -> None:
+        """Remove the exact entry used, including a cross-policy cache hit."""
+        try:
+            await asyncio.to_thread(self._evict_with_recovery, cached.url)
+        except _RECOVERABLE_DB_ERRORS:
+            return
 
     async def set(
         self,
@@ -234,6 +335,9 @@ class MediaCache:
         duration: int | None,
         *,
         time_range: TimeRange | None = None,
+        media_format: MediaFormat = MediaFormat.VIDEO,
+        quality_policy: str = "best-fit",
+        video_height: int | None = None,
     ) -> None:
         """Cache media file_id under the normalized URL.
 
@@ -241,16 +345,19 @@ class MediaCache:
         Failures after recovery are logged and swallowed so downloads still succeed.
         """
         if not is_public_cacheable_url(url):
-            logger.debug(
-                "Skipping cache for non-public URL: %s", safe_url_for_log(url)
-            )
+            logger.debug("Skipping cache for non-public URL: %s", safe_url_for_log(url))
             return
-        key = _cache_key(url, time_range)
+        key = _cache_key(
+            url,
+            time_range,
+            media_format=media_format,
+            quality_policy=quality_policy,
+        )
         if not key:
             return
         try:
             await asyncio.to_thread(
-                self._set_with_recovery, key, file_id, kind, title, duration
+                self._set_with_recovery, key, file_id, kind, title, duration, video_height
             )
             logger.debug("Cached file_id for %s (%s)", key, kind.value)
         except _RECOVERABLE_DB_ERRORS as exc:
@@ -261,17 +368,33 @@ class MediaCache:
             )
 
     async def evict(
-        self, url: str, *, time_range: TimeRange | None = None
+        self,
+        url: str,
+        *,
+        time_range: TimeRange | None = None,
+        media_format: MediaFormat = MediaFormat.VIDEO,
+        quality_policy: str = "best-fit",
     ) -> None:
         """Evict a URL from the cache (e.g. if file_id is invalid).
 
         Missing/deleted DB is treated as already empty.
         """
-        key = _cache_key(url, time_range)
+        key = _cache_key(
+            url,
+            time_range,
+            media_format=media_format,
+            quality_policy=quality_policy,
+        )
         if not key:
             return
         try:
             removed = await asyncio.to_thread(self._evict_with_recovery, key)
+            if media_format is MediaFormat.VIDEO and quality_policy == "best-fit":
+                legacy_key = _legacy_cache_key(url, time_range)
+                if legacy_key is not None and legacy_key != key:
+                    removed = (
+                        await asyncio.to_thread(self._evict_with_recovery, legacy_key)
+                    ) or removed
         except _RECOVERABLE_DB_ERRORS:
             return
         if removed:

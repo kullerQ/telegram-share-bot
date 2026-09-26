@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import tempfile
 import threading
-import time
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -17,11 +17,14 @@ from telegram_share_bot.downloader import (
 
 
 class TestDownloadTimeout(unittest.IsolatedAsyncioTestCase):
-    async def test_download_media_cleans_up_on_timeout(self) -> None:
+    async def test_download_timeout_defers_cleanup_until_worker_stops(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             download_dir = Path(tmp_dir)
+            worker_started = threading.Event()
+            allow_worker_to_finish = threading.Event()
+            worker_finished = threading.Event()
+            partial_file = download_dir / "slow_test_uuid" / "partial.mp4.part"
 
-            # A slow download function that sleeps longer than timeout
             def slow_download(
                 url,
                 download_dir,
@@ -32,29 +35,50 @@ class TestDownloadTimeout(unittest.IsolatedAsyncioTestCase):
                 https_only=False,
                 **_kwargs,
             ):
+                _ = url, max_file_bytes, timeout_seconds, abort_event, https_only
                 created = download_dir / "slow_test_uuid"
                 created.mkdir(parents=True, exist_ok=True)
-                (created / "partial.mp4").write_bytes(b"partial video data")
                 if work_dir_holder is not None:
                     work_dir_holder.append(created)
+                try:
+                    with partial_file.open("wb") as partial:
+                        partial.write(b"partial video data")
+                        partial.flush()
+                        worker_started.set()
+                        allow_worker_to_finish.wait(timeout=2)
+                        partial.write(b"finished")
+                    raise DownloadError("worker finished after outer timeout")
+                finally:
+                    worker_finished.set()
 
-                # Wait for timeout to trigger
-                time.sleep(0.3)
-                return MagicMock()
-
-            with patch("telegram_share_bot.downloader._download_sync", side_effect=slow_download):
-                with self.assertRaises(DownloadError) as ctx:
-                    await download_media(
+            with patch(
+                "telegram_share_bot.downloader._download_sync",
+                side_effect=slow_download,
+            ):
+                request = asyncio.create_task(
+                    download_media(
                         url="https://www.youtube.com/watch?v=dQw4w9WgXcQ",
                         download_dir=download_dir,
                         max_file_bytes=10 * 1024 * 1024,
-                        timeout_seconds=0.1,  # Short timeout
+                        timeout_seconds=0.1,
                     )
-                self.assertIn("Download timed out", str(ctx.exception))
+                )
+                try:
+                    self.assertTrue(await asyncio.to_thread(worker_started.wait, 2))
+                    with self.assertRaises(DownloadError) as ctx:
+                        await request
+                    self.assertIn("Download timed out", str(ctx.exception))
+                    self.assertFalse(worker_finished.is_set())
+                    self.assertTrue(partial_file.exists())
+                finally:
+                    allow_worker_to_finish.set()
+                    self.assertTrue(await asyncio.to_thread(worker_finished.wait, 2))
 
-            # Ensure the directory was cleaned up on timeout
-            remaining_dirs = list(download_dir.glob("*"))
-            self.assertEqual(len(remaining_dirs), 0)
+            for _ in range(100):
+                if not list(download_dir.iterdir()):
+                    break
+                await asyncio.sleep(0.01)
+            self.assertEqual(list(download_dir.iterdir()), [])
 
     def test_progress_hook_aborts_when_cancelled(self) -> None:
         abort_event = threading.Event()

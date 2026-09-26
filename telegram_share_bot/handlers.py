@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import logging
 import time
+from collections import deque
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any, cast
@@ -25,6 +26,7 @@ from telegram import (
     Message,
     Update,
 )
+from telegram.constants import ChatType
 from telegram.error import BadRequest, NetworkError, TelegramError, TimedOut
 from telegram.ext import ContextTypes
 
@@ -40,10 +42,13 @@ from telegram_share_bot.downloader import (
     DirectMediaStream,
     DownloadedMedia,
     DownloadError,
+    MediaFormat,
     MediaKind,
     TimeRange,
+    VideoQualityPolicy,
     cleanup_media,
     download_media,
+    ensure_full_media_duration,
     extract_media_request,
     format_time_range,
     get_direct_stream,
@@ -64,7 +69,17 @@ _CALLBACK_PREFIX = "cancel:"
 _RETRY_PREFIX = "retry:"
 _FULL_FALLBACK_PREFIX = "fallback:"
 _CLIP_CALLBACK_PREFIX = "clip:"
+_CLIP_AUDIO_CALLBACK_PREFIX = "clipaudio:"
 _FULL_CALLBACK_PREFIX = "full:"
+_FULL_AUDIO_CALLBACK_PREFIX = "fullaudio:"
+_VIDEO_CALLBACK_PREFIX = "video:"
+_VIDEO_BEST_CALLBACK_PREFIX = "video-best:"
+_VIDEO_BALANCED_CALLBACK_PREFIX = "video-balanced:"
+_AUDIO_CALLBACK_PREFIX = "audio:"
+_CLIP_BEST_CALLBACK_PREFIX = "clip-best:"
+_CLIP_BALANCED_CALLBACK_PREFIX = "clip-balanced:"
+_FULL_BEST_CALLBACK_PREFIX = "full-best:"
+_FULL_BALANCED_CALLBACK_PREFIX = "full-balanced:"
 _PENDING_KEY = "pending_inline"
 _PENDING_CLIP_KEY = "pending_clip_choice"
 _TASKS_KEY = "inline_prepare_tasks"
@@ -72,6 +87,8 @@ _CANCELLED_KEY = "cancelled_inline"
 _USER_DOWNLOADS_KEY = "user_download_counts"
 _USER_DOWNLOADS_LOCK_KEY = "user_download_lock"
 _USER_COOLDOWN_KEY = "user_download_cooldowns"
+_USER_REQUEST_TIMES_KEY = "user_download_request_times"
+_USER_REQUEST_CLEANUP_KEY = "user_download_request_cleanup"
 _EMPTY_KEYBOARD = InlineKeyboardMarkup([])
 
 _MAX_PENDING_INLINE = 1000
@@ -79,6 +96,7 @@ _MAX_PENDING_CLIP = 500
 _MAX_CANCELLED_INLINE = 500
 _UPLOAD_MAX_ATTEMPTS = 3
 _UPLOAD_RETRY_BASE_DELAY_SECONDS = 1.5
+_DOWNLOAD_REQUEST_WINDOW_SECONDS = 60.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,13 +104,15 @@ class PendingInline:
     url: str
     custom_caption: str | None = None
     time_range: TimeRange | None = None
+    media_format: MediaFormat = MediaFormat.VIDEO
+    quality_policy: VideoQualityPolicy = VideoQualityPolicy.AUTO
 
 
 @dataclass(frozen=True, slots=True)
 class PendingClipChoice:
     url: str
     custom_caption: str | None
-    time_range: TimeRange
+    time_range: TimeRange | None
     chat_id: int
 
 
@@ -118,6 +138,10 @@ def _cache(context: ContextTypes.DEFAULT_TYPE) -> MediaCache:
     if not isinstance(cache, MediaCache):
         raise TypeError("MediaCache was not attached to the application.")
     return cache
+
+
+def _cache_quality_policy(media_format: MediaFormat, quality_policy: VideoQualityPolicy) -> str:
+    return quality_policy.value if media_format is MediaFormat.VIDEO else "best-fit"
 
 
 @contextlib.asynccontextmanager
@@ -153,21 +177,54 @@ def _user_cooldowns(context: ContextTypes.DEFAULT_TYPE) -> dict[int, float]:
     return cast(dict[int, float], raw)
 
 
+def _user_request_times(
+    context: ContextTypes.DEFAULT_TYPE,
+) -> dict[int, deque[float]]:
+    raw = context.application.bot_data.setdefault(_USER_REQUEST_TIMES_KEY, {})
+    return cast(dict[int, deque[float]], raw)
+
+
 async def _try_acquire_user_download_slot(
     context: ContextTypes.DEFAULT_TYPE, user_id: int | None
 ) -> str | None:
-    """Reserve a per-user download slot.
+    """Apply per-user request and in-flight limits.
 
     Returns None on success, or a user-facing error string on denial.
     ``max_downloads_per_user == 0`` disables the per-user in-flight cap.
+    Requests denied by the cooldown or in-flight cap still count toward the
+    rolling request limit.
     """
     if user_id is None:
         return strings.ACCESS_DENIED
     settings = _settings(context)
     max_per_user = settings.max_downloads_per_user
+    max_per_minute = settings.max_downloads_per_minute
     cooldown = settings.download_cooldown_seconds
     now = time.monotonic()
     async with _user_download_lock(context):
+        if max_per_minute > 0:
+            request_times = _user_request_times(context)
+            last_cleanup = context.application.bot_data.get(_USER_REQUEST_CLEANUP_KEY, now)
+            if now - last_cleanup >= _DOWNLOAD_REQUEST_WINDOW_SECONDS:
+                cutoff = now - _DOWNLOAD_REQUEST_WINDOW_SECONDS
+                for tracked_user_id, tracked_timestamps in tuple(request_times.items()):
+                    while tracked_timestamps and tracked_timestamps[0] <= cutoff:
+                        tracked_timestamps.popleft()
+                    if not tracked_timestamps:
+                        request_times.pop(tracked_user_id, None)
+                context.application.bot_data[_USER_REQUEST_CLEANUP_KEY] = now
+
+            timestamps = request_times.get(user_id)
+            if timestamps is None:
+                timestamps = deque()
+                request_times[user_id] = timestamps
+            cutoff = now - _DOWNLOAD_REQUEST_WINDOW_SECONDS
+            while timestamps and timestamps[0] <= cutoff:
+                timestamps.popleft()
+            if len(timestamps) >= max_per_minute:
+                return strings.DOWNLOADS_PER_MINUTE_LIMITED.format(limit=max_per_minute)
+            timestamps.append(now)
+
         counts = _user_download_counts(context)
         cooldowns = _user_cooldowns(context)
         last_started = cooldowns.get(user_id)
@@ -206,10 +263,16 @@ def _store_pending_url(
     url: str,
     custom_caption: str | None = None,
     time_range: TimeRange | None = None,
+    media_format: MediaFormat = MediaFormat.VIDEO,
+    quality_policy: VideoQualityPolicy = VideoQualityPolicy.AUTO,
 ) -> None:
     pending = _pending_map(context)
     pending[result_id] = PendingInline(
-        url=url, custom_caption=custom_caption, time_range=time_range
+        url=url,
+        custom_caption=custom_caption,
+        time_range=time_range,
+        media_format=media_format,
+        quality_policy=quality_policy,
     )
     while len(pending) > _MAX_PENDING_INLINE:
         try:
@@ -239,21 +302,76 @@ def _store_pending_clip_choice(
             break
 
 
+def _format_choice_keyboard(choice_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    strings.DIRECT_VIDEO_BUTTON,
+                    callback_data=f"{_VIDEO_CALLBACK_PREFIX}{choice_id}",
+                ),
+                InlineKeyboardButton(
+                    strings.DIRECT_AUDIO_BUTTON,
+                    callback_data=f"{_AUDIO_CALLBACK_PREFIX}{choice_id}",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    strings.DIRECT_BEST_VIDEO_BUTTON,
+                    callback_data=f"{_VIDEO_BEST_CALLBACK_PREFIX}{choice_id}",
+                ),
+                InlineKeyboardButton(
+                    strings.DIRECT_BALANCED_VIDEO_BUTTON,
+                    callback_data=f"{_VIDEO_BALANCED_CALLBACK_PREFIX}{choice_id}",
+                ),
+            ],
+        ]
+    )
+
+
 def _clip_choice_keyboard(choice_id: str, time_range: TimeRange) -> InlineKeyboardMarkup:
     range_label = format_time_range(time_range)
     return InlineKeyboardMarkup(
         [
             [
                 InlineKeyboardButton(
-                    strings.INLINE_PENDING_CLIP_TITLE.format(range_label=range_label),
+                    strings.DIRECT_CLIP_VIDEO_BUTTON.format(range_label=range_label),
                     callback_data=f"{_CLIP_CALLBACK_PREFIX}{choice_id}",
-                )
+                ),
+                InlineKeyboardButton(
+                    strings.DIRECT_CLIP_AUDIO_BUTTON.format(range_label=range_label),
+                    callback_data=f"{_CLIP_AUDIO_CALLBACK_PREFIX}{choice_id}",
+                ),
             ],
             [
                 InlineKeyboardButton(
-                    strings.INLINE_PENDING_FULL_TITLE,
+                    strings.DIRECT_CLIP_BEST_VIDEO_BUTTON,
+                    callback_data=f"{_CLIP_BEST_CALLBACK_PREFIX}{choice_id}",
+                ),
+                InlineKeyboardButton(
+                    strings.DIRECT_CLIP_BALANCED_VIDEO_BUTTON,
+                    callback_data=f"{_CLIP_BALANCED_CALLBACK_PREFIX}{choice_id}",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    strings.DIRECT_FULL_VIDEO_BUTTON,
                     callback_data=f"{_FULL_CALLBACK_PREFIX}{choice_id}",
-                )
+                ),
+                InlineKeyboardButton(
+                    strings.DIRECT_FULL_AUDIO_BUTTON,
+                    callback_data=f"{_FULL_AUDIO_CALLBACK_PREFIX}{choice_id}",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    strings.DIRECT_FULL_BEST_VIDEO_BUTTON,
+                    callback_data=f"{_FULL_BEST_CALLBACK_PREFIX}{choice_id}",
+                ),
+                InlineKeyboardButton(
+                    strings.DIRECT_FULL_BALANCED_VIDEO_BUTTON,
+                    callback_data=f"{_FULL_BALANCED_CALLBACK_PREFIX}{choice_id}",
+                ),
             ],
         ]
     )
@@ -269,9 +387,7 @@ def _cancelled_set(context: ContextTypes.DEFAULT_TYPE) -> set[str]:
     return cast(set[str], raw)
 
 
-def _record_cancelled_inline(
-    context: ContextTypes.DEFAULT_TYPE, inline_message_id: str
-) -> None:
+def _record_cancelled_inline(context: ContextTypes.DEFAULT_TYPE, inline_message_id: str) -> None:
     cancelled = _cancelled_set(context)
     cancelled.add(inline_message_id)
     while len(cancelled) > _MAX_CANCELLED_INLINE:
@@ -311,18 +427,14 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if update.effective_message is None or update.effective_chat is None:
         return
 
-    if not _is_user_allowed(
-        context, update.effective_user.id if update.effective_user else None
-    ):
+    if not _is_user_allowed(context, update.effective_user.id if update.effective_user else None):
         await update.effective_message.reply_text(strings.ACCESS_DENIED)
         return
 
     bot_name = context.bot.first_name or strings.BOT_DISPLAY_NAME
     bot_username = context.bot.username or strings.FALLBACK_BOT_USERNAME
     await update.effective_message.reply_text(
-        strings.START_MESSAGE.format(
-            bot_name=bot_name, bot_username=bot_username
-        ),
+        strings.START_MESSAGE.format(bot_name=bot_name, bot_username=bot_username),
     )
 
 
@@ -331,9 +443,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if message is None:
         return
 
-    if not _is_user_allowed(
-        context, update.effective_user.id if update.effective_user else None
-    ):
+    if not _is_user_allowed(context, update.effective_user.id if update.effective_user else None):
         await message.reply_text(strings.ACCESS_DENIED)
         return
 
@@ -346,9 +456,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     else:
         caption_help = strings.HELP_CAPTION_MEDIA
     await message.reply_text(
-        strings.HELP_MESSAGE.format(
-            bot_username=bot_username, caption_help=caption_help
-        ),
+        strings.HELP_MESSAGE.format(bot_username=bot_username, caption_help=caption_help),
     )
 
 
@@ -371,7 +479,6 @@ async def url_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await message.reply_text(strings.DIRECT_URL_HINT)
         return
 
-    display_url = safe_url_for_log(url)
     settings = _settings(context)
 
     if not is_allowed_media_host(url, settings.allowed_media_hosts):
@@ -395,49 +502,100 @@ async def url_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             ),
         )
         await message.reply_text(
-            strings.DIRECT_CLIP_PROMPT.format(
-                range_label=format_time_range(time_range)
-            ),
+            strings.DIRECT_CLIP_FORMAT_PROMPT.format(range_label=format_time_range(time_range)),
             reply_markup=_clip_choice_keyboard(choice_id, time_range),
         )
         return
 
-    cache = _cache(context)
-    cached = await cache.get(url, time_range=None)
-    if cached is not None:
-        logger.info("Cache hit for direct URL: %s", display_url)
-        try:
-            await _send_cached_media_to_chat(
-                context,
-                message.chat_id,
-                cached,
-                custom_caption=custom_caption,
-            )
-            return
-        except BadRequest as exc:
-            logger.warning(
-                "Cached file_id invalid for %s, evicting and falling back to download: %s",
-                display_url,
-                exc.message,
-            )
-            await cache.evict(url, time_range=None)
-        except Exception:
-            logger.exception(
-                "Failed sending cached media for %s, falling back", display_url
-            )
-            await cache.evict(url, time_range=None)
+    choice_id = uuid4().hex
+    _store_pending_clip_choice(
+        context,
+        choice_id,
+        PendingClipChoice(
+            url=url,
+            custom_caption=custom_caption,
+            time_range=None,
+            chat_id=message.chat_id,
+        ),
+    )
+    await message.reply_text(
+        strings.DIRECT_FORMAT_PROMPT,
+        reply_markup=_format_choice_keyboard(choice_id),
+    )
 
+
+async def audio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _explicit_format_command(update, context, MediaFormat.AUDIO)
+
+
+async def video_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _explicit_format_command(update, context, MediaFormat.VIDEO)
+
+
+async def _explicit_format_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    media_format: MediaFormat,
+) -> None:
+    message = update.effective_message
+    chat = update.effective_chat
+    if message is None or not message.text:
+        return
+    if chat is None or chat.type != ChatType.PRIVATE:
+        await message.reply_text(strings.DIRECT_COMMAND_PRIVATE_ONLY)
+        return
+    user_id = update.effective_user.id if update.effective_user else None
+    if not _is_user_allowed(context, user_id):
+        await message.reply_text(strings.ACCESS_DENIED)
+        return
+    raw_request = message.text.partition(" ")[2].strip()
+    quality_policy = VideoQualityPolicy.AUTO
+    if media_format is MediaFormat.VIDEO:
+        mode, separator, remainder = raw_request.partition(" ")
+        requested_policy = {
+            "auto": VideoQualityPolicy.AUTO,
+            "best": VideoQualityPolicy.BEST,
+            "balanced": VideoQualityPolicy.BALANCED,
+        }.get(mode.lower())
+        if requested_policy is not None:
+            quality_policy = requested_policy
+            raw_request = remainder.strip() if separator else ""
+    request = extract_media_request(raw_request)
+    if request.url is None:
+        usage = (
+            strings.DIRECT_AUDIO_USAGE
+            if media_format is MediaFormat.AUDIO
+            else strings.DIRECT_VIDEO_USAGE
+        )
+        await message.reply_text(usage)
+        return
+    settings = _settings(context)
+    if not is_allowed_media_host(request.url, settings.allowed_media_hosts):
+        await message.reply_text(strings.DOWNLOAD_HOST_NOT_ALLOWED)
+        return
+    if settings.https_only and not is_https_url(request.url):
+        await message.reply_text(strings.DOWNLOAD_HTTPS_REQUIRED)
+        return
     status = await message.reply_text(strings.DIRECT_PREPARING)
     await _run_direct_download(
         context,
         chat_id=message.chat_id,
         user_id=user_id,
-        url=url,
-        custom_caption=custom_caption,
-        time_range=None,
+        url=request.url,
+        custom_caption=request.custom_caption,
+        time_range=request.time_range,
         status_message=status,
-        skip_cache=True,
+        media_format=media_format,
+        quality_policy=quality_policy,
     )
+
+
+async def _remove_completed_direct_status(status_message: Message) -> None:
+    """Remove transient progress text after its media has been delivered."""
+    try:
+        await status_message.delete()
+    except TelegramError:
+        logger.debug("Could not remove completed direct status message")
 
 
 async def _run_direct_download(
@@ -449,14 +607,25 @@ async def _run_direct_download(
     custom_caption: str | None,
     time_range: TimeRange | None,
     status_message: Message,
+    media_format: MediaFormat = MediaFormat.VIDEO,
+    quality_policy: VideoQualityPolicy = VideoQualityPolicy.AUTO,
     skip_cache: bool = False,
 ) -> None:
     display_url = safe_url_for_log(url)
     cache = _cache(context)
     settings = _settings(context)
+    cache_quality = _cache_quality_policy(media_format, quality_policy)
 
     if not skip_cache:
-        cached = await cache.get(url, time_range=time_range)
+        cached = (
+            await cache.get_preferred_video(
+                url, time_range=time_range, quality_policy=cache_quality
+            )
+            if media_format is MediaFormat.VIDEO
+            else await cache.get(
+                url, time_range=time_range, media_format=media_format, quality_policy=cache_quality
+            )
+        )
         if cached is not None:
             logger.info("Cache hit for direct URL: %s", display_url)
             try:
@@ -467,7 +636,7 @@ async def _run_direct_download(
                     cached,
                     custom_caption=custom_caption,
                 )
-                await status_message.edit_text(strings.DIRECT_DONE)
+                await _remove_completed_direct_status(status_message)
                 return
             except BadRequest as exc:
                 logger.warning(
@@ -475,12 +644,10 @@ async def _run_direct_download(
                     display_url,
                     exc.message,
                 )
-                await cache.evict(url, time_range=time_range)
+                await cache.evict_entry(cached)
             except Exception:
-                logger.exception(
-                    "Failed sending cached media for %s, falling back", display_url
-                )
-                await cache.evict(url, time_range=time_range)
+                logger.exception("Failed sending cached media for %s, falling back", display_url)
+                await cache.evict_entry(cached)
 
     denial = await _try_acquire_user_download_slot(context, user_id)
     if denial is not None:
@@ -490,15 +657,19 @@ async def _run_direct_download(
     media: DownloadedMedia | None = None
     try:
         # Direct URL import skips clips (would fetch the whole video).
-        if time_range is None:
+        if time_range is None and media_format is MediaFormat.AUDIO:
             direct_stream = await get_direct_stream(
                 url=url,
                 max_file_bytes=settings.max_file_bytes,
                 timeout_seconds=min(15, settings.download_timeout_seconds),
                 allowed_hosts=settings.allowed_media_hosts,
+                media_format=media_format,
                 https_only=settings.https_only,
             )
             if direct_stream is not None:
+                ensure_full_media_duration(
+                    direct_stream.duration, settings.max_media_duration_seconds
+                )
                 await status_message.edit_text(strings.DIRECT_UPLOADING)
                 file_id_info = await _upload_direct_url_for_file_id(
                     context, settings, direct_stream
@@ -512,6 +683,8 @@ async def _run_direct_download(
                         title=title,
                         duration=direct_stream.duration,
                         time_range=None,
+                        media_format=media_format,
+                        quality_policy=cache_quality,
                     )
                     await _send_cached_media_to_chat(
                         context,
@@ -525,10 +698,19 @@ async def _run_direct_download(
                         ),
                         custom_caption=custom_caption,
                     )
-                    await status_message.edit_text(strings.DIRECT_DONE)
+                    await _remove_completed_direct_status(status_message)
                     return
 
         await status_message.edit_text(strings.DIRECT_DOWNLOADING)
+        loop = asyncio.get_running_loop()
+
+        def show_optimization_status() -> None:
+            future = asyncio.run_coroutine_threadsafe(
+                status_message.edit_text(strings.OPTIMIZING_FOR_TELEGRAM), loop
+            )
+            with contextlib.suppress(Exception):
+                future.result(timeout=5)
+
         async with _download_slot(context):
             media = await download_media(
                 url=url,
@@ -536,11 +718,16 @@ async def _run_direct_download(
                 max_file_bytes=settings.max_file_bytes,
                 timeout_seconds=settings.download_timeout_seconds,
                 allowed_hosts=settings.allowed_media_hosts,
+                media_format=media_format,
+                quality_policy=quality_policy,
+                max_estimated_download_seconds=settings.max_estimated_download_seconds,
                 https_only=settings.https_only,
                 slideshow_slide_ms=settings.slideshow_slide_ms,
                 slideshow_max_images=settings.slideshow_max_images,
                 slideshow_images_loop=settings.slideshow_images_loop,
                 time_range=time_range,
+                max_media_duration_seconds=settings.max_media_duration_seconds,
+                on_optimizing=show_optimization_status,
             )
             await status_message.edit_text(strings.DIRECT_UPLOADING)
             sent_msg = await _send_media_to_chat(
@@ -558,8 +745,11 @@ async def _run_direct_download(
             title=media.title,
             duration=media.duration,
             time_range=time_range,
+            media_format=media_format,
+            quality_policy=cache_quality,
+            video_height=_message_video_height(sent_msg),
         )
-        await status_message.edit_text(strings.DIRECT_DONE)
+        await _remove_completed_direct_status(status_message)
     except DownloadError as exc:
         logger.warning("Direct download failed for %s: %s", display_url, exc)
         await status_message.edit_text(str(exc) or strings.DIRECT_DOWNLOAD_FAILED)
@@ -659,74 +849,68 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     preview = await platform_previews.resolve_preview(url)
 
+    choices: list[tuple[str, MediaFormat, TimeRange | None, bool]] = []
+    choice_token = uuid4().hex
     if time_range is not None:
-        base_id = uuid4().hex
-        clip_id = f"clip:{base_id}"
-        full_id = f"full:{base_id}"
-        _store_pending_url(
-            context,
-            clip_id,
-            url,
-            custom_caption=custom_caption,
-            time_range=time_range,
-        )
-        _store_pending_url(
-            context,
-            full_id,
-            url,
-            custom_caption=custom_caption,
-            time_range=None,
-        )
-        clip_cached = await _cache(context).get(url, time_range=time_range)
-        full_cached = await _cache(context).get(url, time_range=None)
-        await _answer_inline_query(
-            query,
-            results=[
-                _pending_media_article(
-                    clip_id,
-                    url,
-                    logo_base_url=settings.platform_logo_base_url,
-                    preview=preview,
-                    cached=clip_cached,
-                    time_range=time_range,
-                ),
-                _pending_media_article(
-                    full_id,
-                    url,
-                    logo_base_url=settings.platform_logo_base_url,
-                    preview=preview,
-                    cached=full_cached,
-                    time_range=None,
-                    force_full_title=True,
-                ),
-            ],
-            cache_time=1,
-            is_personal=True,
-        )
-        return
+        choices = [
+            (f"clip-video:{choice_token}", MediaFormat.VIDEO, time_range, False),
+            (f"clip-audio:{choice_token}", MediaFormat.AUDIO, time_range, False),
+            (f"full-video:{choice_token}", MediaFormat.VIDEO, None, True),
+            (f"full-audio:{choice_token}", MediaFormat.AUDIO, None, True),
+        ]
+    else:
+        choices = [
+            (f"video:{choice_token}", MediaFormat.VIDEO, None, False),
+            (f"audio:{choice_token}", MediaFormat.AUDIO, None, False),
+        ]
 
-    result_id = uuid4().hex
-    _store_pending_url(context, result_id, url, custom_caption=custom_caption)
-    cached = await _cache(context).get(url)
-    await _answer_inline_query(
-        query,
-        results=[
+    results: list[InlineQueryResultArticle] = []
+    for result_id, media_format, selected_range, force_full_title in choices:
+        quality_policy = VideoQualityPolicy.AUTO
+        _store_pending_url(
+            context,
+            result_id,
+            url,
+            custom_caption=custom_caption,
+            time_range=selected_range,
+            media_format=media_format,
+            quality_policy=quality_policy,
+        )
+        cache_quality = _cache_quality_policy(media_format, quality_policy)
+        cached = (
+            await _cache(context).get_preferred_video(
+                url, time_range=selected_range, quality_policy=cache_quality
+            )
+            if media_format is MediaFormat.VIDEO
+            else await _cache(context).get(
+                url,
+                time_range=selected_range,
+                media_format=media_format,
+                quality_policy=cache_quality,
+            )
+        )
+        results.append(
             _pending_media_article(
                 result_id,
                 url,
                 logo_base_url=settings.platform_logo_base_url,
                 preview=preview,
                 cached=cached,
+                time_range=selected_range,
+                media_format=media_format,
+                quality_policy=quality_policy,
+                force_full_title=force_full_title,
             )
-        ],
+        )
+    await _answer_inline_query(
+        query,
+        results=results,
         cache_time=1,
         is_personal=True,
     )
 
 
-async def chosen_inline_result(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> None:
+async def chosen_inline_result(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Download after the user picks a result, then edit the inline message."""
     chosen = update.chosen_inline_result
     if chosen is None:
@@ -739,8 +923,7 @@ async def chosen_inline_result(
     inline_message_id = chosen.inline_message_id
     if not inline_message_id:
         logger.warning(
-            "Chosen inline result without inline_message_id "
-            "(enable BotFather /setinlinefeedback)."
+            "Chosen inline result without inline_message_id (enable BotFather /setinlinefeedback)."
         )
         return
 
@@ -749,18 +932,28 @@ async def chosen_inline_result(
     url: str | None
     custom_caption: str | None
     time_range: TimeRange | None
+    media_format: MediaFormat
+    quality_policy: VideoQualityPolicy
     if pending is not None:
         url = pending.url
         custom_caption = pending.custom_caption
         time_range = pending.time_range
+        media_format = pending.media_format
+        quality_policy = pending.quality_policy
     else:
         request = extract_media_request(chosen.query or "")
         url = request.url
         custom_caption = request.custom_caption
-        # result_id prefix decides clip vs full when pending was evicted
-        if chosen.result_id.startswith("full:"):
+        result_id = chosen.result_id
+        media_format = (
+            MediaFormat.AUDIO
+            if result_id.startswith(("audio:", "clip-audio:", "full-audio:"))
+            else MediaFormat.VIDEO
+        )
+        quality_policy = VideoQualityPolicy.AUTO
+        if result_id.startswith("full-"):
             time_range = None
-        elif chosen.result_id.startswith("clip:"):
+        elif result_id.startswith("clip-"):
             time_range = request.time_range
         else:
             time_range = None
@@ -798,15 +991,15 @@ async def chosen_inline_result(
             user_id=user_id,
             custom_caption=custom_caption,
             time_range=time_range,
+            media_format=media_format,
+            quality_policy=quality_policy,
         ),
         name=f"prepare-inline-{chosen.result_id}",
     )
     tasks[inline_message_id] = task
 
 
-async def retry_inline_callback(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> None:
+async def retry_inline_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Retry a transient inline failure or switch a failed clip to its full video."""
     query = update.callback_query
     if query is None or query.data is None:
@@ -853,6 +1046,8 @@ async def retry_inline_callback(
         pending.url,
         custom_caption=pending.custom_caption,
         time_range=time_range,
+        media_format=pending.media_format,
+        quality_policy=pending.quality_policy,
     )
     await query.answer(text=strings.INLINE_RETRY_ANSWER)
     display_url = safe_url_for_log(pending.url)
@@ -879,15 +1074,59 @@ async def retry_inline_callback(
             user_id=user_id,
             custom_caption=pending.custom_caption,
             time_range=time_range,
+            media_format=pending.media_format,
+            quality_policy=pending.quality_policy,
         ),
         name=f"retry-inline-{result_id}",
     )
     tasks[inline_message_id] = task
 
 
-async def clip_choice_callback(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> None:
+async def direct_format_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Apply a private-chat Video or Audio choice to the pending link."""
+    query = update.callback_query
+    if query is None or query.data is None:
+        return
+    user_id = query.from_user.id if query.from_user else None
+    if not _is_user_allowed(context, user_id):
+        await query.answer(text=strings.ACCESS_DENIED, show_alert=True)
+        return
+    choices = (
+        (_VIDEO_BEST_CALLBACK_PREFIX, MediaFormat.VIDEO, VideoQualityPolicy.BEST),
+        (_VIDEO_BALANCED_CALLBACK_PREFIX, MediaFormat.VIDEO, VideoQualityPolicy.BALANCED),
+        (_VIDEO_CALLBACK_PREFIX, MediaFormat.VIDEO, VideoQualityPolicy.AUTO),
+        (_AUDIO_CALLBACK_PREFIX, MediaFormat.AUDIO, VideoQualityPolicy.AUTO),
+    )
+    selected = next((choice for choice in choices if query.data.startswith(choice[0])), None)
+    if selected is None:
+        await query.answer()
+        return
+    prefix, media_format, quality_policy = selected
+    choice_id = query.data.removeprefix(prefix)
+    pending = _pending_clip_map(context).pop(choice_id, None)
+    if pending is None:
+        await query.answer(text=strings.DIRECT_CLIP_EXPIRED, show_alert=True)
+        return
+    msg = query.message
+    if not isinstance(msg, Message):
+        await query.answer()
+        return
+    await query.answer(text=strings.DIRECT_CLIP_CHOICE_ANSWER)
+    await msg.edit_text(strings.DIRECT_DOWNLOADING, reply_markup=None)
+    await _run_direct_download(
+        context,
+        chat_id=pending.chat_id,
+        user_id=user_id,
+        url=pending.url,
+        custom_caption=pending.custom_caption,
+        time_range=pending.time_range,
+        status_message=msg,
+        media_format=media_format,
+        quality_policy=quality_policy,
+    )
+
+
+async def clip_choice_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Private-chat clip vs full-video choice after a YouTube range was detected."""
     query = update.callback_query
     if query is None or query.data is None:
@@ -899,13 +1138,21 @@ async def clip_choice_callback(
         return
 
     data = query.data
-    want_clip = data.startswith(_CLIP_CALLBACK_PREFIX)
-    want_full = data.startswith(_FULL_CALLBACK_PREFIX)
-    if not want_clip and not want_full:
+    choices = (
+        (_CLIP_BEST_CALLBACK_PREFIX, True, MediaFormat.VIDEO, VideoQualityPolicy.BEST),
+        (_CLIP_BALANCED_CALLBACK_PREFIX, True, MediaFormat.VIDEO, VideoQualityPolicy.BALANCED),
+        (_CLIP_CALLBACK_PREFIX, True, MediaFormat.VIDEO, VideoQualityPolicy.AUTO),
+        (_CLIP_AUDIO_CALLBACK_PREFIX, True, MediaFormat.AUDIO, VideoQualityPolicy.AUTO),
+        (_FULL_BEST_CALLBACK_PREFIX, False, MediaFormat.VIDEO, VideoQualityPolicy.BEST),
+        (_FULL_BALANCED_CALLBACK_PREFIX, False, MediaFormat.VIDEO, VideoQualityPolicy.BALANCED),
+        (_FULL_CALLBACK_PREFIX, False, MediaFormat.VIDEO, VideoQualityPolicy.AUTO),
+        (_FULL_AUDIO_CALLBACK_PREFIX, False, MediaFormat.AUDIO, VideoQualityPolicy.AUTO),
+    )
+    selected = next((choice for choice in choices if data.startswith(choice[0])), None)
+    if selected is None:
         await query.answer()
         return
-
-    prefix = _CLIP_CALLBACK_PREFIX if want_clip else _FULL_CALLBACK_PREFIX
+    prefix, want_clip, media_format, quality_policy = selected
     choice_id = data.removeprefix(prefix)
     pending = _pending_clip_map(context).pop(choice_id, None)
     if pending is None:
@@ -927,9 +1174,7 @@ async def clip_choice_callback(
         msg = query.message
         if isinstance(msg, Message):
             await msg.edit_text(
-                strings.DOWNLOAD_CLIP_TOO_LONG.format(
-                    max_minutes=MAX_CLIP_SECONDS // 60
-                ),
+                strings.DOWNLOAD_CLIP_TOO_LONG.format(max_minutes=MAX_CLIP_SECONDS // 60),
                 reply_markup=None,
             )
         return
@@ -950,6 +1195,8 @@ async def clip_choice_callback(
         custom_caption=pending.custom_caption,
         time_range=time_range,
         status_message=msg,
+        media_format=media_format,
+        quality_policy=quality_policy,
     )
 
 
@@ -959,9 +1206,7 @@ async def cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if query is None or query.data is None:
         return
 
-    if not _is_user_allowed(
-        context, query.from_user.id if query.from_user else None
-    ):
+    if not _is_user_allowed(context, query.from_user.id if query.from_user else None):
         await query.answer(text=strings.ACCESS_DENIED, show_alert=True)
         return
 
@@ -999,9 +1244,12 @@ async def _prepare_inline_media(
     user_id: int | None = None,
     custom_caption: str | None = None,
     time_range: TimeRange | None = None,
+    media_format: MediaFormat = MediaFormat.VIDEO,
+    quality_policy: VideoQualityPolicy = VideoQualityPolicy.AUTO,
 ) -> None:
     settings = _settings(context)
     cache = _cache(context)
+    cache_quality = _cache_quality_policy(media_format, quality_policy)
     display_url = safe_url_for_log(url)
     media: DownloadedMedia | None = None
     keep_pending_for_retry = False
@@ -1009,7 +1257,15 @@ async def _prepare_inline_media(
 
     try:
         # 1. Attempt instant send from cache
-        cached = await cache.get(url, time_range=time_range)
+        cached = (
+            await cache.get_preferred_video(
+                url, time_range=time_range, quality_policy=cache_quality
+            )
+            if media_format is MediaFormat.VIDEO
+            else await cache.get(
+                url, time_range=time_range, media_format=media_format, quality_policy=cache_quality
+            )
+        )
         if cached is not None:
             logger.info("Cache hit for inline media: %s", display_url)
             try:
@@ -1021,9 +1277,7 @@ async def _prepare_inline_media(
                     custom_caption=custom_caption,
                 )
                 await context.bot.edit_message_media(
-                    media=_input_media(
-                        cached.file_id, cached.title, cached.kind, caption=caption
-                    ),
+                    media=_input_media(cached.file_id, cached.title, cached.kind, caption=caption),
                     inline_message_id=inline_message_id,
                     reply_markup=_EMPTY_KEYBOARD,
                 )
@@ -1035,18 +1289,17 @@ async def _prepare_inline_media(
                 return
             except BadRequest as exc:
                 logger.warning(
-                    "Cached file_id invalid in inline edit for %s, "
-                    "evicting and falling back: %s",
+                    "Cached file_id invalid in inline edit for %s, evicting and falling back: %s",
                     display_url,
                     exc.message,
                 )
-                await cache.evict(url, time_range=time_range)
+                await cache.evict_entry(cached)
             except Exception:
                 logger.exception(
                     "Failed editing inline media from cache for %s, falling back",
                     display_url,
                 )
-                await cache.evict(url, time_range=time_range)
+                await cache.evict_entry(cached)
 
         # 2. Cache miss or fallback to download pipeline
         if inline_message_id in _cancelled_set(context):
@@ -1054,15 +1307,19 @@ async def _prepare_inline_media(
         # The chosen article already contains the checking status and Cancel button.
         # Try direct URL import via Telegram first (fastest, zero local upload bandwidth).
         # Skip for clips — that path would send the whole video.
-        if time_range is None:
+        if time_range is None and media_format is MediaFormat.AUDIO:
             direct_stream = await get_direct_stream(
                 url=url,
                 max_file_bytes=settings.max_file_bytes,
                 timeout_seconds=min(15, settings.download_timeout_seconds),
                 allowed_hosts=settings.allowed_media_hosts,
+                media_format=media_format,
                 https_only=settings.https_only,
             )
             if direct_stream is not None:
+                ensure_full_media_duration(
+                    direct_stream.duration, settings.max_media_duration_seconds
+                )
                 if inline_message_id in _cancelled_set(context):
                     return
                 await _edit_inline_text(
@@ -1083,6 +1340,8 @@ async def _prepare_inline_media(
                         title=title,
                         duration=direct_stream.duration,
                         time_range=None,
+                        media_format=media_format,
+                        quality_policy=cache_quality,
                     )
                     if inline_message_id in _cancelled_set(context):
                         return
@@ -1110,6 +1369,21 @@ async def _prepare_inline_media(
             reply_markup=_cancel_keyboard(result_id),
         )
         queue_started_at = time.monotonic()
+        loop = asyncio.get_running_loop()
+
+        def show_optimization_status() -> None:
+            future = asyncio.run_coroutine_threadsafe(
+                _edit_inline_text(
+                    context,
+                    inline_message_id,
+                    strings.OPTIMIZING_FOR_TELEGRAM,
+                    reply_markup=_cancel_keyboard(result_id),
+                ),
+                loop,
+            )
+            with contextlib.suppress(Exception):
+                future.result(timeout=5)
+
         async with _download_slot(context):
             if inline_message_id in _cancelled_set(context):
                 return
@@ -1131,6 +1405,11 @@ async def _prepare_inline_media(
                 slideshow_max_images=settings.slideshow_max_images,
                 slideshow_images_loop=settings.slideshow_images_loop,
                 time_range=time_range,
+                media_format=media_format,
+                quality_policy=quality_policy,
+                max_estimated_download_seconds=settings.max_estimated_download_seconds,
+                max_media_duration_seconds=settings.max_media_duration_seconds,
+                on_optimizing=show_optimization_status,
             )
             logger.info(
                 "Inline download completed in %.1fs for %s",
@@ -1146,7 +1425,7 @@ async def _prepare_inline_media(
                 reply_markup=_cancel_keyboard(result_id),
             )
             upload_started_at = time.monotonic()
-            file_id, title, kind = await _upload_for_file_id(context, settings, media)
+            file_id, title, kind, video_height = await _upload_for_file_id(context, settings, media)
             logger.info(
                 "Inline Telegram upload completed in %.1fs for %s",
                 time.monotonic() - upload_started_at,
@@ -1159,6 +1438,9 @@ async def _prepare_inline_media(
             title=title,
             duration=media.duration,
             time_range=time_range,
+            media_format=media_format,
+            quality_policy=cache_quality,
+            video_height=video_height,
         )
         if inline_message_id in _cancelled_set(context):
             return
@@ -1193,13 +1475,15 @@ async def _prepare_inline_media(
                 url,
                 custom_caption=custom_caption,
                 time_range=time_range,
+                media_format=media_format,
+                quality_policy=quality_policy,
             )
         await _edit_inline_text(
             context,
             inline_message_id,
             str(exc) or strings.INLINE_CHOSEN_DOWNLOAD_FAILED,
             reply_markup=(
-                _retry_keyboard(result_id, time_range)
+                _retry_keyboard(result_id, time_range, media_format)
                 if keep_pending_for_retry
                 else _EMPTY_KEYBOARD
             ),
@@ -1215,12 +1499,13 @@ async def _prepare_inline_media(
             url,
             custom_caption=custom_caption,
             time_range=time_range,
+            media_format=media_format,
         )
         await _edit_inline_text(
             context,
             inline_message_id,
             strings.INLINE_CHOSEN_UPLOAD_FAILED,
-            reply_markup=_retry_keyboard(result_id, time_range),
+            reply_markup=_retry_keyboard(result_id, time_range, media_format),
         )
     except Exception:
         if inline_message_id in _cancelled_set(context):
@@ -1256,12 +1541,12 @@ def _cancel_keyboard(result_id: str) -> InlineKeyboardMarkup:
 
 
 def _retry_keyboard(
-    result_id: str, time_range: TimeRange | None
+    result_id: str,
+    time_range: TimeRange | None,
+    media_format: MediaFormat = MediaFormat.VIDEO,
 ) -> InlineKeyboardMarkup:
     retry_label = (
-        strings.INLINE_RETRY_CLIP_BUTTON
-        if time_range is not None
-        else strings.INLINE_RETRY_BUTTON
+        strings.INLINE_RETRY_CLIP_BUTTON if time_range is not None else strings.INLINE_RETRY_BUTTON
     )
     buttons = [
         InlineKeyboardButton(
@@ -1272,7 +1557,11 @@ def _retry_keyboard(
     if time_range is not None:
         buttons.append(
             InlineKeyboardButton(
-                strings.INLINE_SEND_FULL_BUTTON,
+                (
+                    strings.INLINE_PENDING_FULL_AUDIO_TITLE
+                    if media_format is MediaFormat.AUDIO
+                    else strings.INLINE_SEND_FULL_BUTTON
+                ),
                 callback_data=f"{_FULL_FALLBACK_PREFIX}{result_id}",
             )
         )
@@ -1293,8 +1582,10 @@ def _error_article(title: str, description: str) -> InlineQueryResultArticle:
 def _inline_source_details(url: str, cached: CachedMedia | None) -> tuple[str, str]:
     parsed = urlsplit(url)
     host = (parsed.hostname or "").lower().removeprefix("www.").removeprefix("m.")
-    if host == "youtu.be" or host in {"youtube.com", "youtube-nocookie.com"} or (
-        host.endswith(".youtube.com") or host.endswith(".youtube-nocookie.com")
+    if (
+        host == "youtu.be"
+        or host in {"youtube.com", "youtube-nocookie.com"}
+        or (host.endswith(".youtube.com") or host.endswith(".youtube-nocookie.com"))
     ):
         platform, media_type = "YouTube", "video"
     elif host == "tiktok.com" or host.endswith(".tiktok.com"):
@@ -1331,6 +1622,15 @@ def _inline_source_details(url: str, cached: CachedMedia | None) -> tuple[str, s
     return platform, media_type
 
 
+def _format_media_duration(duration: int) -> str:
+    """Format a known media duration without presenting it as a clip range."""
+    hours, remainder = divmod(duration, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes}:{seconds:02d}"
+
+
 def _pending_media_article(
     result_id: str,
     url: str,
@@ -1339,24 +1639,51 @@ def _pending_media_article(
     preview: platform_previews.Preview | None = None,
     cached: CachedMedia | None = None,
     time_range: TimeRange | None = None,
+    media_format: MediaFormat = MediaFormat.VIDEO,
+    quality_policy: VideoQualityPolicy = VideoQualityPolicy.AUTO,
     force_full_title: bool = False,
 ) -> InlineQueryResultArticle:
     display_url = safe_url_for_log(url)
     platform, media_type = _inline_source_details(url, cached)
+    media_type = "audio" if media_format is MediaFormat.AUDIO else "video"
     details = [platform, media_type.capitalize()]
+    if media_format is MediaFormat.VIDEO:
+        details.append("Q: " +
+            {
+                VideoQualityPolicy.AUTO: strings.INLINE_QUALITY_AUTO_DETAIL,
+                VideoQualityPolicy.BEST: strings.INLINE_QUALITY_BEST_DETAIL,
+                VideoQualityPolicy.BALANCED: strings.INLINE_QUALITY_BALANCED_DETAIL,
+            }[quality_policy]
+        )
+    if time_range is not None:
+        details.append(format_time_range(time_range))
+    elif cached is not None and cached.duration is not None:
+        details.append(_format_media_duration(cached.duration))
     if force_full_title:
-        title = strings.INLINE_PENDING_FULL_TITLE
+        title = (
+            strings.INLINE_PENDING_FULL_AUDIO_TITLE
+            if media_format is MediaFormat.AUDIO
+            else strings.INLINE_PENDING_FULL_TITLE
+        )
         message_text = strings.INLINE_PENDING_MESSAGE.format(url=display_url)
     elif time_range is not None:
         range_label = format_time_range(time_range)
-        title = strings.INLINE_PENDING_CLIP_TITLE.format(range_label=range_label)
+        title = (
+            strings.INLINE_PENDING_AUDIO_CLIP_TITLE.format(range_label=range_label)
+            if media_format is MediaFormat.AUDIO
+            else strings.INLINE_PENDING_VIDEO_CLIP_TITLE.format(range_label=range_label)
+        )
         message_text = strings.INLINE_PENDING_CLIP_MESSAGE.format(
             range_label=range_label, url=display_url
         )
     else:
-        title = strings.INLINE_PENDING_TITLE.format(media_type=media_type)
+        title = (
+            strings.INLINE_PENDING_AUDIO_TITLE
+            if media_format is MediaFormat.AUDIO
+            else strings.INLINE_PENDING_VIDEO_TITLE
+        )
         message_text = strings.INLINE_PENDING_MESSAGE.format(url=display_url)
-    details.append("Instant" if cached is not None else "Download")
+    details.append("Cached" if cached is not None else "Download")
     thumbnail_url = preview.url if preview else platform_icons.thumbnail_url(url, logo_base_url)
     if preview:
         thumbnail_width, thumbnail_height = preview.width, preview.height
@@ -1371,9 +1698,7 @@ def _pending_media_article(
         thumbnail_url=thumbnail_url,
         thumbnail_width=thumbnail_width,
         thumbnail_height=thumbnail_height,
-        input_message_content=InputTextMessageContent(
-            message_text=message_text[:4096]
-        ),
+        input_message_content=InputTextMessageContent(message_text=message_text[:4096]),
         # Keyboard is required so Telegram gives us inline_message_id on choose.
         reply_markup=_cancel_keyboard(result_id),
     )
@@ -1421,9 +1746,7 @@ def _storage_upload_caption(settings: Settings, media_title: str) -> str | None:
     STORAGE_CHAT_ID). Media titles are kept only in ``media`` mode.
     """
     if settings.caption_mode is CaptionMode.MEDIA:
-        return resolve_caption(
-            CaptionMode.MEDIA, media_title=media_title, custom_caption=None
-        )
+        return resolve_caption(CaptionMode.MEDIA, media_title=media_title, custom_caption=None)
     return None
 
 
@@ -1482,7 +1805,7 @@ async def _upload_for_file_id(
     context: ContextTypes.DEFAULT_TYPE,
     settings: Settings,
     media: DownloadedMedia,
-) -> tuple[str, str, MediaKind]:
+) -> tuple[str, str, MediaKind, int | None]:
     message = await _send_media_to_chat(
         context,
         settings.storage_chat_id,
@@ -1501,7 +1824,7 @@ async def _upload_for_file_id(
             )
         except TelegramError:
             logger.debug("Could not delete storage message %s", message.message_id)
-    return file_id, media.title, result_kind
+    return file_id, media.title, result_kind, _message_video_height(message)
 
 
 async def _send_media_to_chat(
@@ -1631,3 +1954,9 @@ def _file_id_and_kind_from_message(message: Message) -> tuple[str, MediaKind]:
     if message.document is not None:
         return message.document.file_id, MediaKind.DOCUMENT
     raise RuntimeError(strings.TELEGRAM_NO_FILE_ID)
+
+
+def _message_video_height(message: Message) -> int | None:
+    video = message.video
+    height = getattr(video, "height", None) if video is not None else None
+    return height if isinstance(height, int) and height > 0 else None

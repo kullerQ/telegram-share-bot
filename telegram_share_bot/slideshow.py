@@ -23,6 +23,7 @@ from yt_dlp.networking.impersonate import ImpersonateTarget
 
 from telegram_share_bot import strings
 from telegram_share_bot.config import (
+    DEFAULT_MAX_MEDIA_DURATION_SECONDS,
     DEFAULT_SLIDESHOW_IMAGES_LOOP,
     DEFAULT_SLIDESHOW_MAX_IMAGES,
     DEFAULT_SLIDESHOW_SLIDE_MS,
@@ -30,8 +31,10 @@ from telegram_share_bot.config import (
 from telegram_share_bot.downloader import (
     DownloadedMedia,
     DownloadError,
+    MediaFormat,
     MediaKind,
     _safe_dns_resolution,
+    ensure_full_media_duration,
     is_safe_media_url,
 )
 from telegram_share_bot.normalizer import safe_url_for_log
@@ -709,7 +712,7 @@ def _run_ffmpeg(
             argv,
             check=False,
             capture_output=True,
-            timeout=max(5.0, timeout_seconds),
+            timeout=max(0.1, timeout_seconds),
         )
     except subprocess.TimeoutExpired as exc:
         raise DownloadError(strings.SLIDESHOW_BUILD_FAILED) from exc
@@ -734,6 +737,7 @@ def build_slideshow_video(
     images_loop: bool = DEFAULT_SLIDESHOW_IMAGES_LOOP,
     abort_event: threading.Event | None = None,
     https_only: bool = False,
+    max_media_duration_seconds: int = DEFAULT_MAX_MEDIA_DURATION_SECONDS,
 ) -> DownloadedMedia:
     """Download slides (+ optional audio) and mux into an MP4 via ffmpeg."""
     ffmpeg_bin = shutil.which("ffmpeg")
@@ -757,7 +761,7 @@ def build_slideshow_video(
     started = time.monotonic()
 
     def _remaining_timeout() -> float:
-        return max(5.0, float(timeout_seconds) - (time.monotonic() - started))
+        return max(0.1, float(timeout_seconds) - (time.monotonic() - started))
 
     try:
         with _safe_dns_resolution():
@@ -813,16 +817,16 @@ def build_slideshow_video(
         audio_duration if audio_path is not None else None,
         images_loop=images_loop,
     )
+    ensure_full_media_duration(total, max_media_duration_seconds)
     sequenced_images = _cycle_images(image_paths, len(slide_durations))
     unique_count = len(image_paths)
     # Half-up so fractional seconds round sensibly for Telegram's int duration.
     duration = max(1, math.floor(total + 0.5))
 
     output_path = work_dir / "slideshow.mp4"
-    encode_attempts: list[tuple[int, int, int]] = [
-        (1080, 1920, 24),
-        (720, 1280, 30),
-    ]
+    # One source render; the shared downloader applies at most two bounded
+    # Telegram-size optimization passes if this output is still too large.
+    encode_attempts: list[tuple[int, int, int]] = [(1080, 1920, 24)]
 
     last_error: Exception | None = None
     for width, height, crf in encode_attempts:
@@ -868,7 +872,7 @@ def build_slideshow_video(
         size = output_path.stat().st_size
         if size > max_file_bytes:
             logger.info(
-                "Slideshow output %s bytes exceeds limit; retrying lower quality",
+                "Slideshow source output %s bytes exceeds bounded source limit",
                 size,
             )
             last_error = DownloadError(
@@ -902,6 +906,8 @@ def download_tiktok_slideshow(
     abort_event: threading.Event | None = None,
     https_only: bool = False,
     allowed_hosts: frozenset[str] | None = None,
+    media_format: MediaFormat = MediaFormat.VIDEO,
+    max_media_duration_seconds: int = DEFAULT_MAX_MEDIA_DURATION_SECONDS,
 ) -> DownloadedMedia | None:
     """If *url* is a TikTok photo post, build and return a slideshow video.
 
@@ -917,6 +923,59 @@ def download_tiktok_slideshow(
         max_images=max_images,
         https_only=https_only,
     )
+    if source.audio_url is not None and (
+        media_format is MediaFormat.AUDIO or images_loop or len(source.image_urls) == 1
+    ):
+        ensure_full_media_duration(
+            source.audio_duration, max_media_duration_seconds
+        )
+    if media_format is MediaFormat.AUDIO:
+        if source.audio_url is None:
+            raise DownloadError(strings.AUDIO_UNAVAILABLE)
+        if https_only and not source.audio_url.lower().startswith("https://"):
+            raise DownloadError(strings.DOWNLOAD_HTTPS_REQUIRED)
+        audio_path = work_dir / f"slideshow-audio.{_guess_ext(source.audio_url, 'm4a')}"
+        ydl_opts: dict[str, Any] = {
+            "quiet": True,
+            "no_warnings": True,
+            "socket_timeout": min(30, timeout_seconds),
+        }
+        try:
+            with _safe_dns_resolution():
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:  # type: ignore[arg-type]
+                    _download_bytes(
+                        ydl,
+                        source.audio_url,
+                        audio_path,
+                        remaining_budget=max_file_bytes,
+                        abort_event=abort_event,
+                    )
+        except DownloadError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "TikTok slideshow soundtrack download failed for %s: %s",
+                safe_url_for_log(source.canonical_url),
+                exc,
+            )
+            raise DownloadError(strings.DOWNLOAD_FAILED_GENERIC) from exc
+        raw_duration = (
+            source.audio_duration
+            if source.audio_duration is not None
+            else _probe_media_duration(audio_path)
+        )
+        duration = (
+            max(1, math.floor(raw_duration + 0.5))
+            if raw_duration is not None
+            else None
+        )
+        ensure_full_media_duration(duration, max_media_duration_seconds)
+        return DownloadedMedia(
+            path=audio_path,
+            title=source.title,
+            kind=MediaKind.AUDIO,
+            duration=duration,
+        )
     return build_slideshow_video(
         source,
         work_dir,
@@ -926,4 +985,5 @@ def download_tiktok_slideshow(
         images_loop=images_loop,
         abort_event=abort_event,
         https_only=https_only,
+        max_media_duration_seconds=max_media_duration_seconds,
     )

@@ -12,6 +12,7 @@ from telegram_share_bot.config import Settings
 from telegram_share_bot.downloader import (
     MAX_CLIP_SECONDS,
     DownloadError,
+    MediaFormat,
     MediaKind,
     TimeRange,
     _clamp_time_range,
@@ -233,6 +234,16 @@ class TestCacheKeyWithRange(unittest.IsolatedAsyncioTestCase):
         self.assertIn("#t=80-125", clip)
         self.assertIn("#t=80-end", open_ended)
 
+    def test_keys_separate_format_and_quality_without_caption_data(self) -> None:
+        url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+        video = _cache_key(url, None, media_format=MediaFormat.VIDEO)
+        audio = _cache_key(url, None, media_format=MediaFormat.AUDIO)
+        lower_quality = _cache_key(
+            url, None, media_format=MediaFormat.VIDEO, quality_policy="720p"
+        )
+        self.assertNotEqual(video, audio)
+        self.assertNotEqual(video, lower_quality)
+
     async def test_cache_roundtrip_separate(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             cache = MediaCache(Path(tmp) / "cache.db")
@@ -287,13 +298,16 @@ class TestInlineClipChoice(unittest.IsolatedAsyncioTestCase):
         query.answer.assert_awaited()
         kwargs = query.answer.await_args.kwargs
         results = kwargs["results"]
-        self.assertEqual(len(results), 2)
-        self.assertTrue(results[0].id.startswith("clip:"))
-        self.assertTrue(results[1].id.startswith("full:"))
-        self.assertIn("clip", results[0].title.lower())
-        self.assertIn("full", results[1].title.lower())
+        self.assertEqual(len(results), 4)
+        self.assertTrue(results[0].id.startswith("clip-video:"))
+        self.assertTrue(results[1].id.startswith("clip-audio:"))
+        self.assertTrue(results[2].id.startswith("full-video:"))
+        self.assertTrue(results[3].id.startswith("full-audio:"))
+        self.assertIn("video clip", results[0].title.lower())
+        self.assertIn("audio clip", results[1].title.lower())
+        self.assertIn("full", results[2].title.lower())
 
-    async def test_youtube_t_alone_offers_two_results(self) -> None:
+    async def test_youtube_t_alone_offers_all_format_choices(self) -> None:
         context = self._context()
         update = MagicMock()
         query = MagicMock()
@@ -304,12 +318,12 @@ class TestInlineClipChoice(unittest.IsolatedAsyncioTestCase):
 
         await inline_query(update, context)
         results = query.answer.await_args.kwargs["results"]
-        self.assertEqual(len(results), 2)
-        self.assertTrue(results[0].id.startswith("clip:"))
-        self.assertTrue(results[1].id.startswith("full:"))
+        self.assertEqual(len(results), 4)
+        self.assertTrue(results[0].id.startswith("clip-video:"))
+        self.assertTrue(results[2].id.startswith("full-video:"))
         self.assertIn("end", results[0].title.lower())
 
-    async def test_youtube_caption_without_range_one_result(self) -> None:
+    async def test_youtube_caption_without_range_offers_video_and_audio(self) -> None:
         context = self._context()
         update = MagicMock()
         query = MagicMock()
@@ -320,10 +334,11 @@ class TestInlineClipChoice(unittest.IsolatedAsyncioTestCase):
 
         await inline_query(update, context)
         results = query.answer.await_args.kwargs["results"]
-        self.assertEqual(len(results), 1)
-        self.assertFalse(results[0].id.startswith("clip:"))
+        self.assertEqual(len(results), 2)
+        self.assertTrue(results[0].id.startswith("video:"))
+        self.assertTrue(results[1].id.startswith("audio:"))
 
-    async def test_tiktok_range_token_one_result(self) -> None:
+    async def test_tiktok_range_token_offers_video_and_audio(self) -> None:
         context = self._context()
         update = MagicMock()
         query = MagicMock()
@@ -340,7 +355,8 @@ class TestInlineClipChoice(unittest.IsolatedAsyncioTestCase):
         ):
             await inline_query(update, context)
         results = query.answer.await_args.kwargs["results"]
-        self.assertEqual(len(results), 1)
+        self.assertEqual(len(results), 2)
+        self.assertEqual([result.title for result in results], ["▶ Send video", "♫ Send audio"])
 
 
 class TestClipDownloadOpts(unittest.TestCase):
@@ -360,6 +376,9 @@ class TestClipDownloadOpts(unittest.TestCase):
 
                 def __exit__(self, *args: object) -> None:
                     return None
+
+                def build_format_selector(self, selector: str) -> str:
+                    return selector
 
                 def process_ie_result(
                     self, info: dict[str, object], download: bool = True
@@ -398,7 +417,7 @@ class TestClipDownloadOpts(unittest.TestCase):
                         {
                             "id": "abc",
                             "title": "Test",
-                            "duration": 600,
+                            "duration": 3600,
                             "ext": "mp4",
                         },
                         False,
@@ -416,7 +435,8 @@ class TestClipDownloadOpts(unittest.TestCase):
                 self.assertTrue(params_holder)
                 self.assertIn("download_ranges", params_holder[0])
                 self.assertNotIn("max_filesize", params_holder[0])
-                self.assertIn("height<=1080", str(params_holder[0].get("format")))
+                self.assertEqual(params_holder[0].get("format"), "bv*+ba/b")
+                self.assertNotIn("height<=1080", str(params_holder[0].get("format")))
 
     def test_clip_too_long_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

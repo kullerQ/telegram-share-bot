@@ -25,11 +25,14 @@ load_dotenv(_ENV_PATH)
 # Stay under Telegram Bot API's ~50 MB upload limit.
 TELEGRAM_MAX_FILE_BYTES = 50 * 1024 * 1024
 DEFAULT_MAX_FILE_BYTES = 45 * 1024 * 1024
-DEFAULT_DOWNLOAD_TIMEOUT_SECONDS = 90
+DEFAULT_DOWNLOAD_TIMEOUT_SECONDS = 120
+DEFAULT_MAX_ESTIMATED_DOWNLOAD_SECONDS = 45
 DEFAULT_UPLOAD_TIMEOUT_SECONDS = 180
 DEFAULT_DELETE_STORAGE_MESSAGES = True
-DEFAULT_MAX_CONCURRENT_DOWNLOADS = 3
+DEFAULT_MAX_CONCURRENT_DOWNLOADS = 6
 DEFAULT_MAX_DOWNLOADS_PER_USER = 3
+DEFAULT_MAX_DOWNLOADS_PER_MINUTE = 10
+DEFAULT_MAX_MEDIA_DURATION_SECONDS = 30 * 60
 DEFAULT_DOWNLOAD_COOLDOWN_SECONDS = 2
 DEFAULT_ALLOW_PUBLIC = False
 DEFAULT_ALLOW_SHARED_STORAGE = False
@@ -95,8 +98,11 @@ class Settings:
     cache_db_path: Path
     delete_storage_messages: bool
     upload_timeout_seconds: int = DEFAULT_UPLOAD_TIMEOUT_SECONDS
+    max_estimated_download_seconds: int = DEFAULT_MAX_ESTIMATED_DOWNLOAD_SECONDS
     max_concurrent_downloads: int = DEFAULT_MAX_CONCURRENT_DOWNLOADS
     max_downloads_per_user: int = DEFAULT_MAX_DOWNLOADS_PER_USER
+    max_downloads_per_minute: int = DEFAULT_MAX_DOWNLOADS_PER_MINUTE
+    max_media_duration_seconds: int = DEFAULT_MAX_MEDIA_DURATION_SECONDS
     download_cooldown_seconds: int = DEFAULT_DOWNLOAD_COOLDOWN_SECONDS
     allowed_user_ids: frozenset[int] = frozenset()
     allow_public: bool = DEFAULT_ALLOW_PUBLIC
@@ -378,6 +384,14 @@ def load_settings(env_file: Path = _ENV_PATH) -> Settings:
         env_file=env_file,
     )
 
+    max_estimated_download_seconds = parse_int(
+        "MAX_ESTIMATED_DOWNLOAD_SECONDS",
+        os.getenv("MAX_ESTIMATED_DOWNLOAD_SECONDS"),
+        default=DEFAULT_MAX_ESTIMATED_DOWNLOAD_SECONDS,
+        min_value=0,
+        env_file=env_file,
+    )
+
     download_dir = _ROOT / "downloads"
     download_dir.mkdir(parents=True, exist_ok=True)
 
@@ -419,6 +433,24 @@ def load_settings(env_file: Path = _ENV_PATH) -> Settings:
         default=DEFAULT_MAX_DOWNLOADS_PER_USER,
         min_value=0,
         max_value=5,
+        env_file=env_file,
+    )
+
+    max_downloads_per_minute = parse_int(
+        "MAX_DOWNLOADS_PER_MINUTE",
+        os.getenv("MAX_DOWNLOADS_PER_MINUTE"),
+        default=DEFAULT_MAX_DOWNLOADS_PER_MINUTE,
+        min_value=0,
+        max_value=1000,
+        env_file=env_file,
+    )
+
+    max_media_duration_seconds = parse_int(
+        "MAX_MEDIA_DURATION_SECONDS",
+        os.getenv("MAX_MEDIA_DURATION_SECONDS"),
+        default=DEFAULT_MAX_MEDIA_DURATION_SECONDS,
+        min_value=0,
+        max_value=24 * 60 * 60,
         env_file=env_file,
     )
 
@@ -521,12 +553,15 @@ def load_settings(env_file: Path = _ENV_PATH) -> Settings:
         storage_chat_id=storage_chat_id,
         max_file_bytes=max_file_bytes,
         download_timeout_seconds=download_timeout,
+        max_estimated_download_seconds=max_estimated_download_seconds,
         download_dir=download_dir,
         cache_db_path=cache_db_path,
         delete_storage_messages=delete_storage_messages,
         upload_timeout_seconds=upload_timeout,
         max_concurrent_downloads=max_concurrent_downloads,
         max_downloads_per_user=max_downloads_per_user,
+        max_downloads_per_minute=max_downloads_per_minute,
+        max_media_duration_seconds=max_media_duration_seconds,
         download_cooldown_seconds=download_cooldown_seconds,
         allowed_user_ids=allowed_user_ids,
         allow_public=allow_public,

@@ -14,6 +14,7 @@ from telegram_share_bot.config import Settings
 from telegram_share_bot.downloader import (
     DirectMediaStream,
     DownloadError,
+    MediaFormat,
     MediaKind,
     TimeRange,
 )
@@ -82,9 +83,9 @@ class TestInlineRetry(unittest.IsolatedAsyncioTestCase):
 
     async def test_network_upload_failure_offers_retry(self) -> None:
         stream = DirectMediaStream(
-            direct_url="https://cdn.example/video.mp4",
+            direct_url="https://cdn.example/audio.m4a",
             title="Example",
-            kind=MediaKind.VIDEO,
+            kind=MediaKind.AUDIO,
             duration=30,
         )
         with (
@@ -103,6 +104,7 @@ class TestInlineRetry(unittest.IsolatedAsyncioTestCase):
                 url="https://example.com/video",
                 result_id="network-result",
                 user_id=42,
+                media_format=MediaFormat.AUDIO,
             )
 
         markup = self.context.bot.edit_message_text.await_args.kwargs["reply_markup"]

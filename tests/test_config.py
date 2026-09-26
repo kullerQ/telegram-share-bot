@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from telegram_share_bot.config import (
     DEFAULT_DOWNLOAD_TIMEOUT_SECONDS,
+    DEFAULT_MAX_ESTIMATED_DOWNLOAD_SECONDS,
     DEFAULT_MAX_FILE_BYTES,
     DEFAULT_UPLOAD_TIMEOUT_SECONDS,
     load_settings,
@@ -85,6 +86,9 @@ class TestConfigValidation(unittest.TestCase):
     def test_parse_int_defaults_when_empty_or_none(self) -> None:
         self.assertEqual(parse_int("PARAM", None, default=42), 42)
         self.assertEqual(parse_int("PARAM", "", default=42), 42)
+
+    def test_download_timeout_default_is_120_seconds(self) -> None:
+        self.assertEqual(DEFAULT_DOWNLOAD_TIMEOUT_SECONDS, 120)
 
     def test_parse_int_valid_within_bounds(self) -> None:
         self.assertEqual(
@@ -167,6 +171,23 @@ class TestConfigValidation(unittest.TestCase):
         with patch.dict("os.environ", env, clear=True):
             settings = load_settings(env_file=self.env_file)
             self.assertEqual(settings.upload_timeout_seconds, 240)
+
+    def test_load_settings_video_transfer_target(self) -> None:
+        env = {
+            "BOT_TOKEN": "123456789:ABCdefGHIjklMNOpqrsTUVwxyz",
+            "STORAGE_CHAT_ID": "1234567890",
+            "ALLOW_PUBLIC": "true",
+        }
+        with patch.dict("os.environ", env, clear=True):
+            settings = load_settings(env_file=self.env_file)
+            self.assertEqual(
+                settings.max_estimated_download_seconds,
+                DEFAULT_MAX_ESTIMATED_DOWNLOAD_SECONDS,
+            )
+        env["MAX_ESTIMATED_DOWNLOAD_SECONDS"] = "60"
+        with patch.dict("os.environ", env, clear=True):
+            settings = load_settings(env_file=self.env_file)
+            self.assertEqual(settings.max_estimated_download_seconds, 60)
 
     def test_load_settings_requires_access_control(self) -> None:
         env = {

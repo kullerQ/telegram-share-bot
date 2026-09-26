@@ -24,20 +24,24 @@ from telegram.ext import (
 from telegram_share_bot import strings
 from telegram_share_bot.cache import MediaCache
 from telegram_share_bot.config import (
+    DEFAULT_MAX_CONCURRENT_DOWNLOADS,
     DEFAULT_UPLOAD_TIMEOUT_SECONDS,
     Settings,
     load_settings,
 )
 from telegram_share_bot.downloader import cleanup_stale_downloads
 from telegram_share_bot.handlers import (
+    audio_command,
     cancel_callback,
     chosen_inline_result,
     clip_choice_callback,
+    direct_format_callback,
     help_command,
     inline_query,
     retry_inline_callback,
     start_command,
     url_message,
+    video_command,
 )
 from telegram_share_bot.logging_filters import configure_logging
 
@@ -117,11 +121,13 @@ def build_application() -> App:
     )
     application.bot_data["settings"] = settings
     application.bot_data["media_cache"] = MediaCache(settings.cache_db_path)
-    raw_concurrency = getattr(settings, "max_concurrent_downloads", 3)
+    raw_concurrency = getattr(
+        settings, "max_concurrent_downloads", DEFAULT_MAX_CONCURRENT_DOWNLOADS
+    )
     try:
         concurrency = int(raw_concurrency)
     except (TypeError, ValueError):
-        concurrency = 3
+        concurrency = DEFAULT_MAX_CONCURRENT_DOWNLOADS
     # 0 disables the global download semaphore (unlimited parallel downloads).
     application.bot_data["download_semaphore"] = (
         None if concurrency <= 0 else asyncio.Semaphore(concurrency)
@@ -129,6 +135,12 @@ def build_application() -> App:
 
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(
+        CommandHandler("audio", audio_command, filters=filters.ChatType.PRIVATE)
+    )
+    application.add_handler(
+        CommandHandler("video", video_command, filters=filters.ChatType.PRIVATE)
+    )
     application.add_handler(InlineQueryHandler(inline_query))
     application.add_handler(ChosenInlineResultHandler(chosen_inline_result))
     application.add_handler(
@@ -138,7 +150,16 @@ def build_application() -> App:
         CallbackQueryHandler(cancel_callback, pattern=r"^cancel:")
     )
     application.add_handler(
-        CallbackQueryHandler(clip_choice_callback, pattern=r"^(clip|full):")
+        CallbackQueryHandler(
+            direct_format_callback,
+            pattern=r"^(video|video-best|video-balanced|audio):",
+        )
+    )
+    application.add_handler(
+        CallbackQueryHandler(
+            clip_choice_callback,
+            pattern=r"^(clipaudio|fullaudio|clip|full|clip-best|clip-balanced|full-best|full-balanced):",
+        )
     )
     application.add_handler(
         MessageHandler(

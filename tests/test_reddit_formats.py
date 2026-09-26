@@ -58,6 +58,9 @@ class TestRedditFormats(unittest.TestCase):
                 def __exit__(self, *args: object) -> None:
                     return None
 
+                def build_format_selector(self, selector: str) -> str:
+                    return selector
+
                 def process_ie_result(
                     self, info: dict[str, object], download: bool = True
                 ) -> dict[str, object]:
@@ -86,10 +89,11 @@ class TestRedditFormats(unittest.TestCase):
                     timeout_seconds=30,
                 )
             self.assertIn(
-                "bv*[acodec=none][protocol=https][height<=720]",
+                "bv*[acodec=none][protocol=https]",
                 str(options[0]["format"]),
             )
-            self.assertEqual(options[0]["max_filesize"], 45 * 1024 * 1024)
+            self.assertNotIn("height<=720", str(options[0]["format"]))
+            self.assertEqual(options[0]["max_filesize"], 90 * 1024 * 1024)
 
 
 if __name__ == "__main__":
