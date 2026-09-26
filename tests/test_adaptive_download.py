@@ -952,7 +952,12 @@ class TestVideoIntegrity(unittest.TestCase):
                         ),
                     ),
                 ):
-                    with self.assertRaisesRegex(DownloadError, "Try Auto or Balanced"):
+                    expected = (
+                        strings.VIDEO_UNAVAILABLE
+                        if video_size is None
+                        else strings.DOWNLOAD_BEST_QUALITY_FAILED
+                    )
+                    with self.assertRaises(DownloadError) as caught:
                         _download_sync(
                             "https://youtube.com/watch?v=example",
                             Path(tmp),
@@ -960,7 +965,42 @@ class TestVideoIntegrity(unittest.TestCase):
                             10,
                             quality_policy=VideoQualityPolicy.BEST,
                         )
+                    self.assertEqual(str(caught.exception), expected)
                 self.assertEqual(ydl.process_ie_result.call_count, 1 if video_size is None else 0)
+
+    def test_audio_only_metadata_rejects_video_before_download(self) -> None:
+        info = {
+            "title": "Audio only",
+            "duration": 10,
+            "formats": [{"format_id": "audio", "vcodec": "none", "acodec": "opus"}],
+        }
+        for quality_policy in (VideoQualityPolicy.AUTO, VideoQualityPolicy.BEST):
+            with self.subTest(quality_policy=quality_policy), tempfile.TemporaryDirectory() as tmp:
+                ydl = MagicMock()
+                ydl.params = {}
+                ydl.__enter__.return_value = ydl
+                with (
+                    patch("telegram_share_bot.downloader.yt_dlp.YoutubeDL", return_value=ydl),
+                    patch("telegram_share_bot.downloader.is_safe_media_url", return_value=True),
+                    patch(
+                        "telegram_share_bot.downloader._safe_dns_resolution", contextlib.nullcontext
+                    ),
+                    patch(
+                        "telegram_share_bot.downloader._extract_info_cached",
+                        return_value=(info, False),
+                    ),
+                ):
+                    with self.assertRaises(DownloadError) as caught:
+                        _download_sync(
+                            "https://youtube.com/watch?v=audio",
+                            Path(tmp),
+                            50,
+                            10,
+                            quality_policy=quality_policy,
+                        )
+                self.assertEqual(str(caught.exception), strings.VIDEO_UNAVAILABLE)
+                self.assertFalse(caught.exception.retryable)
+                ydl.process_ie_result.assert_not_called()
 
 
 class TestVideoOptimization(unittest.TestCase):
@@ -1060,8 +1100,26 @@ class TestVideoOptimization(unittest.TestCase):
                 ),
             ),
         ):
-            with self.assertRaises(DownloadError):
+            with self.assertRaises(DownloadError) as caught:
                 _probe_video_file(Path("audio.mp4"), 9999999999)
+        self.assertEqual(str(caught.exception), strings.VIDEO_UNAVAILABLE)
+
+    def test_cover_art_without_video_is_reported_as_audio_only(self) -> None:
+        stderr = (
+            b"  Duration: 00:00:12.00\n"
+            b"  Stream #0:0: Video: mjpeg, yuvj420p, 600x600 (attached pic)\n"
+            b"  Stream #0:1: Audio: aac, 44100 Hz, stereo\n"
+        )
+        with (
+            patch("telegram_share_bot.downloader.shutil.which", return_value="ffmpeg"),
+            patch(
+                "telegram_share_bot.downloader.subprocess.run",
+                return_value=subprocess.CompletedProcess([], 0, b"", stderr),
+            ),
+        ):
+            with self.assertRaises(DownloadError) as caught:
+                _probe_video_file(Path("cover.mp4"), 9999999999)
+        self.assertEqual(str(caught.exception), strings.VIDEO_UNAVAILABLE)
 
     def test_reads_video_and_audio_from_ffmpeg_input(self) -> None:
         stderr = (

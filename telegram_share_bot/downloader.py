@@ -719,6 +719,13 @@ class DownloadError(Exception):
         self.retryable = _is_transient_download_error(message) if retryable is None else retryable
 
 
+class VideoUnavailableError(DownloadError):
+    """Raised when the requested link contains audio but no playable video."""
+
+    def __init__(self) -> None:
+        super().__init__(strings.VIDEO_UNAVAILABLE, retryable=False)
+
+
 # YouTube clip length hard cap (still offer both choices; clip path rejects over-long).
 MAX_CLIP_SECONDS = 600
 
@@ -1587,6 +1594,7 @@ def _probe_video_file(path: Path, deadline: float) -> _VideoProbe:
         video_codec = ""
         pixel_format = ""
         audio_codec: str | None = None
+        video_stream_seen = False
         width = height = 0
         for line in (result.stderr or b"").decode("utf-8", errors="replace").splitlines():
             # Only inspect the input: FFmpeg also prints transcoded output streams.
@@ -1608,7 +1616,10 @@ def _probe_video_file(path: Path, deadline: float) -> _VideoProbe:
             kind, codec, details = stream_match.groups()
             if kind == "Audio" and audio_codec is None:
                 audio_codec = codec
-            if kind != "Video" or video_codec or "(attached pic)" in details:
+            if kind != "Video" or "(attached pic)" in details:
+                continue
+            video_stream_seen = True
+            if video_codec:
                 continue
             dimensions = re.search(r"(?<!\w)(\d{2,5})x(\d{2,5})(?!\d)", details)
             if dimensions is None:
@@ -1620,6 +1631,8 @@ def _probe_video_file(path: Path, deadline: float) -> _VideoProbe:
                 details,
             )
             pixel_format = pixel_match.group(1) if pixel_match is not None else ""
+        if not video_stream_seen and audio_codec is not None:
+            raise VideoUnavailableError()
         if width <= 0 or height <= 0 or not math.isfinite(duration):
             raise ValueError("invalid video dimensions or duration")
         return _VideoProbe(
@@ -1950,6 +1963,16 @@ def _download_sync(
                 metadata_started_at = time.monotonic()
                 extracted, from_cache = _extract_info_cached(ydl, url)
                 info = _pick_info(extracted)
+                formats = info.get("formats")
+                if media_format is MediaFormat.VIDEO and isinstance(formats, list) and formats:
+                    if all(
+                        isinstance(item, dict) and item.get("vcodec") == "none"
+                        for item in formats
+                    ) and any(
+                        isinstance(item, dict) and item.get("acodec") not in (None, "none")
+                        for item in formats
+                    ):
+                        raise VideoUnavailableError()
                 if effective_range is None:
                     ensure_full_media_duration(info.get("duration"), max_media_duration_seconds)
                 if is_clip:
@@ -2251,6 +2274,8 @@ def _download_sync(
                             on_optimizing=on_optimizing,
                         )
                     except DownloadError as exc:
+                        if isinstance(exc, VideoUnavailableError):
+                            raise
                         if quality_policy is VideoQualityPolicy.BEST:
                             raise DownloadError(strings.DOWNLOAD_BEST_QUALITY_FAILED) from exc
                         raise
@@ -2261,6 +2286,8 @@ def _download_sync(
                         duration=duration,
                     )
                 if isinstance(last_error, DownloadError):
+                    if isinstance(last_error, VideoUnavailableError):
+                        raise last_error
                     if quality_policy is VideoQualityPolicy.BEST:
                         raise DownloadError(strings.DOWNLOAD_BEST_QUALITY_FAILED) from last_error
                     raise last_error
