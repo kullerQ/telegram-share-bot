@@ -2,6 +2,7 @@
 
 Share videos, clips, audio, and TikTok photo slideshows as native Telegram messages. Paste a media link in a private chat with the bot, or type `@YourBot <media-url>` in another chat. The bot prepares the file and sends it where you chose to share it. It does not need to join the target chat.
 
+
 ## See the sharing flow
 
 ```text
@@ -9,17 +10,19 @@ Share videos, clips, audio, and TikTok photo slideshows as native Telegram messa
 Paste a link → choose a result → native media appears
 ```
 
-In a private chat, a saved Video or Audio default sends that format directly. With no format default, choose from the buttons. Inline mode always shows explicit Video and Audio results.
+In a private chat sends Video or Audio format directly (depends on option chosen in settings). By default, both Audio and Video buttonts appears to choose from. Inline mode always shows explicit Video and Audio choice options.
+
 
 ## What it can share
 
-- Videos and audio from YouTube, TikTok, Instagram, X, Reddit, and Facebook links.
+- Videos and audio from YouTube, TikTok, Instagram, X, Reddit, Facebook, etc. links.
 - YouTube clips from a time range, with a choice to share the clip or full video.
 - TikTok photo slideshows as video, or their soundtrack as audio when available.
 - Media fitted to Telegram's upload limit, with Auto, Best, and Balanced video quality settings.
-- Previously prepared media from its cache when compatible with the selected format and quality.
+- Previously prepared media from its cache (caching Telegram video ids) when compatible with the selected format and quality.
 
 The bot works in private chats, groups, and channels through inline mode. Supported content and quality depend on what the source makes available.
+
 
 ## BotFather setup (required)
 
@@ -30,15 +33,10 @@ The bot works in private chats, groups, and channels through inline mode. Suppor
    - `/setinline` → select your bot → set placeholder text, e.g. `Paste a media URL…`
 5. **Enable inline feedback** (required for downloads to finish after you tap a result):
    - `/setinlinefeedback` → select your bot → enable (100% is fine)
-6. Set the bot's public profile if desired. These changes are made by you in BotFather:
-   - **Name** (`/setname`): `Share Media Bot`
-   - **About** (`/setabouttext`): `Share videos, clips, audio, and TikTok slideshows in any Telegram chat.`
-   - **Description** (`/setdescription`): `Paste a media link here or use the bot inline in another chat. Choose video, audio, or a YouTube clip; the bot sends the media as a Telegram message. Use /settings to choose your default format and video quality.`
-   - **Inline placeholder** (`/setinline`): `Paste a YouTube, TikTok, Instagram, X, Reddit, or Facebook link`
-   - **Avatar** (`/setuserpic`): a single bold play triangle on a solid, high-contrast circle. Keep it recognizable at small chat-list size. Create and upload this yourself; the repository provides no image asset.
 
 Without `/setinline`, the bot will not appear when users type `@YourBot`.
 Without `/setinlinefeedback`, the bot cannot learn which result you chose, so the media never replaces the placeholder.
+
 
 ## Docker setup (Recommended)
 
@@ -87,6 +85,7 @@ Without `/setinlinefeedback`, the bot cannot learn which result you chose, so th
    docker compose up -d
    ```
    `pull` fetches the new image; `up -d` recreates the container if the image changed. To apply `.env` changes without pulling, use `docker compose up -d --force-recreate --pull never`.
+
 
 ## Local setup
 
@@ -172,5 +171,5 @@ Tap a Video or Audio result (or a clip / full-length choice). A placeholder appe
 
 - Users should `/start` the bot once before relying on inline mode.
 - Respect platform Terms of Service for downloaded content; this project is for personal/lightweight use.
-- Previously uploaded videos are reused when their recorded output quality is compatible with the requested policy. Auto prefers a cached Best upload when it is at least as good as the cached Auto upload. Clip ranges and full videos remain separate cache entries; captions are applied when sent. Older video cache entries created before stream validation are downloaded again once; cached audio is unaffected.
+- Previously uploaded videos are reused when their recorded output quality is compatible with the requested policy. Auto prefers a cached Best upload when it is at least as good as the cached Auto upload. Clip ranges and full videos remain separate cache entries; captions are applied when sent.
 - Signed / credentialed URLs are not stored in the shared media cache.
