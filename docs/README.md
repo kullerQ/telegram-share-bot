@@ -141,7 +141,7 @@ Tap a Video or Audio result (or a clip / full-length choice). A placeholder appe
 - TikTok **photo posts** (image slideshows with sound) can be sent as a slideshow video or as the original soundtrack when present. Video slideshows are compiled into MP4 via `ffmpeg`: each image is shown for about `SLIDESHOW_SLIDE_MS` (default 2500 ms). `SLIDESHOW_IMAGES_LOOP=true` (default) makes the video match the **full** audio track and loops images to fill it; `false` shows each image once then trims the audio (a single-image post still uses the full audio). Multi-image posts get TikTok-style page dots at the bottom. At most `SLIDESHOW_MAX_IMAGES` (default 35) images are included. The Docker image already ships a static `ffmpeg`.
 - `HTTPS_ONLY` defaults to true (set `false` to allow plain `http://` media URLs).
 - Captions: `CAPTION_MODE=media` (default, media title), `custom` (only text after the URL), or `off` (no captions). Custom captions are plain text, max 1024 characters, not stored in the media cache, and not sent to `STORAGE_CHAT_ID`.
-- YouTube clips: optional `start-end` after the link, or `?t=` / `start=` on the URL plus a duration in seconds, or `?t=` alone (from start to end). Max clip length 10 minutes. Requires `ffmpeg` (already in the Docker image).
+- YouTube clips: optional `start-end` after the link, or `?t=` / `start=` on the URL plus a duration in seconds, or `?t=` alone (from start to end). Max clip length 10 minutes. Requires `ffmpeg` (already in the Docker image). When suitable HLS streams are available, video and audio are fetched separately and combined locally to avoid slow section transfers.
 - Unsupported or oversize URLs replace the placeholder with an error message.
 
 ## Notes

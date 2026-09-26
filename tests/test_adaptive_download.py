@@ -6,7 +6,7 @@ import contextlib
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import yt_dlp
 
@@ -16,10 +16,12 @@ from telegram_share_bot.downloader import (
     DownloadError,
     MediaFormat,
     MediaKind,
+    TimeRange,
     _audio_format_candidates,
     _download_sync,
     _format_candidates,
     _optimize_video_file,
+    _run_bounded_clip_ffmpeg,
     _set_attempt_format_selector,
     _set_attempt_output_template,
 )
@@ -85,6 +87,195 @@ class TestFormatRanking(unittest.TestCase):
             "acodec": "aac",
         }
         self.assertEqual(_format_candidates({"formats": [candidate]}, max_file_bytes=100), [])
+
+    def test_clip_estimates_hls_size_and_prefers_segmented_source(self) -> None:
+        source_duration = 1880
+        formats = [
+            {
+                "format_id": "hls1440",
+                "protocol": "m3u8_native",
+                "height": 1440,
+                "fps": 60,
+                "tbr": 14085,
+                "vcodec": "vp9",
+                "acodec": "none",
+            },
+            {
+                "format_id": "http1440",
+                "protocol": "https",
+                "height": 1440,
+                "fps": 60,
+                "filesize": 1_356_000_000,
+                "vcodec": "av1",
+                "acodec": "none",
+            },
+            {
+                "format_id": "hls720",
+                "protocol": "m3u8_native",
+                "height": 720,
+                "fps": 60,
+                "tbr": 3806,
+                "vcodec": "h264",
+                "acodec": "none",
+            },
+            {
+                "format_id": "audio",
+                "protocol": "https",
+                "filesize": 30_400_000,
+                "abr": 128,
+                "vcodec": "none",
+                "acodec": "aac",
+            },
+        ]
+        candidates = _format_candidates(
+            {"duration": source_duration, "formats": formats},
+            max_file_bytes=45 * 1024 * 1024,
+            duration_scale=60 / source_duration,
+        )
+
+        self.assertNotIn("hls1440+audio", [candidate.selector for candidate in candidates])
+        self.assertEqual(candidates[0].selector, "hls720+audio")
+        self.assertIsNotNone(candidates[0].estimated_size)
+
+
+class TestYoutubeHlsClip(unittest.TestCase):
+    def test_video_clip_downloads_streams_separately_then_merges(self) -> None:
+        info = {
+            "id": "example1234",
+            "title": "Example clip",
+            "duration": 1880,
+            "ext": "mp4",
+            "formats": [
+                {
+                    "format_id": "234",
+                    "protocol": "m3u8_native",
+                    "url": "https://manifest.googlevideo.com/audio.m3u8",
+                    "resolution": "audio only",
+                    "vcodec": "none",
+                    "acodec": None,
+                },
+                {
+                    "format_id": "311",
+                    "protocol": "m3u8_native",
+                    "url": "https://manifest.googlevideo.com/video.m3u8",
+                    "height": 720,
+                    "fps": 60,
+                    "tbr": 3806,
+                    "vcodec": "avc1.4d4020",
+                    "acodec": "none",
+                },
+            ],
+        }
+        commands: list[list[str]] = []
+
+        def fake_ffmpeg(argv: list[str], output: Path, **kwargs: object) -> None:
+            _ = kwargs
+            commands.append(argv)
+            output.write_bytes(b"clip data")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                patch("telegram_share_bot.downloader.shutil.which", return_value="ffmpeg"),
+                patch("telegram_share_bot.downloader.is_safe_media_url", return_value=True),
+                patch(
+                    "telegram_share_bot.downloader._safe_dns_resolution",
+                    return_value=contextlib.nullcontext(),
+                ),
+                patch(
+                    "telegram_share_bot.downloader._extract_info_cached",
+                    return_value=(info, False),
+                ),
+                patch(
+                    "telegram_share_bot.downloader._run_bounded_clip_ffmpeg",
+                    side_effect=fake_ffmpeg,
+                ),
+            ):
+                media = _download_sync(
+                    "https://youtu.be/example1234",
+                    Path(tmp),
+                    max_file_bytes=45 * 1024 * 1024,
+                    timeout_seconds=90,
+                    time_range=TimeRange(60, 120),
+                )
+            self.assertEqual(media.kind, MediaKind.VIDEO)
+            self.assertEqual(media.duration, 60)
+            self.assertTrue(media.path.exists())
+            self.assertEqual(len(commands), 3)
+            self.assertIn("0:v:0", commands[0])
+            self.assertIn("0:a:0", commands[1])
+            self.assertIn("1:a:0", commands[2])
+
+    def test_expired_clip_stage_kills_ffmpeg_process(self) -> None:
+        process = MagicMock()
+        process.poll.return_value = None
+        with patch("telegram_share_bot.downloader.subprocess.Popen", return_value=process):
+            with self.assertRaises(DownloadError):
+                _run_bounded_clip_ffmpeg(
+                    ["ffmpeg"],
+                    Path("unused.mp4"),
+                    deadline=0,
+                    abort_event=None,
+                    source_limit=1024,
+                    timeout_seconds=30,
+                )
+        process.kill.assert_called_once()
+        process.wait.assert_called_once()
+
+    def test_audio_clip_uses_hls_soundtrack_without_video(self) -> None:
+        info = {
+            "id": "example1234",
+            "title": "Example audio",
+            "duration": 1880,
+            "ext": "mp4",
+            "formats": [
+                {
+                    "format_id": "234",
+                    "protocol": "m3u8_native",
+                    "url": "https://manifest.googlevideo.com/audio.m3u8",
+                    "resolution": "audio only",
+                    "vcodec": "none",
+                    "acodec": None,
+                }
+            ],
+        }
+        commands: list[list[str]] = []
+
+        def fake_ffmpeg(argv: list[str], output: Path, **kwargs: object) -> None:
+            _ = kwargs
+            commands.append(argv)
+            output.write_bytes(b"audio data")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                patch("telegram_share_bot.downloader.shutil.which", return_value="ffmpeg"),
+                patch("telegram_share_bot.downloader.is_safe_media_url", return_value=True),
+                patch(
+                    "telegram_share_bot.downloader._safe_dns_resolution",
+                    return_value=contextlib.nullcontext(),
+                ),
+                patch(
+                    "telegram_share_bot.downloader._extract_info_cached",
+                    return_value=(info, False),
+                ),
+                patch(
+                    "telegram_share_bot.downloader._run_bounded_clip_ffmpeg",
+                    side_effect=fake_ffmpeg,
+                ),
+            ):
+                media = _download_sync(
+                    "https://youtu.be/example1234",
+                    Path(tmp),
+                    max_file_bytes=45 * 1024 * 1024,
+                    timeout_seconds=90,
+                    time_range=TimeRange(60, 120),
+                    media_format=MediaFormat.AUDIO,
+                )
+            self.assertEqual(media.kind, MediaKind.AUDIO)
+            self.assertEqual(media.duration, 60)
+            self.assertEqual(media.path.suffix, ".m4a")
+            self.assertTrue(media.path.exists())
+            self.assertEqual(len(commands), 1)
+            self.assertIn("0:a:0", commands[0])
 
 
 class TestAudioFormatSelection(unittest.TestCase):
