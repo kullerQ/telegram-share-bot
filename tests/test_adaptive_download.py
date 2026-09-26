@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -17,10 +18,12 @@ from telegram_share_bot.downloader import (
     MediaFormat,
     MediaKind,
     TimeRange,
+    VideoQualityPolicy,
     _audio_format_candidates,
     _download_sync,
     _format_candidates,
     _optimize_video_file,
+    _projected_transfer_seconds,
     _run_bounded_clip_ffmpeg,
     _set_attempt_format_selector,
     _set_attempt_output_template,
@@ -35,7 +38,7 @@ def _outtmpl_template(params: dict[str, object]) -> str:
 
 
 class TestFormatRanking(unittest.TestCase):
-    def test_prefers_best_quality_that_plausibly_fits(self) -> None:
+    def test_auto_starts_with_highest_bounded_quality(self) -> None:
         formats = [
             {
                 "format_id": "v1080",
@@ -75,8 +78,26 @@ class TestFormatRanking(unittest.TestCase):
         candidates = _format_candidates({"formats": formats}, max_file_bytes=45)
         self.assertEqual(
             [candidate.selector for candidate in candidates],
-            ["v720+audio", "v480+audio", "v1080+audio"],
+            ["v1080+audio", "v720+audio", "v480+audio"],
         )
+
+    def test_balanced_prefers_progressive_tier_and_60_fps_avc(self) -> None:
+        formats = [
+            {"format_id": "v1080", "height": 1080, "fps": 60, "vcodec": "avc1", "acodec": "aac"},
+            {"format_id": "v720-av1", "height": 720, "fps": 60, "vcodec": "av01", "acodec": "aac"},
+            {"format_id": "v720-avc", "height": 720, "fps": 60, "vcodec": "avc1", "acodec": "aac"},
+            {"format_id": "v480", "height": 480, "fps": 60, "vcodec": "avc1", "acodec": "aac"},
+        ]
+        candidates = _format_candidates(
+            {"formats": formats},
+            max_file_bytes=45 * 1024 * 1024,
+            quality_policy=VideoQualityPolicy.BALANCED,
+        )
+        self.assertEqual(candidates[0].selector, "v720-avc")
+
+    def test_transfer_projection_requires_bytes_and_uses_total_time(self) -> None:
+        self.assertIsNone(_projected_transfer_seconds(5, 0, 100))
+        self.assertEqual(_projected_transfer_seconds(5, 10, 100), 50)
 
     def test_excludes_source_candidates_above_bounded_size(self) -> None:
         candidate = {
@@ -228,6 +249,54 @@ class TestYoutubeHlsClip(unittest.TestCase):
                 )
         process.kill.assert_called_once()
         process.wait.assert_called_once()
+
+    def test_slow_hls_clip_stage_stops_after_five_second_estimate(self) -> None:
+        class Clock:
+            now = 0.0
+
+            def monotonic(self) -> float:
+                return self.now
+
+        clock = Clock()
+
+        class Process:
+            killed = False
+
+            def wait(self, timeout: float | None = None) -> int:
+                if self.killed:
+                    return -9
+                assert timeout is not None
+                clock.now += timeout
+                raise subprocess.TimeoutExpired("ffmpeg", timeout)
+
+            def poll(self) -> int | None:
+                return -9 if self.killed else None
+
+            def kill(self) -> None:
+                self.killed = True
+
+        process = Process()
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "clip.mp4"
+            output.write_bytes(b"x" * 10)
+            with (
+                patch("telegram_share_bot.downloader.subprocess.Popen", return_value=process),
+                patch("telegram_share_bot.downloader.time", clock),
+            ):
+                with self.assertRaises(DownloadError) as caught:
+                    _run_bounded_clip_ffmpeg(
+                        ["ffmpeg"],
+                        output,
+                        deadline=120,
+                        abort_event=None,
+                        source_limit=100,
+                        timeout_seconds=120,
+                        expected_bytes=100,
+                        speed_limit_seconds=45,
+                        format_id="hls720",
+                    )
+        self.assertEqual(str(caught.exception), strings.DOWNLOAD_SLOW_SOURCE)
+        self.assertTrue(process.killed)
 
     def test_audio_clip_uses_hls_soundtrack_without_video(self) -> None:
         info = {
@@ -523,6 +592,111 @@ class TestYtDlpOutputTemplate(unittest.TestCase):
 
 
 class TestMeasuredFallback(unittest.TestCase):
+    def test_auto_steps_down_on_slow_transfer_but_forced_modes_hold_quality(self) -> None:
+        formats = [
+            {
+                "format_id": "v1080",
+                "height": 1080,
+                "fps": 60,
+                "filesize": 55,
+                "vcodec": "h264",
+                "acodec": "none",
+            },
+            {
+                "format_id": "v720",
+                "height": 720,
+                "fps": 60,
+                "filesize": 38,
+                "vcodec": "h264",
+                "acodec": "none",
+            },
+            {"format_id": "audio", "abr": 128, "filesize": 2, "vcodec": "none", "acodec": "aac"},
+        ]
+        selectors: list[str] = []
+
+        class Clock:
+            now = 0.0
+
+            def monotonic(self) -> float:
+                return self.now
+
+        clock = Clock()
+
+        class FakeYdl:
+            def __init__(self, opts: dict[str, object]) -> None:
+                self.params = dict(opts)
+
+            def __enter__(self) -> FakeYdl:
+                return self
+
+            def __exit__(self, *args: object) -> None:
+                return None
+
+            def build_format_selector(self, selector: str) -> str:
+                return selector
+
+            def process_ie_result(
+                self, info: dict[str, object], download: bool = True
+            ) -> dict[str, object]:
+                _ = info, download
+                selector = str(self.params["format"])
+                selectors.append(selector)
+                if selector.startswith("v1080"):
+                    hooks = self.params["progress_hooks"]
+                    assert isinstance(hooks, list)
+                    progress = {
+                        "status": "downloading",
+                        "downloaded_bytes": 10,
+                        "total_bytes": 100,
+                        "filename": "v1080.part",
+                        "info_dict": {"vcodec": "h264"},
+                    }
+                    clock.now = 4.9
+                    hooks[0](progress)
+                    clock.now = 5.1
+                    hooks[0](progress)
+                path = Path(_outtmpl_template(self.params)).parent / "result.mp4"
+                path.write_bytes(b"x" * (45 if selector.startswith("v1080") else 40))
+                return {"title": "Quality test", "requested_downloads": [{"filepath": str(path)}]}
+
+            def prepare_filename(self, info: dict[str, object]) -> str:
+                _ = info
+                return str(Path(_outtmpl_template(self.params)).parent / "result.mp4")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                patch("telegram_share_bot.downloader.is_safe_media_url", return_value=True),
+                patch("telegram_share_bot.downloader._safe_dns_resolution", contextlib.nullcontext),
+                patch("telegram_share_bot.downloader.yt_dlp.YoutubeDL", FakeYdl),
+                patch(
+                    "telegram_share_bot.downloader._extract_info_cached",
+                    return_value=(
+                        {"title": "Quality test", "duration": 60, "formats": formats},
+                        False,
+                    ),
+                ),
+                patch("telegram_share_bot.downloader.time", clock),
+            ):
+                for policy, expected in (
+                    (VideoQualityPolicy.AUTO, ["v1080+audio", "v720+audio"]),
+                    (VideoQualityPolicy.BEST, ["v1080+audio"]),
+                    (VideoQualityPolicy.BALANCED, ["v720+audio"]),
+                ):
+                    with self.subTest(policy=policy):
+                        selectors.clear()
+                        clock.now = 0.0
+                        media = _download_sync(
+                            "https://youtube.com/watch?v=quality",
+                            Path(tmp),
+                            max_file_bytes=50,
+                            timeout_seconds=120,
+                            quality_policy=policy,
+                            max_estimated_download_seconds=45,
+                        )
+                        self.assertEqual(selectors, expected)
+                        expected_bytes = 45 if policy is VideoQualityPolicy.BEST else 40
+                        self.assertEqual(media.path.stat().st_size, expected_bytes)
+
     def test_retries_lower_quality_after_measured_output_is_too_large(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

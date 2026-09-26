@@ -150,11 +150,15 @@ def build_application() -> App:
         CallbackQueryHandler(cancel_callback, pattern=r"^cancel:")
     )
     application.add_handler(
-        CallbackQueryHandler(direct_format_callback, pattern=r"^(video|audio):")
+        CallbackQueryHandler(
+            direct_format_callback,
+            pattern=r"^(video|video-best|video-balanced|audio):",
+        )
     )
     application.add_handler(
         CallbackQueryHandler(
-            clip_choice_callback, pattern=r"^(clipaudio|fullaudio|clip|full):"
+            clip_choice_callback,
+            pattern=r"^(clipaudio|fullaudio|clip|full|clip-best|clip-balanced|full-best|full-balanced):",
         )
     )
     application.add_handler(

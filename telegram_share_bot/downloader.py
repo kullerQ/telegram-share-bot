@@ -29,6 +29,7 @@ if TYPE_CHECKING:
 
 from telegram_share_bot import strings
 from telegram_share_bot.config import (
+    DEFAULT_MAX_ESTIMATED_DOWNLOAD_SECONDS,
     DEFAULT_MAX_MEDIA_DURATION_SECONDS,
     DEFAULT_SLIDESHOW_IMAGES_LOOP,
     TELEGRAM_CAPTION_MAX_LENGTH,
@@ -380,6 +381,14 @@ class MediaFormat(str, Enum):
     AUDIO = "audio"
 
 
+class VideoQualityPolicy(str, Enum):
+    """Per-send video selection policy; audio requests ignore this value."""
+
+    AUTO = "auto-best"
+    BEST = "source-best"
+    BALANCED = "balanced"
+
+
 @dataclass(frozen=True, slots=True)
 class DownloadedMedia:
     path: Path
@@ -403,10 +412,19 @@ class _FormatCandidate:
     quality: tuple[float, float, float]
     estimated_size: int | None
     clip_transport_priority: int = 0
+    codec_priority: int = 0
 
 
 _SOURCE_SIZE_MULTIPLIER = 2
 _MAX_FORMAT_ATTEMPTS = 4
+_QUALITY_SAMPLE_SECONDS = 5.0
+
+
+def _projected_transfer_seconds(elapsed: float, downloaded: int, total: int) -> float | None:
+    """Project full transfer time from measured bytes and elapsed wall time."""
+    if elapsed <= 0 or downloaded <= 0 or total <= 0:
+        return None
+    return elapsed * max(total, downloaded) / downloaded
 
 
 def _format_bytes(
@@ -472,8 +490,9 @@ def _format_candidates(
     *,
     max_file_bytes: int,
     duration_scale: float = 1.0,
+    quality_policy: VideoQualityPolicy = VideoQualityPolicy.AUTO,
 ) -> list[_FormatCandidate]:
-    """Rank video choices by quality, preferring choices that may fit."""
+    """Rank bounded sources by quality or proximity to the balanced tier."""
     formats = info.get("formats")
     if not isinstance(formats, list):
         return []
@@ -540,19 +559,32 @@ def _format_candidates(
             else 1
         )
         candidates[selector] = _FormatCandidate(
-            selector, quality, estimated, clip_transport_priority
+            selector,
+            quality,
+            estimated,
+            clip_transport_priority,
+            0 if str(item.get("vcodec") or "").lower().startswith(("avc1", "h264")) else 1,
         )
 
-    return sorted(
-        candidates.values(),
-        key=lambda candidate: (
-            candidate.estimated_size is not None and candidate.estimated_size > max_file_bytes,
+    def rank(candidate: _FormatCandidate) -> tuple[float, ...]:
+        if quality_policy is VideoQualityPolicy.BALANCED:
+            return (
+                abs(candidate.quality[0] - 720) if candidate.quality[0] else float("inf"),
+                abs(candidate.quality[1] - 60) if candidate.quality[1] else float("inf"),
+                candidate.codec_priority,
+                candidate.estimated_size is not None
+                and candidate.estimated_size > max_file_bytes,
+                -candidate.quality[2],
+            )
+        return (
             candidate.clip_transport_priority,
             -candidate.quality[0],
             -candidate.quality[1],
             -candidate.quality[2],
-        ),
-    )[:_MAX_FORMAT_ATTEMPTS]
+            candidate.codec_priority,
+        )
+
+    return sorted(candidates.values(), key=rank)[:_MAX_FORMAT_ATTEMPTS]
 
 
 def _audio_format_candidates(
@@ -1058,7 +1090,10 @@ def _download_ranges_param(time_range: TimeRange) -> Any:
 
 
 def _youtube_hls_clip_streams(
-    info: dict[str, Any], clip_duration: int, max_file_bytes: int
+    info: dict[str, Any],
+    clip_duration: int,
+    max_file_bytes: int,
+    quality_policy: VideoQualityPolicy = VideoQualityPolicy.AUTO,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]] | None:
     """Find HLS audio and bounded H.264 video streams for a YouTube clip."""
     formats = info.get("formats")
@@ -1087,7 +1122,7 @@ def _youtube_hls_clip_streams(
         else 1.0
     )
     audio_allowance = max(1, int(192_000 * clip_duration / 8))
-    ranked: list[tuple[tuple[bool, float, float, float], dict[str, Any]]] = []
+    ranked: list[tuple[tuple[float, ...], dict[str, Any]]] = []
     for item in usable:
         codec = str(item.get("vcodec") or "").lower()
         if (
@@ -1105,15 +1140,22 @@ def _youtube_hls_clip_streams(
         height = item.get("height")
         fps = item.get("fps")
         bitrate = item.get("tbr")
+        height_value = float(height) if isinstance(height, (int, float)) else 0.0
+        fps_value = float(fps) if isinstance(fps, (int, float)) else 0.0
+        bitrate_value = float(bitrate) if isinstance(bitrate, (int, float)) else 0.0
         rank = (
-            estimated + audio_allowance > max_file_bytes,
-            -float(height) if isinstance(height, (int, float)) else 0.0,
-            -float(fps) if isinstance(fps, (int, float)) else 0.0,
-            -float(bitrate) if isinstance(bitrate, (int, float)) else 0.0,
+            (
+                abs(height_value - 720) if height_value else float("inf"),
+                abs(fps_value - 60) if fps_value else float("inf"),
+                -bitrate_value,
+            )
+            if quality_policy is VideoQualityPolicy.BALANCED
+            else (-height_value, -fps_value, -bitrate_value)
         )
         ranked.append((rank, item))
     ranked.sort(key=lambda candidate: candidate[0])
-    return audio, [item for _, item in ranked[:2]]
+    limit = 1 if quality_policy is not VideoQualityPolicy.AUTO else _MAX_FORMAT_ATTEMPTS
+    return audio, [item for _, item in ranked[:limit]]
 
 
 def _run_bounded_clip_ffmpeg(
@@ -1124,6 +1166,9 @@ def _run_bounded_clip_ffmpeg(
     abort_event: threading.Event | None,
     source_limit: int,
     timeout_seconds: int,
+    expected_bytes: int | None = None,
+    speed_limit_seconds: int = 0,
+    format_id: str = "unknown",
 ) -> None:
     """Stop the actual ffmpeg process when a clip stage times out or is cancelled."""
     try:
@@ -1135,6 +1180,8 @@ def _run_bounded_clip_ffmpeg(
         )
     except OSError as exc:
         raise DownloadError(strings.DOWNLOAD_FAILED_GENERIC) from exc
+    started_at = time.monotonic()
+    next_speed_sample = _QUALITY_SAMPLE_SECONDS
     try:
         while True:
             if abort_event is not None and abort_event.is_set():
@@ -1144,12 +1191,31 @@ def _run_bounded_clip_ffmpeg(
                 raise DownloadError(
                     strings.DOWNLOAD_TIMED_OUT.format(timeout_seconds=timeout_seconds)
                 )
-            if output.exists() and output.stat().st_size > source_limit:
+            output_size = output.stat().st_size if output.exists() else 0
+            if output_size > source_limit:
                 raise DownloadError(
                     strings.DOWNLOAD_EXCEEDS_LIMIT.format(
                         max_mb=source_limit // (1024 * 1024)
                     )
                 )
+            elapsed = time.monotonic() - started_at
+            if (
+                speed_limit_seconds > 0
+                and expected_bytes is not None
+                and elapsed >= next_speed_sample
+                and output_size > 0
+            ):
+                projected = _projected_transfer_seconds(elapsed, output_size, expected_bytes)
+                if projected is not None:
+                    logger.info(
+                        "Clip video transfer estimate: format=%s projected=%.1fs target=%ds",
+                        format_id,
+                        projected,
+                        speed_limit_seconds,
+                    )
+                    if projected > speed_limit_seconds:
+                        raise DownloadError(strings.DOWNLOAD_SLOW_SOURCE, retryable=True)
+                next_speed_sample = elapsed + _QUALITY_SAMPLE_SECONDS
             try:
                 return_code = process.wait(timeout=min(0.25, remaining))
                 break
@@ -1180,6 +1246,8 @@ def _download_hls_clip_stream(
     abort_event: threading.Event | None,
     source_limit: int,
     timeout_seconds: int,
+    expected_bytes: int | None = None,
+    speed_limit_seconds: int = 0,
 ) -> None:
     stream_url = format_info.get("url")
     if not isinstance(stream_url, str) or not is_safe_media_url(stream_url, https_only=True):
@@ -1223,6 +1291,9 @@ def _download_hls_clip_stream(
         abort_event=abort_event,
         source_limit=source_limit,
         timeout_seconds=timeout_seconds,
+        expected_bytes=expected_bytes,
+        speed_limit_seconds=speed_limit_seconds,
+        format_id=str(format_info.get("format_id") or "unknown"),
     )
 
 
@@ -1237,11 +1308,15 @@ def _download_youtube_hls_clip(
     timeout_seconds: int,
     abort_event: threading.Event | None,
     on_optimizing: Callable[[], None] | None,
+    quality_policy: VideoQualityPolicy = VideoQualityPolicy.AUTO,
+    max_estimated_download_seconds: int = 45,
 ) -> DownloadedMedia | None:
     clip_duration = time_range.duration_seconds
     if clip_duration is None:
         return None
-    streams = _youtube_hls_clip_streams(info, clip_duration, max_file_bytes)
+    streams = _youtube_hls_clip_streams(
+        info, clip_duration, max_file_bytes, quality_policy
+    )
     if streams is None:
         return None
     audio, videos = streams
@@ -1259,7 +1334,13 @@ def _download_youtube_hls_clip(
         video_path = hls_dir / "video.mp4"
         if media_format is MediaFormat.VIDEO:
             last_error: DownloadError | None = None
-            for item in videos:
+            source_duration = info.get("duration")
+            duration_scale = (
+                min(1.0, clip_duration / float(source_duration))
+                if isinstance(source_duration, (int, float)) and source_duration > 0
+                else 1.0
+            )
+            for index, item in enumerate(videos):
                 video_path.unlink(missing_ok=True)
                 format_id = str(item.get("format_id") or "unknown")
                 logger.info(
@@ -1268,17 +1349,36 @@ def _download_youtube_hls_clip(
                     _video_quality_label(item),
                 )
                 try:
-                    stage_timeout = min(30, max(1, int(deadline - time.monotonic())))
+                    stage_deadline = deadline
+                    can_step_down = (
+                        quality_policy is VideoQualityPolicy.AUTO
+                        and max_estimated_download_seconds > 0
+                        and index < len(videos) - 1
+                    )
+                    if can_step_down:
+                        stage_deadline = min(
+                            deadline,
+                            time.monotonic() + max_estimated_download_seconds,
+                        )
+                    stage_timeout = max(1, int(stage_deadline - time.monotonic()))
                     _download_hls_clip_stream(
                         item,
                         ffmpeg_bin=ffmpeg_bin,
                         time_range=time_range,
                         media_type="video",
                         output=video_path,
-                        deadline=min(deadline, time.monotonic() + stage_timeout),
+                        deadline=stage_deadline,
                         abort_event=abort_event,
                         source_limit=source_limit,
                         timeout_seconds=stage_timeout,
+                        expected_bytes=(
+                            _format_bytes(item, duration_scale, float(clip_duration))
+                            if can_step_down
+                            else None
+                        ),
+                        speed_limit_seconds=(
+                            max_estimated_download_seconds if can_step_down else 0
+                        ),
                     )
                     logger.info(
                         "Clip HLS video ready: format=%s bytes=%d",
@@ -1573,6 +1673,8 @@ def _download_sync(
     slideshow_images_loop: bool = DEFAULT_SLIDESHOW_IMAGES_LOOP,
     time_range: TimeRange | None = None,
     media_format: MediaFormat = MediaFormat.VIDEO,
+    quality_policy: VideoQualityPolicy = VideoQualityPolicy.AUTO,
+    max_estimated_download_seconds: int = DEFAULT_MAX_ESTIMATED_DOWNLOAD_SECONDS,
     max_media_duration_seconds: int = DEFAULT_MAX_MEDIA_DURATION_SECONDS,
     on_optimizing: Callable[[], None] | None = None,
 ) -> DownloadedMedia:
@@ -1654,8 +1756,14 @@ def _download_sync(
 
     source_bytes: dict[str, int] = {}
     source_too_large = threading.Event()
+    slow_source = threading.Event()
+    transfer_started_at = 0.0
+    video_estimated_bytes: int | None = None
+    can_step_down = False
+    next_quality_sample = _QUALITY_SAMPLE_SECONDS
 
     def _progress_hook(d: dict[str, Any]) -> None:
+        nonlocal next_quality_sample
         if abort_event is not None and abort_event.is_set():
             raise yt_dlp.utils.DownloadError(
                 strings.DOWNLOAD_TIMED_OUT.format(timeout_seconds=timeout_seconds)
@@ -1671,6 +1779,36 @@ def _download_sync(
         if sum(source_bytes.values()) > source_limit:
             source_too_large.set()
             raise yt_dlp.utils.DownloadError("Source size bound exceeded")
+        if (
+            not can_step_down
+            or d.get("status") != "downloading"
+            or not isinstance(downloaded, (int, float))
+            or downloaded <= 0
+        ):
+            return
+        stream_info = d.get("info_dict")
+        if isinstance(stream_info, dict) and stream_info.get("vcodec") == "none":
+            return
+        elapsed = time.monotonic() - transfer_started_at
+        if elapsed < next_quality_sample:
+            return
+        total_bytes = d.get("total_bytes") or d.get("total_bytes_estimate")
+        if not isinstance(total_bytes, (int, float)) or total_bytes <= 0:
+            total_bytes = video_estimated_bytes
+        if isinstance(total_bytes, (int, float)):
+            projected = _projected_transfer_seconds(
+                elapsed, int(downloaded), int(total_bytes)
+            )
+            if projected is not None:
+                logger.info(
+                    "Video transfer estimate: projected=%.1fs target=%ds",
+                    projected,
+                    max_estimated_download_seconds,
+                )
+                if projected > max_estimated_download_seconds:
+                    slow_source.set()
+                    raise yt_dlp.utils.DownloadError("Video transfer exceeds time target")
+        next_quality_sample = elapsed + _QUALITY_SAMPLE_SECONDS
 
     # yt-dlp selectors are chosen from ranked metadata and retried at lower
     # quality when the measured output exceeds Telegram's limit.
@@ -1731,6 +1869,8 @@ def _download_sync(
                         timeout_seconds=timeout_seconds,
                         abort_event=abort_event,
                         on_optimizing=on_optimizing,
+                        quality_policy=quality_policy,
+                        max_estimated_download_seconds=max_estimated_download_seconds,
                     )
                     if hls_clip is not None:
                         return hls_clip
@@ -1762,18 +1902,24 @@ def _download_sync(
                         info,
                         max_file_bytes=max_file_bytes,
                         duration_scale=duration_scale,
+                        quality_policy=quality_policy,
                     )
                 )
                 selectors = [candidate.selector for candidate in candidates]
+                if (
+                    media_format is MediaFormat.VIDEO
+                    and quality_policy is not VideoQualityPolicy.AUTO
+                ):
+                    selectors = selectors[:1]
                 fallback_selector = (
                     _default_audio_selector(effective_range, source_limit)
                     if media_format is MediaFormat.AUDIO
                     else _default_video_selector(effective_range, source_limit)
                 )
-                if fallback_selector not in selectors:
+                if not selectors or (
+                    media_format is MediaFormat.AUDIO and fallback_selector not in selectors
+                ):
                     selectors.append(fallback_selector)
-                if not selectors:
-                    selectors = [fallback_selector]
 
                 duration_raw = info.get("duration")
                 duration = (
@@ -1806,16 +1952,44 @@ def _download_sync(
                     _set_attempt_format_selector(ydl, selector)
                     source_bytes.clear()
                     source_too_large.clear()
+                    slow_source.clear()
                     transfer_started_at = time.monotonic()
+                    next_quality_sample = _QUALITY_SAMPLE_SECONDS
+                    can_step_down = (
+                        media_format is MediaFormat.VIDEO
+                        and quality_policy is VideoQualityPolicy.AUTO
+                        and max_estimated_download_seconds > 0
+                        and attempt < len(selectors)
+                    )
+                    estimate = next(
+                        (
+                            candidate.estimated_size
+                            for candidate in candidates
+                            if candidate.selector == selector
+                        ),
+                        None,
+                    )
+                    video_estimated_bytes = None
                     if media_format is MediaFormat.VIDEO:
-                        estimate = next(
-                            (
-                                candidate.estimated_size
-                                for candidate in candidates
-                                if candidate.selector == selector
-                            ),
-                            None,
-                        )
+                        video_format_id = selector.split("+", maxsplit=1)[0]
+                        formats = info.get("formats")
+                        if isinstance(formats, list):
+                            for item in formats:
+                                if (
+                                    isinstance(item, dict)
+                                    and item.get("format_id") == video_format_id
+                                ):
+                                    video_estimated_bytes = _format_bytes(
+                                        item,
+                                        duration_scale,
+                                        (
+                                            float(effective_range.duration_seconds)
+                                            if effective_range is not None
+                                            and effective_range.duration_seconds is not None
+                                            else None
+                                        ),
+                                    )
+                                    break
                         logger.info(
                             "Video format attempt started: "
                             "format=%s quality=%s estimated_bytes=%s range=%s",
@@ -1914,6 +2088,13 @@ def _download_sync(
                             preserved.unlink(missing_ok=True)
                     except (yt_dlp.utils.DownloadError, DownloadError) as exc:
                         last_error = exc
+                        if slow_source.is_set():
+                            logger.info(
+                                "Video format %s exceeded the %ds estimated download target; "
+                                "trying a lower quality",
+                                selector,
+                                max_estimated_download_seconds,
+                            )
                         if not source_too_large.is_set() and not isinstance(exc, DownloadError):
                             message = str(exc).split("\n")[-1].strip()
                             logger.debug(
@@ -2026,6 +2207,8 @@ async def download_media(
     slideshow_images_loop: bool = DEFAULT_SLIDESHOW_IMAGES_LOOP,
     time_range: TimeRange | None = None,
     media_format: MediaFormat = MediaFormat.VIDEO,
+    quality_policy: VideoQualityPolicy = VideoQualityPolicy.AUTO,
+    max_estimated_download_seconds: int = DEFAULT_MAX_ESTIMATED_DOWNLOAD_SECONDS,
     max_media_duration_seconds: int = DEFAULT_MAX_MEDIA_DURATION_SECONDS,
     on_optimizing: Callable[[], None] | None = None,
 ) -> DownloadedMedia:
@@ -2054,6 +2237,8 @@ async def download_media(
             slideshow_images_loop=slideshow_images_loop,
             time_range=time_range,
             media_format=media_format,
+            quality_policy=quality_policy,
+            max_estimated_download_seconds=max_estimated_download_seconds,
             max_media_duration_seconds=max_media_duration_seconds,
             on_optimizing=on_optimizing,
         )

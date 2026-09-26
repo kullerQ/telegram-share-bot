@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -100,15 +102,22 @@ class TestMediaCache(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cached.title, "Song V2")
         self.assertEqual(cached.duration, 185)
 
-
     async def test_format_and_quality_variants_are_isolated(self) -> None:
         url = "https://www.youtube.com/watch?v=variant12345"
         await self.cache.set(
-            url, "video-id", MediaKind.VIDEO, "Video", 30,
+            url,
+            "video-id",
+            MediaKind.VIDEO,
+            "Video",
+            30,
             media_format=MediaFormat.VIDEO,
         )
         await self.cache.set(
-            url, "audio-id", MediaKind.AUDIO, "Audio", 30,
+            url,
+            "audio-id",
+            MediaKind.AUDIO,
+            "Audio",
+            30,
             media_format=MediaFormat.AUDIO,
         )
 
@@ -123,6 +132,28 @@ class TestMediaCache(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(
             await self.cache.get(url, media_format=MediaFormat.VIDEO, quality_policy="720p")
         )
+        for policy, file_id in (
+            ("auto-best", "auto-id"),
+            ("source-best", "best-id"),
+            ("balanced", "balanced-id"),
+        ):
+            await self.cache.set(
+                url,
+                file_id,
+                MediaKind.VIDEO,
+                "Video",
+                30,
+                quality_policy=policy,
+            )
+        for policy, file_id in (
+            ("auto-best", "auto-id"),
+            ("source-best", "best-id"),
+            ("balanced", "balanced-id"),
+        ):
+            cached = await self.cache.get(url, quality_policy=policy)
+            self.assertIsNotNone(cached)
+            assert cached is not None
+            self.assertEqual(cached.file_id, file_id)
 
     async def test_legacy_entry_is_reused_only_for_default_video(self) -> None:
         from telegram_share_bot.cache import _legacy_cache_key
@@ -147,6 +178,118 @@ class TestMediaCache(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(
             await self.cache.get(url, media_format=MediaFormat.VIDEO, quality_policy="720p")
         )
+        self.assertIsNone(await self.cache.get(url, quality_policy="auto-best"))
+
+    async def test_best_video_preferred_over_auto_for_same_clip(self) -> None:
+        from telegram_share_bot.downloader import TimeRange
+
+        url = "https://www.youtube.com/watch?v=quality12345"
+        clip = TimeRange(start=60, end=120)
+        await self.cache.set(
+            url,
+            "auto",
+            MediaKind.VIDEO,
+            "Auto",
+            60,
+            time_range=clip,
+            quality_policy="auto-best",
+            video_height=720,
+        )
+        await self.cache.set(
+            url,
+            "best",
+            MediaKind.VIDEO,
+            "Best",
+            60,
+            time_range=clip,
+            quality_policy="source-best",
+            video_height=1080,
+        )
+        chosen = await self.cache.get_preferred_video(url, time_range=clip)
+        self.assertIsNotNone(chosen)
+        assert chosen is not None
+        self.assertEqual(chosen.file_id, "best")
+        await self.cache.set(
+            url, "auto-higher", MediaKind.VIDEO, "Auto", 60,
+            time_range=clip, quality_policy="auto-best", video_height=1440,
+        )
+        higher = await self.cache.get_preferred_video(url, time_range=clip)
+        self.assertIsNotNone(higher)
+        assert higher is not None
+        self.assertEqual(higher.file_id, "auto-higher")
+        await self.cache.evict_entry(higher)
+        self.assertIsNone(await self.cache.get_preferred_video(url))
+        await self.cache.evict_entry(chosen)
+        fallback = await self.cache.get_preferred_video(url, time_range=clip)
+        self.assertIsNone(fallback)
+
+    async def test_progressive_tier_reuses_only_measured_sufficient_video(self) -> None:
+        url = "https://www.youtube.com/watch?v=tier1234567"
+        await self.cache.set(
+            url,
+            "best-low",
+            MediaKind.VIDEO,
+            "Best",
+            60,
+            quality_policy="source-best",
+            video_height=480,
+        )
+        await self.cache.set(
+            url,
+            "balanced",
+            MediaKind.VIDEO,
+            "Balanced",
+            60,
+            quality_policy="balanced",
+            video_height=720,
+        )
+        chosen = await self.cache.get_preferred_video(url, quality_policy="balanced")
+        self.assertIsNotNone(chosen)
+        assert chosen is not None
+        self.assertEqual(chosen.file_id, "balanced")
+        self.assertIsNone(await self.cache.get_preferred_video(url, quality_policy="1080p"))
+        await self.cache.set(
+            url,
+            "best-high",
+            MediaKind.VIDEO,
+            "Best",
+            60,
+            quality_policy="source-best",
+            video_height=1440,
+        )
+        chosen = await self.cache.get_preferred_video(url, quality_policy="1080p")
+        self.assertIsNotNone(chosen)
+        assert chosen is not None
+        self.assertEqual(chosen.file_id, "best-high")
+
+    async def test_existing_database_adds_video_height_without_losing_entries(self) -> None:
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn, conn:
+            conn.execute("DROP TABLE media_cache")
+            conn.execute(
+                """CREATE TABLE media_cache (
+                    url TEXT PRIMARY KEY, file_id TEXT NOT NULL,
+                    media_kind TEXT NOT NULL, title TEXT NOT NULL, duration INTEGER,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    last_used_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )"""
+            )
+            conn.execute(
+                """INSERT INTO media_cache (url, file_id, media_kind, title, duration)
+                VALUES (?, ?, ?, ?, ?)""",
+                (
+                    "https://example.com/video#format=video&quality=auto-best",
+                    "old",
+                    "video",
+                    "Old",
+                    30,
+                ),
+            )
+        self.cache._init_db()
+        cached = await self.cache.get("https://example.com/video", quality_policy="auto-best")
+        self.assertIsNotNone(cached)
+        assert cached is not None
+        self.assertEqual(cached.file_id, "old")
+        self.assertIsNone(cached.video_height)
 
     async def test_get_recovers_when_db_file_deleted(self) -> None:
         url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"

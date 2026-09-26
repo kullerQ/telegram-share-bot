@@ -110,7 +110,7 @@ For a YouTube **clip**, either:
 - use a share link with `?t=` / `start=` and a following duration in **seconds** (e.g. `?t=2022` + `30` → clip from 33:42 for 30 seconds), or
 - use `?t=` / `start=` alone to choose a clip from that start through the end of the video (still offers full video as the other choice).
 
-Inline mode offers Video and Audio results; YouTube clip links also offer clip and full-length versions in both formats. In a private chat, paste a link and choose Video or Audio. For a direct choice, send `/video <link>` or `/audio <link>`. Captions may follow the range or duration. A caption without a leading range/duration on a link without `t=` still downloads the whole video.
+Inline mode offers Video Auto and Audio results; YouTube clip links also offer clip and full-length versions in both formats. In a private chat, paste a link and choose Video Auto, Best, Balanced, or Audio. Auto starts with the highest feasible source quality, samples transfer speed after five seconds, and tries a lower quality if the projected download exceeds 45 seconds by default. Best holds the highest feasible source quality; Balanced prefers a progressive 720p-class stream, favoring 60 fps and AVC when available. Quality tiers describe preferred source quality rather than hard resolution caps. Telegram's file-size and overall download limits still apply. For a direct choice, send `/video <link>`, `/video best <link>`, `/video balanced <link>`, or `/audio <link>`. Captions may follow the range or duration. A caption without a leading range/duration on a link without `t=` still downloads the whole video.
 
 ```text
 @YourBot https://youtube.com/watch?v=… 1:20-2:05
@@ -127,12 +127,13 @@ Tap a Video or Audio result (or a clip / full-length choice). A placeholder appe
 1. Telegram sends an `inline_query` with the URL.
 2. The bot answers **immediately** with a placeholder article (Telegram rejects answers that take too long).
 3. When you tap the result, Telegram sends `chosen_inline_result` (needs `/setinlinefeedback`).
-4. The bot downloads via `yt-dlp`, uploads to `STORAGE_CHAT_ID` for a `file_id`, deletes that storage message, then edits the inline message to the media. Video selection prefers the best plausible quality that fits the configured Telegram size limit, tries lower-quality formats if the measured file is still too large, then makes at most two bounded `ffmpeg` optimization attempts. This is a size-based choice, not a fixed resolution cap. Audio selection downloads an audio-only stream and prepares native Telegram audio; YouTube clips and TikTok slideshow soundtracks are supported when the source provides audio. Telegram direct URL imports are attempted only for known-size streams within the limit and fall back to a local download if Telegram rejects the URL.
+4. The bot downloads via `yt-dlp`, uploads to `STORAGE_CHAT_ID` for a `file_id`, deletes that storage message, then edits the inline message to the media. Auto video selection tries the highest feasible source first and steps down on a slow transfer or oversized output. Best and Balanced keep their selected quality and can make at most two bounded `ffmpeg` optimization attempts to meet Telegram's size limit. Audio selection downloads an audio-only stream and prepares native Telegram audio; YouTube clips and TikTok slideshow soundtracks are supported when the source provides audio. Telegram direct URL imports are used for eligible audio streams and fall back to local delivery if Telegram rejects the URL.
 
 ## Limits
 
 - Max file size ≈ 45 MB (Telegram Bot API upload limit is 50 MB). Video quality is adapted to fit this limit rather than capped at one fixed resolution.
 - Download timeout defaults to 120 seconds; source transfers are bounded to twice the output size limit.
+- Auto video checks elapsed time and transferred bytes from five seconds onward. `MAX_ESTIMATED_DOWNLOAD_SECONDS=45` sets the projected total download target; `0` disables this speed-based step-down. Every retry shares the 120-second overall deadline. Best and Balanced use the full deadline without speed-based step-down.
 - Global concurrent downloads default to 6; each user may have 3 active requests. Set either limit to `0` to disable it. The per-user cooldown defaults to 2 seconds.
 - Each user may make 10 download requests per rolling 60-second window by default (`MAX_DOWNLOADS_PER_MINUTE`); rejected requests due to cooldown or active-download limits count too. Set it to `0` to disable this rate limit.
 - New full video and audio requests are limited to 30 minutes when source metadata provides a duration (`MAX_MEDIA_DURATION_SECONDS=1800`). Set `0` to disable this limit. Short YouTube clips from longer videos remain available under the 10-minute clip limit. Unknown durations still have the byte and timeout limits.
@@ -148,4 +149,5 @@ Tap a Video or Audio result (or a clip / full-length choice). A placeholder appe
 
 - Users should `/start` the bot once before relying on inline mode.
 - Respect platform Terms of Service for downloaded content; this project is for personal/lightweight use.
+- Previously uploaded videos are reused when their recorded output resolution meets or exceeds the requested quality tier. Auto prefers a cached Best upload when it is at least as good as the cached Auto upload. Clip ranges and full videos remain separate cache entries; captions are applied when sent.
 - Signed / credentialed URLs are not stored in the shared media cache.

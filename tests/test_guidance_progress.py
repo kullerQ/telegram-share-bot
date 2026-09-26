@@ -18,6 +18,7 @@ from telegram_share_bot.downloader import (
     MediaFormat,
     MediaKind,
     TimeRange,
+    VideoQualityPolicy,
 )
 from telegram_share_bot.handlers import (
     _prepare_inline_media,
@@ -196,9 +197,9 @@ class TestMediaProgress(unittest.IsolatedAsyncioTestCase):
 
     async def test_long_direct_stream_is_rejected_before_upload(self) -> None:
         stream = DirectMediaStream(
-            direct_url="https://example.com/long.mp4",
+            direct_url="https://example.com/long.m4a",
             title="Long video",
-            kind=MediaKind.VIDEO,
+            kind=MediaKind.AUDIO,
             duration=3600,
             size_bytes=1024,
         )
@@ -226,6 +227,7 @@ class TestMediaProgress(unittest.IsolatedAsyncioTestCase):
                 custom_caption=None,
                 time_range=None,
                 status_message=status,
+                media_format=MediaFormat.AUDIO,
             )
             await _prepare_inline_media(
                 self.context,
@@ -233,6 +235,7 @@ class TestMediaProgress(unittest.IsolatedAsyncioTestCase):
                 url="https://example.com/long",
                 result_id="long-result",
                 user_id=42,
+                media_format=MediaFormat.AUDIO,
             )
 
         self.assertEqual(status.edit_text.await_args_list[-1].args[0], expected)
@@ -258,7 +261,7 @@ class TestMediaProgress(unittest.IsolatedAsyncioTestCase):
             patch(
                 "telegram_share_bot.handlers._upload_for_file_id",
                 new=AsyncMock(
-                    return_value=("FILE_ID", "Example video", MediaKind.VIDEO)
+                    return_value=("FILE_ID", "Example video", MediaKind.VIDEO, 1080)
                 ),
             ),
         ):
@@ -286,9 +289,22 @@ class TestMediaProgress(unittest.IsolatedAsyncioTestCase):
         url = "https://youtu.be/GKq9nKZpmu0"
         clip = TimeRange(150, 210)
         await self.cache.set(
-            url, "CLIP_ID", MediaKind.VIDEO, "Example", 60, time_range=clip
+            url,
+            "CLIP_ID",
+            MediaKind.VIDEO,
+            "Example",
+            60,
+            time_range=clip,
+            quality_policy=VideoQualityPolicy.AUTO.value,
         )
-        await self.cache.set(url, "FULL_ID", MediaKind.VIDEO, "Example", 360)
+        await self.cache.set(
+            url,
+            "FULL_ID",
+            MediaKind.VIDEO,
+            "Example",
+            360,
+            quality_policy=VideoQualityPolicy.AUTO.value,
+        )
         query = MagicMock()
         query.from_user = MagicMock(id=42)
         query.query = f"{url} 2:30-3:30"
@@ -305,7 +321,10 @@ class TestMediaProgress(unittest.IsolatedAsyncioTestCase):
         download.assert_not_called()
         clip_choice, audio_clip, full_choice, full_audio = query.answer.await_args.kwargs["results"]
         self.assertIn("Send video clip 2:30-3:30", clip_choice.title)
-        self.assertIn("YouTube · Video · 2:30-3:30 · Cached", clip_choice.description)
+        self.assertIn(
+            "YouTube · Video · Auto: best first, speed fallback · 2:30-3:30 · Cached",
+            clip_choice.description,
+        )
         self.assertIn("Send audio clip 2:30-3:30", audio_clip.title)
         self.assertIn("YouTube · Audio · 2:30-3:30 · Download", audio_clip.description)
         self.assertIn("Checking clip", clip_choice.input_message_content.message_text)
@@ -316,7 +335,10 @@ class TestMediaProgress(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(clip_choice.thumbnail_width, 320)
         self.assertEqual(clip_choice.thumbnail_height, 180)
         self.assertIn("Send full video", full_choice.title)
-        self.assertIn("YouTube · Video · 6:00 · Cached", full_choice.description)
+        self.assertIn(
+            "YouTube · Video · Auto: best first, speed fallback · 6:00 · Cached",
+            full_choice.description,
+        )
         self.assertIn("Send full audio", full_audio.title)
         self.assertEqual(full_choice.thumbnail_url, clip_choice.thumbnail_url)
 
@@ -332,7 +354,10 @@ class TestMediaProgress(unittest.IsolatedAsyncioTestCase):
 
         video, audio = query.answer.await_args.kwargs["results"]
         self.assertEqual(video.title, "▶ Send video")
-        self.assertEqual(video.description, "YouTube · Video · Download")
+        self.assertEqual(
+            video.description,
+            "YouTube · Video · Auto: best first, speed fallback · Download",
+        )
         self.assertEqual(audio.title, "♫ Send audio")
         self.assertEqual(audio.description, "YouTube · Audio · Download")
         result = video
@@ -396,7 +421,7 @@ class TestMediaProgress(unittest.IsolatedAsyncioTestCase):
             patch("telegram_share_bot.handlers.download_media", download),
             patch(
                 "telegram_share_bot.handlers._upload_for_file_id",
-                AsyncMock(return_value=("AUDIO_FILE_ID", "Example audio", MediaKind.AUDIO)),
+                AsyncMock(return_value=("AUDIO_FILE_ID", "Example audio", MediaKind.AUDIO, None)),
             ),
         ):
             await _prepare_inline_media(
@@ -433,7 +458,7 @@ class TestMediaProgress(unittest.IsolatedAsyncioTestCase):
             ),
             patch(
                 "telegram_share_bot.handlers._upload_for_file_id",
-                new=AsyncMock(return_value=("FILE_ID", "Clip", MediaKind.VIDEO)),
+                new=AsyncMock(return_value=("FILE_ID", "Clip", MediaKind.VIDEO, 720)),
             ),
         ):
             await _prepare_inline_media(
