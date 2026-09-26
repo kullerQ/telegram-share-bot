@@ -8,6 +8,7 @@ services:
       - .env
     volumes:
       - ./downloads:/app/downloads
+      - ./data:/app/data
       - ./logs:/app/logs
     read_only: true
     tmpfs:

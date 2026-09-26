@@ -53,7 +53,7 @@ WORKDIR /app
 
 RUN addgroup -g 1000 appgroup \
     && adduser -u 1000 -G appgroup -s /sbin/nologin -D appuser \
-    && mkdir -p /app/downloads /app/logs \
+    && mkdir -p /app/downloads /app/data /app/logs \
     && chown -R appuser:appgroup /app
 
 COPY --from=builder /opt/venv /opt/venv

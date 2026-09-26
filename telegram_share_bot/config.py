@@ -97,6 +97,7 @@ class Settings:
     download_dir: Path
     cache_db_path: Path
     delete_storage_messages: bool
+    user_settings_db_path: Path | None = None
     upload_timeout_seconds: int = DEFAULT_UPLOAD_TIMEOUT_SECONDS
     max_estimated_download_seconds: int = DEFAULT_MAX_ESTIMATED_DOWNLOAD_SECONDS
     max_concurrent_downloads: int = DEFAULT_MAX_CONCURRENT_DOWNLOADS
@@ -395,6 +396,9 @@ def load_settings(env_file: Path = _ENV_PATH) -> Settings:
     download_dir = _ROOT / "downloads"
     download_dir.mkdir(parents=True, exist_ok=True)
 
+    data_dir = _ROOT / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+
     cache_db_path = parse_path(
         "CACHE_DB_PATH",
         os.getenv("CACHE_DB_PATH"),
@@ -557,6 +561,7 @@ def load_settings(env_file: Path = _ENV_PATH) -> Settings:
         download_dir=download_dir,
         cache_db_path=cache_db_path,
         delete_storage_messages=delete_storage_messages,
+        user_settings_db_path=data_dir / "user_settings.db",
         upload_timeout_seconds=upload_timeout,
         max_concurrent_downloads=max_concurrent_downloads,
         max_downloads_per_user=max_downloads_per_user,
