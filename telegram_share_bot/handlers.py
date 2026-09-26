@@ -1648,18 +1648,13 @@ def _pending_media_article(
     media_type = "audio" if media_format is MediaFormat.AUDIO else "video"
     details = [platform, media_type.capitalize()]
     if media_format is MediaFormat.VIDEO:
-        details.append(
+        details.append("Q: " +
             {
                 VideoQualityPolicy.AUTO: strings.INLINE_QUALITY_AUTO_DETAIL,
                 VideoQualityPolicy.BEST: strings.INLINE_QUALITY_BEST_DETAIL,
                 VideoQualityPolicy.BALANCED: strings.INLINE_QUALITY_BALANCED_DETAIL,
             }[quality_policy]
         )
-    if time_range is not None:
-        range_label = format_time_range(time_range)
-        details.append(range_label)
-    elif cached is not None and cached.duration is not None:
-        details.append(_format_media_duration(cached.duration))
     if force_full_title:
         title = (
             strings.INLINE_PENDING_FULL_AUDIO_TITLE
