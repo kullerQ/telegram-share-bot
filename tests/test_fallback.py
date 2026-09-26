@@ -18,10 +18,13 @@ from telegram_share_bot.downloader import (
     DownloadedMedia,
     MediaFormat,
     MediaKind,
+    TimeRange,
     VideoQualityPolicy,
 )
 from telegram_share_bot.handlers import (
     PendingClipChoice,
+    _clip_choice_keyboard,
+    _format_choice_keyboard,
     _prepare_inline_media,
     _run_direct_download,
     direct_format_callback,
@@ -132,10 +135,7 @@ class TestCacheFallback(unittest.IsolatedAsyncioTestCase):
             [button.callback_data.split(":", 1)[0] for button in keyboard.inline_keyboard[0]],
             ["video", "audio"],
         )
-        self.assertEqual(
-            [button.callback_data.split(":", 1)[0] for button in keyboard.inline_keyboard[1]],
-            ["video-best", "video-balanced"],
-        )
+        self.assertEqual(len(keyboard.inline_keyboard), 1)
         self.assertEqual(context.bot.send_video.call_count, 0)
 
         choice_id = keyboard.inline_keyboard[0][0].callback_data.split(":", 1)[1]
@@ -229,7 +229,35 @@ class TestCacheFallback(unittest.IsolatedAsyncioTestCase):
         run_download.assert_not_awaited()
         markup = update.effective_message.reply_text.await_args.kwargs["reply_markup"]
         self.assertIn("clip-balanced:", markup.inline_keyboard[0][0].callback_data)
-        self.assertIn("full-balanced:", markup.inline_keyboard[2][0].callback_data)
+        self.assertIn("full-balanced:", markup.inline_keyboard[1][0].callback_data)
+        self.assertEqual(len(markup.inline_keyboard), 2)
+
+    async def test_private_choices_offer_only_saved_video_quality(self) -> None:
+        for quality, video_prefix, clip_prefix, full_prefix in (
+            (VideoQualityPolicy.AUTO, "video:", "clip:", "full:"),
+            (VideoQualityPolicy.BEST, "video-best:", "clip-best:", "full-best:"),
+            (
+                VideoQualityPolicy.BALANCED,
+                "video-balanced:",
+                "clip-balanced:",
+                "full-balanced:",
+            ),
+        ):
+            with self.subTest(quality=quality):
+                plain = _format_choice_keyboard("id", quality).inline_keyboard
+                self.assertEqual(len(plain), 1)
+                self.assertEqual(len(plain[0]), 2)
+                self.assertEqual(plain[0][0].callback_data, f"{video_prefix}id")
+                self.assertEqual(plain[0][1].callback_data, "audio:id")
+
+                clip = _clip_choice_keyboard("id", TimeRange(60, 120), quality).inline_keyboard
+                self.assertEqual(len(clip), 2)
+                self.assertEqual(clip[0][0].callback_data, f"{clip_prefix}id")
+                self.assertEqual(clip[1][0].callback_data, f"{full_prefix}id")
+                self.assertEqual(clip[0][1].callback_data, "clipaudio:id")
+                self.assertEqual(clip[1][1].callback_data, "fullaudio:id")
+                self.assertIn(quality.name.title(), clip[0][0].text)
+                self.assertIn(quality.name.title(), clip[1][0].text)
 
     async def test_private_quality_buttons_pass_the_selected_policy(self) -> None:
         context = MagicMock()

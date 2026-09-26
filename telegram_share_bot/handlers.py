@@ -524,14 +524,11 @@ def _format_choice_keyboard(
     choice_id: str,
     preferred_quality: VideoQualityPolicy = VideoQualityPolicy.AUTO,
 ) -> InlineKeyboardMarkup:
-    quality_options = (
-        (VideoQualityPolicy.BEST, _VIDEO_BEST_CALLBACK_PREFIX),
-        (VideoQualityPolicy.BALANCED, _VIDEO_BALANCED_CALLBACK_PREFIX),
-        (VideoQualityPolicy.AUTO, _VIDEO_CALLBACK_PREFIX),
-    )
-    preferred_prefix = next(
-        prefix for policy, prefix in quality_options if policy is preferred_quality
-    )
+    preferred_prefix = {
+        VideoQualityPolicy.BEST: _VIDEO_BEST_CALLBACK_PREFIX,
+        VideoQualityPolicy.BALANCED: _VIDEO_BALANCED_CALLBACK_PREFIX,
+        VideoQualityPolicy.AUTO: _VIDEO_CALLBACK_PREFIX,
+    }[preferred_quality]
     rows = [
         [
             InlineKeyboardButton(
@@ -546,19 +543,6 @@ def _format_choice_keyboard(
             ),
         ]
     ]
-    alternatives = [item for item in quality_options if item[0] is not preferred_quality]
-    for offset in range(0, len(alternatives), 2):
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    strings.DIRECT_VIDEO_QUALITY_BUTTON.format(
-                        quality=_preference_quality_label(policy)
-                    ),
-                    callback_data=f"{prefix}{choice_id}",
-                )
-                for policy, prefix in alternatives[offset : offset + 2]
-            ]
-        )
     return InlineKeyboardMarkup(rows)
 
 
@@ -569,7 +553,7 @@ def _clip_choice_keyboard(
 ) -> InlineKeyboardMarkup:
     range_label = format_time_range(time_range)
     rows: list[list[InlineKeyboardButton]] = []
-    for quality_options, audio_prefix, video_label, audio_label, extra_label in (
+    for quality_options, audio_prefix, video_label, audio_label in (
         (
             (
                 (VideoQualityPolicy.BEST, _CLIP_BEST_CALLBACK_PREFIX),
@@ -581,7 +565,6 @@ def _clip_choice_keyboard(
                 quality=_preference_quality_label(preferred_quality), range_label=range_label
             ),
             strings.DIRECT_CLIP_AUDIO_BUTTON.format(range_label=range_label),
-            strings.CLIP_VIDEO_QUALITY_BUTTON,
         ),
         (
             (
@@ -594,7 +577,6 @@ def _clip_choice_keyboard(
                 quality=_preference_quality_label(preferred_quality)
             ),
             strings.DIRECT_FULL_AUDIO_BUTTON,
-            strings.FULL_VIDEO_QUALITY_BUTTON,
         ),
     ):
         video_prefix = next(
@@ -606,20 +588,6 @@ def _clip_choice_keyboard(
                 InlineKeyboardButton(audio_label, callback_data=f"{audio_prefix}{choice_id}"),
             ]
         )
-        alternatives = [item for item in quality_options if item[0] is not preferred_quality]
-        for offset in range(0, len(alternatives), 2):
-            rows.append(
-                [
-                    InlineKeyboardButton(
-                        extra_label.format(
-                            range_label=range_label,
-                            quality=_preference_quality_label(policy),
-                        ),
-                        callback_data=f"{prefix}{choice_id}",
-                    )
-                    for policy, prefix in alternatives[offset : offset + 2]
-                ]
-            )
     return InlineKeyboardMarkup(rows)
 
 
