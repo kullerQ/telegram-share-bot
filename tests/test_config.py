@@ -86,6 +86,9 @@ class TestConfigValidation(unittest.TestCase):
         self.assertEqual(parse_int("PARAM", None, default=42), 42)
         self.assertEqual(parse_int("PARAM", "", default=42), 42)
 
+    def test_download_timeout_default_is_120_seconds(self) -> None:
+        self.assertEqual(DEFAULT_DOWNLOAD_TIMEOUT_SECONDS, 120)
+
     def test_parse_int_valid_within_bounds(self) -> None:
         self.assertEqual(
             parse_int("MAX_FILE_BYTES", "1048576", default=DEFAULT_MAX_FILE_BYTES, min_value=1024),
