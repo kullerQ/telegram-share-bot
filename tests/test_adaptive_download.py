@@ -944,11 +944,11 @@ class TestVideoIntegrity(unittest.TestCase):
                         "telegram_share_bot.downloader._extract_info_cached",
                         return_value=(info, False),
                     ),
-                    patch("telegram_share_bot.downloader.shutil.which", return_value="ffprobe"),
+                    patch("telegram_share_bot.downloader.shutil.which", return_value="ffmpeg"),
                     patch(
                         "telegram_share_bot.downloader.subprocess.run",
                         return_value=subprocess.CompletedProcess(
-                            [], 0, b'{"streams":[{"codec_type":"audio"}]}'
+                            [], 0, b"", b"  Stream #0:0: Audio: opus, 48000 Hz\n"
                         ),
                     ),
                 ):
@@ -1049,18 +1049,60 @@ class TestVideoOptimization(unittest.TestCase):
 
     def test_rejects_audio_only_file_despite_mp4_extension(self) -> None:
         with (
-            patch("telegram_share_bot.downloader.shutil.which", return_value="ffprobe"),
+            patch("telegram_share_bot.downloader.shutil.which", return_value="ffmpeg"),
             patch(
                 "telegram_share_bot.downloader.subprocess.run",
                 return_value=subprocess.CompletedProcess(
                     [],
                     0,
-                    b'{"streams":[{"codec_type":"audio","codec_name":"opus"}],"format":{"duration":"297"}}',
+                    b"",
+                    b"  Duration: 00:04:57.00\n  Stream #0:0: Audio: opus, 48000 Hz\n",
                 ),
             ),
         ):
             with self.assertRaises(DownloadError):
                 _probe_video_file(Path("audio.mp4"), 9999999999)
+
+    def test_reads_video_and_audio_from_ffmpeg_input(self) -> None:
+        stderr = (
+            b"  Duration: 00:02:30.50, start: 0.000000, bitrate: 8000 kb/s\n"
+            b"  Stream #0:0[0x1](und): Video: h264 (High) (avc1 / 0x31637661), "
+            b"yuv420p(tv, bt709), 1920x1080, 30 fps (default)\n"
+            b"  Stream #0:1[0x2](und): Audio: aac (LC), 44100 Hz, stereo\n"
+            b"Stream mapping:\n"
+            b"  Stream #0:0 -> #0:0 (h264 -> wrapped_avframe)\n"
+            b"Output #0, null, to 'pipe:':\n"
+            b"  Stream #0:0: Video: wrapped_avframe, yuv420p, 1920x1080\n"
+        )
+        with (
+            patch("telegram_share_bot.downloader.shutil.which", return_value="ffmpeg"),
+            patch(
+                "telegram_share_bot.downloader.subprocess.run",
+                return_value=subprocess.CompletedProcess([], 0, b"", stderr),
+            ) as run,
+        ):
+            probe = _probe_video_file(Path("video.mp4"), 9999999999)
+        self.assertEqual(probe, _VideoProbe(150.5, "h264", "yuv420p", "aac", 1920, 1080))
+        self.assertTrue(probe.compatible)
+        self.assertEqual(run.call_args.args[0][0], "ffmpeg")
+
+    def test_ignores_cover_art_when_selecting_video(self) -> None:
+        stderr = (
+            b"  Duration: 00:00:12.00, start: 0.000000\n"
+            b"  Stream #0:0: Video: mjpeg, yuvj420p, 600x600 (attached pic)\n"
+            b"  Stream #0:1: Audio: aac, 44100 Hz, stereo\n"
+            b"  Stream #0:2: Video: vp9, yuv420p, 1280x720, 30 fps\n"
+        )
+        with (
+            patch("telegram_share_bot.downloader.shutil.which", return_value="ffmpeg"),
+            patch(
+                "telegram_share_bot.downloader.subprocess.run",
+                return_value=subprocess.CompletedProcess([], 0, b"", stderr),
+            ),
+        ):
+            probe = _probe_video_file(Path("video.mp4"), 9999999999)
+        self.assertEqual(probe, _VideoProbe(12, "vp9", "yuv420p", "aac", 1280, 720))
+        self.assertFalse(probe.compatible)
 
     def test_compatible_small_video_is_not_reencoded(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
