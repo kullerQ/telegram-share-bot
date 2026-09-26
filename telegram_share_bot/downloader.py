@@ -6,7 +6,6 @@ import asyncio
 import contextlib
 import copy
 import ipaddress
-import json
 import logging
 import math
 import re
@@ -718,6 +717,13 @@ class DownloadError(Exception):
     def __init__(self, message: str, *, retryable: bool | None = None) -> None:
         super().__init__(message)
         self.retryable = _is_transient_download_error(message) if retryable is None else retryable
+
+
+class VideoUnavailableError(DownloadError):
+    """Raised when the requested link contains audio but no playable video."""
+
+    def __init__(self) -> None:
+        super().__init__(strings.VIDEO_UNAVAILABLE, retryable=False)
 
 
 # YouTube clip length hard cap (still offer both choices; clip path rejects over-long).
@@ -1556,39 +1562,84 @@ class _VideoProbe:
 
 def _probe_video_file(path: Path, deadline: float) -> _VideoProbe:
     """Verify actual streams; an MP4 extension alone does not imply video."""
-    probe_bin = shutil.which("ffprobe")
+    ffmpeg_bin = shutil.which("ffmpeg")
     remaining = deadline - time.monotonic()
-    if probe_bin is None:
+    if ffmpeg_bin is None:
         raise DownloadError(strings.DOWNLOAD_FIT_FFMPEG_MISSING)
     if remaining <= 0:
         raise DownloadError(strings.DOWNLOAD_TIMED_OUT.format(timeout_seconds=0))
     try:
         result = subprocess.run(
-            [probe_bin, "-v", "error", "-show_streams", "-show_format", "-of", "json", str(path)],
+            [
+                ffmpeg_bin,
+                "-hide_banner",
+                "-nostdin",
+                "-loglevel",
+                "info",
+                "-i",
+                str(path),
+                "-t",
+                "0",
+                "-f",
+                "null",
+                "-",
+            ],
             check=False,
             capture_output=True,
             timeout=min(10.0, remaining),
         )
         if result.returncode != 0:
-            raise ValueError("ffprobe rejected the output")
-        info = json.loads(result.stdout)
-        streams = info.get("streams", [])
-        video = next(
-            stream
-            for stream in streams
-            if stream.get("codec_type") == "video"
-            and not stream.get("disposition", {}).get("attached_pic")
-        )
-        audio = next((s for s in streams if s.get("codec_type") == "audio"), None)
-        duration = float(info.get("format", {}).get("duration") or video.get("duration") or 0)
-        width, height = int(video.get("width") or 0), int(video.get("height") or 0)
+            raise ValueError("ffmpeg rejected the output")
+        duration = 0.0
+        video_codec = ""
+        pixel_format = ""
+        audio_codec: str | None = None
+        video_stream_seen = False
+        width = height = 0
+        for line in (result.stderr or b"").decode("utf-8", errors="replace").splitlines():
+            # Only inspect the input: FFmpeg also prints transcoded output streams.
+            if line.startswith(("Stream mapping:", "Output #")):
+                break
+            duration_match = re.match(
+                r"^\s*Duration: (\d+):(\d{2}):(\d{2}(?:\.\d+)?)", line
+            )
+            if duration_match is not None:
+                hours, minutes, seconds = duration_match.groups()
+                duration = int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+            stream_match = re.match(
+                r"^\s*Stream #0:\d+(?:\[[^]]+\])?(?:\([^)]*\))?: "
+                r"(Video|Audio): ([A-Za-z0-9_]+)\b(.*)$",
+                line,
+            )
+            if stream_match is None:
+                continue
+            kind, codec, details = stream_match.groups()
+            if kind == "Audio" and audio_codec is None:
+                audio_codec = codec
+            if kind != "Video" or "(attached pic)" in details:
+                continue
+            video_stream_seen = True
+            if video_codec:
+                continue
+            dimensions = re.search(r"(?<!\w)(\d{2,5})x(\d{2,5})(?!\d)", details)
+            if dimensions is None:
+                continue
+            video_codec = codec
+            width, height = map(int, dimensions.groups())
+            pixel_match = re.search(
+                r",\s*([A-Za-z0-9_]+)(?:\([^)]*\))?,\s*\d{2,5}x\d{2,5}\b",
+                details,
+            )
+            pixel_format = pixel_match.group(1) if pixel_match is not None else ""
+        if not video_stream_seen and audio_codec is not None:
+            raise VideoUnavailableError()
         if width <= 0 or height <= 0 or not math.isfinite(duration):
             raise ValueError("invalid video dimensions or duration")
         return _VideoProbe(
             duration,
-            str(video.get("codec_name") or ""),
-            str(video.get("pix_fmt") or ""),
-            str(audio.get("codec_name") or "") if audio is not None else None,
+            video_codec,
+            pixel_format,
+            audio_codec,
             width,
             height,
         )
@@ -1597,8 +1648,6 @@ def _probe_video_file(path: Path, deadline: float) -> _VideoProbe:
         subprocess.TimeoutExpired,
         ValueError,
         TypeError,
-        AttributeError,
-        StopIteration,
     ) as exc:
         logger.warning("Downloaded output is not a complete video: %s", path.name)
         raise DownloadError(strings.DOWNLOAD_FAILED_INCOMPLETE) from exc
@@ -1914,6 +1963,16 @@ def _download_sync(
                 metadata_started_at = time.monotonic()
                 extracted, from_cache = _extract_info_cached(ydl, url)
                 info = _pick_info(extracted)
+                formats = info.get("formats")
+                if media_format is MediaFormat.VIDEO and isinstance(formats, list) and formats:
+                    if all(
+                        isinstance(item, dict) and item.get("vcodec") == "none"
+                        for item in formats
+                    ) and any(
+                        isinstance(item, dict) and item.get("acodec") not in (None, "none")
+                        for item in formats
+                    ):
+                        raise VideoUnavailableError()
                 if effective_range is None:
                     ensure_full_media_duration(info.get("duration"), max_media_duration_seconds)
                 if is_clip:
@@ -2215,6 +2274,8 @@ def _download_sync(
                             on_optimizing=on_optimizing,
                         )
                     except DownloadError as exc:
+                        if isinstance(exc, VideoUnavailableError):
+                            raise
                         if quality_policy is VideoQualityPolicy.BEST:
                             raise DownloadError(strings.DOWNLOAD_BEST_QUALITY_FAILED) from exc
                         raise
@@ -2225,6 +2286,8 @@ def _download_sync(
                         duration=duration,
                     )
                 if isinstance(last_error, DownloadError):
+                    if isinstance(last_error, VideoUnavailableError):
+                        raise last_error
                     if quality_policy is VideoQualityPolicy.BEST:
                         raise DownloadError(strings.DOWNLOAD_BEST_QUALITY_FAILED) from last_error
                     raise last_error
