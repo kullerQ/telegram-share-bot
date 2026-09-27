@@ -89,7 +89,7 @@ class TestCacheFallback(unittest.IsolatedAsyncioTestCase):
         status.delete = AsyncMock()
         with (
             self.assertLogs("telegram_share_bot.handlers", level="INFO") as captured,
-            patch("telegram_share_bot.handlers.download_media", AsyncMock()) as download,
+            patch("telegram_share_bot.handlers.direct.download_media", AsyncMock()) as download,
         ):
             await _run_direct_download(
                 context,
@@ -173,9 +173,12 @@ class TestCacheFallback(unittest.IsolatedAsyncioTestCase):
         )
         fresh_media.path.write_bytes(b"dummy video data")
         with (
-            patch("telegram_share_bot.handlers.get_direct_stream", AsyncMock(return_value=None)),
             patch(
-                "telegram_share_bot.handlers.download_media",
+                "telegram_share_bot.handlers.direct.get_direct_stream",
+                AsyncMock(return_value=None),
+            ),
+            patch(
+                "telegram_share_bot.handlers.direct.download_media",
                 AsyncMock(return_value=fresh_media),
             ),
         ):
@@ -215,7 +218,7 @@ class TestCacheFallback(unittest.IsolatedAsyncioTestCase):
         update.effective_message.reply_text = AsyncMock(return_value=status)
 
         with patch(
-            "telegram_share_bot.handlers._run_direct_download", new=AsyncMock()
+            "telegram_share_bot.handlers.direct._run_direct_download", new=AsyncMock()
         ) as run_download:
             await url_message(update, context)
 
@@ -243,7 +246,7 @@ class TestCacheFallback(unittest.IsolatedAsyncioTestCase):
         update.effective_message.reply_text = AsyncMock()
 
         with patch(
-            "telegram_share_bot.handlers._run_direct_download", new=AsyncMock()
+            "telegram_share_bot.handlers.direct._run_direct_download", new=AsyncMock()
         ) as run_download:
             await url_message(update, context)
 
@@ -336,7 +339,7 @@ class TestCacheFallback(unittest.IsolatedAsyncioTestCase):
                 )
                 query.data = selected_data
                 with patch(
-                    "telegram_share_bot.handlers._run_direct_download", new=AsyncMock()
+                    "telegram_share_bot.handlers.inline._run_direct_download", new=AsyncMock()
                 ) as run_download:
                     await selected_callback(update, context)
                 run_download.assert_not_awaited()
@@ -390,7 +393,7 @@ class TestCacheFallback(unittest.IsolatedAsyncioTestCase):
                 query.answer = AsyncMock()
                 query.data = selected_data
                 with patch(
-                    "telegram_share_bot.handlers._run_direct_download", new=AsyncMock()
+                    "telegram_share_bot.handlers.inline._run_direct_download", new=AsyncMock()
                 ) as run_download:
                     await selected_callback(MagicMock(callback_query=query), context)
                 self.assertIs(
@@ -422,7 +425,7 @@ class TestCacheFallback(unittest.IsolatedAsyncioTestCase):
                 update.callback_query.message = status
                 update.callback_query.answer = AsyncMock()
                 with patch(
-                    "telegram_share_bot.handlers._run_direct_download", new=AsyncMock()
+                    "telegram_share_bot.handlers.inline._run_direct_download", new=AsyncMock()
                 ) as run_download:
                     await direct_format_callback(update, context)
                 self.assertEqual(run_download.await_args.kwargs["quality_policy"], expected)
@@ -445,7 +448,7 @@ class TestCacheFallback(unittest.IsolatedAsyncioTestCase):
         update.callback_query.answer = AsyncMock()
 
         with patch(
-            "telegram_share_bot.handlers._run_direct_download", new=AsyncMock()
+            "telegram_share_bot.handlers.inline._run_direct_download", new=AsyncMock()
         ) as run_download:
             await clip_choice_callback(update, context)
 
@@ -469,7 +472,7 @@ class TestCacheFallback(unittest.IsolatedAsyncioTestCase):
             with self.subTest(mode=mode):
                 update.effective_message.text = f"/video {mode} https://youtu.be/example1234"
                 with patch(
-                    "telegram_share_bot.handlers._run_direct_download", new=AsyncMock()
+                    "telegram_share_bot.handlers.direct._run_direct_download", new=AsyncMock()
                 ) as run_download:
                     await video_command(update, context)
                 self.assertEqual(run_download.await_args.kwargs["quality_policy"], expected)
@@ -519,9 +522,12 @@ class TestCacheFallback(unittest.IsolatedAsyncioTestCase):
             return_value=("FRESH_INLINE_FILE_ID", "Fresh Inline", MediaKind.VIDEO, 1080)
         )
         with (
-            patch("telegram_share_bot.handlers.get_direct_stream", AsyncMock(return_value=None)),
-            patch("telegram_share_bot.handlers.download_media", download_mock),
-            patch("telegram_share_bot.handlers._upload_for_file_id", upload_mock),
+            patch(
+                "telegram_share_bot.handlers.prepare.get_direct_stream",
+                AsyncMock(return_value=None),
+            ),
+            patch("telegram_share_bot.handlers.prepare.download_media", download_mock),
+            patch("telegram_share_bot.handlers.prepare._upload_for_file_id", upload_mock),
             self.assertLogs("telegram_share_bot.handlers", level="INFO") as captured,
         ):
             await _prepare_inline_media(
@@ -578,12 +584,12 @@ class TestCacheFallback(unittest.IsolatedAsyncioTestCase):
             return_value=("DIRECT_FILE_ID_789", "Twitter Audio", MediaKind.AUDIO)
         )
         with (
-            patch("telegram_share_bot.handlers.get_direct_stream", stream_mock),
+            patch("telegram_share_bot.handlers.prepare.get_direct_stream", stream_mock),
             patch(
-                "telegram_share_bot.handlers._upload_direct_url_for_file_id",
+                "telegram_share_bot.handlers.prepare._upload_direct_url_for_file_id",
                 direct_upload,
             ) as mock_direct_upload,
-            patch("telegram_share_bot.handlers.download_media") as mock_download,
+            patch("telegram_share_bot.handlers.prepare.download_media") as mock_download,
         ):
             await _prepare_inline_media(
                 context,
@@ -636,13 +642,13 @@ class TestCacheFallback(unittest.IsolatedAsyncioTestCase):
             return_value=("LOCAL_FALLBACK_FILE_ID", "Fallback Audio", MediaKind.AUDIO, None)
         )
         with (
-            patch("telegram_share_bot.handlers.get_direct_stream", stream_mock),
+            patch("telegram_share_bot.handlers.prepare.get_direct_stream", stream_mock),
             patch(
-                "telegram_share_bot.handlers._upload_direct_url_for_file_id",
+                "telegram_share_bot.handlers.prepare._upload_direct_url_for_file_id",
                 AsyncMock(return_value=None),  # Direct upload failed
             ),
-            patch("telegram_share_bot.handlers.download_media", download_mock),
-            patch("telegram_share_bot.handlers._upload_for_file_id", upload_mock),
+            patch("telegram_share_bot.handlers.prepare.download_media", download_mock),
+            patch("telegram_share_bot.handlers.prepare._upload_for_file_id", upload_mock),
         ):
             await _prepare_inline_media(
                 context,
@@ -681,13 +687,16 @@ class TestCacheFallback(unittest.IsolatedAsyncioTestCase):
         fresh_media.path.write_bytes(b"dummy")
 
         with (
-            patch("telegram_share_bot.handlers.get_direct_stream", AsyncMock(return_value=None)),
             patch(
-                "telegram_share_bot.handlers.download_media",
+                "telegram_share_bot.handlers.prepare.get_direct_stream",
+                AsyncMock(return_value=None),
+            ),
+            patch(
+                "telegram_share_bot.handlers.prepare.download_media",
                 AsyncMock(return_value=fresh_media),
             ),
             patch(
-                "telegram_share_bot.handlers._upload_for_file_id",
+                "telegram_share_bot.handlers.prepare._upload_for_file_id",
                 AsyncMock(side_effect=NetworkError("httpx.ReadError: ")),
             ),
         ):
@@ -722,7 +731,7 @@ class TestCacheFallback(unittest.IsolatedAsyncioTestCase):
         ok_msg = MagicMock(video=MagicMock(file_id="OK_AFTER_RETRY"))
         context.bot.send_video = AsyncMock(side_effect=[NetworkError("httpx.ReadError: "), ok_msg])
 
-        with patch("telegram_share_bot.handlers.asyncio.sleep", AsyncMock()):
+        with patch("telegram_share_bot.handlers.delivery.asyncio.sleep", AsyncMock()):
             result = await _send_media_to_chat(
                 context,
                 chat_id=self.settings.storage_chat_id,

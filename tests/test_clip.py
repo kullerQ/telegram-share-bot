@@ -320,7 +320,7 @@ class TestInlineClipChoice(unittest.IsolatedAsyncioTestCase):
         update.inline_query = query
 
         with patch(
-            "telegram_share_bot.handlers.platform_previews.resolve_preview",
+            "telegram_share_bot.handlers.query.platform_previews.resolve_preview",
             new=AsyncMock(return_value=None),
         ):
             await inline_query(update, context)
@@ -340,7 +340,7 @@ class TestInlineClipChoice(unittest.IsolatedAsyncioTestCase):
         update.inline_query = query
 
         with patch(
-            "telegram_share_bot.handlers.platform_previews.resolve_preview",
+            "telegram_share_bot.handlers.query.platform_previews.resolve_preview",
             new=AsyncMock(return_value=None),
         ):
             await inline_query(update, context)

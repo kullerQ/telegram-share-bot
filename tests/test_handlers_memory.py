@@ -72,7 +72,7 @@ class TestHandlersMemory(unittest.IsolatedAsyncioTestCase):
         chosen.from_user.id = 99
         update.chosen_inline_result = chosen
 
-        with patch("telegram_share_bot.handlers._prepare_inline_media", AsyncMock()):
+        with patch("telegram_share_bot.handlers.inline._prepare_inline_media", AsyncMock()):
             await chosen_inline_result(update, context)
 
         # Ensure the chosen result was popped from the pending map

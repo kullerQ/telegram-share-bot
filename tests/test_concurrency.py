@@ -124,7 +124,7 @@ class TestConcurrencyLimiter(unittest.IsolatedAsyncioTestCase):
         context = MagicMock()
         context.application.bot_data = {"settings": settings}
 
-        with patch("telegram_share_bot.handlers.time.monotonic", return_value=100.0):
+        with patch("telegram_share_bot.handlers.state.time.monotonic", return_value=100.0):
             for _ in range(10):
                 self.assertIsNone(await _try_acquire_user_download_slot(context, 42))
                 await _release_user_download_slot(context, 42)
@@ -134,7 +134,7 @@ class TestConcurrencyLimiter(unittest.IsolatedAsyncioTestCase):
                 strings.DOWNLOADS_PER_MINUTE_LIMITED.format(limit=10),
             )
 
-        with patch("telegram_share_bot.handlers.time.monotonic", return_value=160.0):
+        with patch("telegram_share_bot.handlers.state.time.monotonic", return_value=160.0):
             self.assertIsNone(await _try_acquire_user_download_slot(context, 42))
 
     async def test_rejected_download_attempts_count_toward_rate_limit(self) -> None:
@@ -153,7 +153,7 @@ class TestConcurrencyLimiter(unittest.IsolatedAsyncioTestCase):
         context = MagicMock()
         context.application.bot_data = {"settings": settings}
 
-        with patch("telegram_share_bot.handlers.time.monotonic", return_value=100.0):
+        with patch("telegram_share_bot.handlers.state.time.monotonic", return_value=100.0):
             self.assertIsNone(await _try_acquire_user_download_slot(context, 42))
             self.assertEqual(
                 await _try_acquire_user_download_slot(context, 42), strings.RATE_LIMITED
@@ -216,14 +216,17 @@ class TestConcurrencyLimiter(unittest.IsolatedAsyncioTestCase):
             return dummy
 
         with (
-            patch("telegram_share_bot.handlers.get_direct_stream", AsyncMock(return_value=None)),
-            patch("telegram_share_bot.handlers.download_media", side_effect=fake_download),
-            patch("telegram_share_bot.handlers._send_media_to_chat", AsyncMock()),
             patch(
-                "telegram_share_bot.handlers._file_id_and_kind_from_message",
+                "telegram_share_bot.handlers.direct.get_direct_stream",
+                AsyncMock(return_value=None),
+            ),
+            patch("telegram_share_bot.handlers.direct.download_media", side_effect=fake_download),
+            patch("telegram_share_bot.handlers.direct._send_media_to_chat", AsyncMock()),
+            patch(
+                "telegram_share_bot.handlers.direct._file_id_and_kind_from_message",
                 return_value=("file_123", MediaKind.VIDEO),
             ),
-            patch("telegram_share_bot.handlers.cleanup_media"),
+            patch("telegram_share_bot.handlers.direct.cleanup_media"),
         ):
             callbacks = []
             for _ in range(5):

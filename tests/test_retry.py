@@ -57,7 +57,7 @@ class TestInlineRetry(unittest.IsolatedAsyncioTestCase):
         time_range = TimeRange(60, 120)
         with (
             patch(
-                "telegram_share_bot.handlers.download_media",
+                "telegram_share_bot.handlers.prepare.download_media",
                 new=AsyncMock(
                     side_effect=DownloadError("Download timed out after 30 seconds.")
                 ),
@@ -100,11 +100,11 @@ class TestInlineRetry(unittest.IsolatedAsyncioTestCase):
         )
         with (
             patch(
-                "telegram_share_bot.handlers.get_direct_stream",
+                "telegram_share_bot.handlers.prepare.get_direct_stream",
                 new=AsyncMock(return_value=stream),
             ),
             patch(
-                "telegram_share_bot.handlers._upload_direct_url_for_file_id",
+                "telegram_share_bot.handlers.prepare._upload_direct_url_for_file_id",
                 new=AsyncMock(side_effect=NetworkError("temporary network issue")),
             ),
         ):
@@ -124,11 +124,11 @@ class TestInlineRetry(unittest.IsolatedAsyncioTestCase):
     async def test_permanent_download_failure_clears_cancel_button(self) -> None:
         with (
             patch(
-                "telegram_share_bot.handlers.get_direct_stream",
+                "telegram_share_bot.handlers.prepare.get_direct_stream",
                 new=AsyncMock(return_value=None),
             ),
             patch(
-                "telegram_share_bot.handlers.download_media",
+                "telegram_share_bot.handlers.prepare.download_media",
                 new=AsyncMock(
                     side_effect=DownloadError(
                         "Playlist/empty result is not supported."
@@ -168,7 +168,7 @@ class TestInlineRetry(unittest.IsolatedAsyncioTestCase):
         update.callback_query = query
 
         with patch(
-            "telegram_share_bot.handlers._prepare_inline_media",
+            "telegram_share_bot.handlers.inline._prepare_inline_media",
             new_callable=AsyncMock,
         ) as prepare:
             await retry_inline_callback(update, self.context)
