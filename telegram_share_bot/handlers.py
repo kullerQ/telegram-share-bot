@@ -350,7 +350,13 @@ def _settings_keyboard(
                 choice("format", "video", "Video", preferences.default_format is MediaFormat.VIDEO),
                 choice("format", "audio", "Audio", preferences.default_format is MediaFormat.AUDIO),
             ],
-            [choice("all", "reset", "Reset to default", False)],
+            [
+                InlineKeyboardButton(
+                    "Reset to default",
+                    callback_data=f"settings:{user_id}:all:reset",
+                    style=KeyboardButtonStyle.DANGER,
+                )
+            ],
         ]
     )
 
