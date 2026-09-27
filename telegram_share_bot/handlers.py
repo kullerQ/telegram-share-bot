@@ -29,7 +29,7 @@ from telegram import (
     MessageEntity,
     Update,
 )
-from telegram.constants import ChatType, ParseMode
+from telegram.constants import ChatType, KeyboardButtonStyle, ParseMode
 from telegram.error import BadRequest, NetworkError, TelegramError, TimedOut
 from telegram.ext import ContextTypes
 
@@ -85,6 +85,7 @@ _VIDEO_CALLBACK_PREFIX = "video:"
 _VIDEO_BEST_CALLBACK_PREFIX = "video-best:"
 _VIDEO_BALANCED_CALLBACK_PREFIX = "video-balanced:"
 _AUDIO_CALLBACK_PREFIX = "audio:"
+_DIRECT_CHOICE_CANCEL_PREFIX = "direct-cancel:"
 _CLIP_BEST_CALLBACK_PREFIX = "clip-best:"
 _CLIP_BALANCED_CALLBACK_PREFIX = "clip-balanced:"
 _FULL_BEST_CALLBACK_PREFIX = "full-best:"
@@ -349,7 +350,13 @@ def _settings_keyboard(
                 choice("format", "video", "Video", preferences.default_format is MediaFormat.VIDEO),
                 choice("format", "audio", "Audio", preferences.default_format is MediaFormat.AUDIO),
             ],
-            [choice("all", "reset", "Reset to default", False)],
+            [
+                InlineKeyboardButton(
+                    "Reset to default",
+                    callback_data=f"settings:{user_id}:all:reset",
+                    style=KeyboardButtonStyle.DANGER,
+                )
+            ],
         ]
     )
 
@@ -536,6 +543,7 @@ def _format_choice_keyboard(
                     quality=_preference_quality_label(preferred_quality)
                 ),
                 callback_data=f"{preferred_prefix}{choice_id}",
+                style=KeyboardButtonStyle.PRIMARY,
             ),
             InlineKeyboardButton(
                 strings.DIRECT_AUDIO_BUTTON,
@@ -543,6 +551,15 @@ def _format_choice_keyboard(
             ),
         ]
     ]
+    rows.append(
+        [
+            InlineKeyboardButton(
+                strings.DIRECT_CANCEL_BUTTON,
+                callback_data=f"{_DIRECT_CHOICE_CANCEL_PREFIX}{choice_id}",
+                style=KeyboardButtonStyle.DANGER,
+            )
+        ]
+    )
     return InlineKeyboardMarkup(rows)
 
 
@@ -550,44 +567,72 @@ def _clip_choice_keyboard(
     choice_id: str,
     time_range: TimeRange,
     preferred_quality: VideoQualityPolicy = VideoQualityPolicy.AUTO,
+    preferred_format: MediaFormat | None = None,
 ) -> InlineKeyboardMarkup:
     range_label = format_time_range(time_range)
     rows: list[list[InlineKeyboardButton]] = []
-    for quality_options, audio_prefix, video_label, audio_label in (
+    for row_index, (quality_options, audio_prefix, video_label, audio_label) in enumerate(
         (
             (
-                (VideoQualityPolicy.BEST, _CLIP_BEST_CALLBACK_PREFIX),
-                (VideoQualityPolicy.BALANCED, _CLIP_BALANCED_CALLBACK_PREFIX),
-                (VideoQualityPolicy.AUTO, _CLIP_CALLBACK_PREFIX),
+                (
+                    (VideoQualityPolicy.BEST, _CLIP_BEST_CALLBACK_PREFIX),
+                    (VideoQualityPolicy.BALANCED, _CLIP_BALANCED_CALLBACK_PREFIX),
+                    (VideoQualityPolicy.AUTO, _CLIP_CALLBACK_PREFIX),
+                ),
+                _CLIP_AUDIO_CALLBACK_PREFIX,
+                strings.DIRECT_CLIP_VIDEO_BUTTON.format(
+                    quality=_preference_quality_label(preferred_quality), range_label=range_label
+                ),
+                strings.DIRECT_CLIP_AUDIO_BUTTON.format(range_label=range_label),
             ),
-            _CLIP_AUDIO_CALLBACK_PREFIX,
-            strings.DIRECT_CLIP_VIDEO_BUTTON.format(
-                quality=_preference_quality_label(preferred_quality), range_label=range_label
-            ),
-            strings.DIRECT_CLIP_AUDIO_BUTTON.format(range_label=range_label),
-        ),
-        (
             (
-                (VideoQualityPolicy.BEST, _FULL_BEST_CALLBACK_PREFIX),
-                (VideoQualityPolicy.BALANCED, _FULL_BALANCED_CALLBACK_PREFIX),
-                (VideoQualityPolicy.AUTO, _FULL_CALLBACK_PREFIX),
+                (
+                    (VideoQualityPolicy.BEST, _FULL_BEST_CALLBACK_PREFIX),
+                    (VideoQualityPolicy.BALANCED, _FULL_BALANCED_CALLBACK_PREFIX),
+                    (VideoQualityPolicy.AUTO, _FULL_CALLBACK_PREFIX),
+                ),
+                _FULL_AUDIO_CALLBACK_PREFIX,
+                strings.DIRECT_FULL_VIDEO_BUTTON.format(
+                    quality=_preference_quality_label(preferred_quality)
+                ),
+                strings.DIRECT_FULL_AUDIO_BUTTON,
             ),
-            _FULL_AUDIO_CALLBACK_PREFIX,
-            strings.DIRECT_FULL_VIDEO_BUTTON.format(
-                quality=_preference_quality_label(preferred_quality)
-            ),
-            strings.DIRECT_FULL_AUDIO_BUTTON,
-        ),
+        )
     ):
         video_prefix = next(
             prefix for policy, prefix in quality_options if policy is preferred_quality
         )
         rows.append(
             [
-                InlineKeyboardButton(video_label, callback_data=f"{video_prefix}{choice_id}"),
-                InlineKeyboardButton(audio_label, callback_data=f"{audio_prefix}{choice_id}"),
+                InlineKeyboardButton(
+                    video_label,
+                    callback_data=f"{video_prefix}{choice_id}",
+                    style=(
+                        KeyboardButtonStyle.PRIMARY
+                        if row_index == 0 and preferred_format is not MediaFormat.AUDIO
+                        else None
+                    ),
+                ),
+                InlineKeyboardButton(
+                    audio_label,
+                    callback_data=f"{audio_prefix}{choice_id}",
+                    style=(
+                        KeyboardButtonStyle.PRIMARY
+                        if row_index == 0 and preferred_format is MediaFormat.AUDIO
+                        else None
+                    ),
+                ),
             ]
         )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                strings.DIRECT_CANCEL_BUTTON,
+                callback_data=f"{_DIRECT_CHOICE_CANCEL_PREFIX}{choice_id}",
+                style=KeyboardButtonStyle.DANGER,
+            )
+        ]
+    )
     return InlineKeyboardMarkup(rows)
 
 
@@ -765,8 +810,11 @@ async def url_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     url = request.url
     custom_caption = request.custom_caption
     time_range = request.time_range
+    bot_username = context.bot.username or strings.FALLBACK_BOT_USERNAME
     if url is None:
-        await message.reply_text(strings.DIRECT_URL_HINT)
+        await message.reply_text(strings.DIRECT_URL_HINT.format(
+            bot_username=escape(bot_username)
+        ))
         return
 
     settings = _settings(context)
@@ -797,7 +845,9 @@ async def url_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
         await message.reply_text(
             strings.DIRECT_CLIP_FORMAT_PROMPT.format(range_label=format_time_range(time_range)),
-            reply_markup=_clip_choice_keyboard(choice_id, time_range, preferences.video_quality),
+            reply_markup=_clip_choice_keyboard(
+                choice_id, time_range, preferences.video_quality, preferences.default_format
+            ),
         )
         return
 
@@ -1464,6 +1514,37 @@ async def retry_inline_callback(update: Update, context: ContextTypes.DEFAULT_TY
     tasks[inline_message_id] = task
 
 
+async def private_choice_cancel_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Dismiss a pending private-chat format or clip choice."""
+    query = update.callback_query
+    if query is None or query.data is None:
+        return
+    user_id = query.from_user.id if query.from_user else None
+    if not _is_user_allowed(context, user_id):
+        await query.answer(text=strings.ACCESS_DENIED, show_alert=True)
+        return
+    if not query.data.startswith(_DIRECT_CHOICE_CANCEL_PREFIX):
+        await query.answer()
+        return
+    choice_id = query.data.removeprefix(_DIRECT_CHOICE_CANCEL_PREFIX)
+    pending = _pending_clip_map(context).get(choice_id)
+    if pending is None:
+        await query.answer(text=strings.DIRECT_CLIP_EXPIRED, show_alert=True)
+        return
+    if pending.owner_user_id is not None and pending.owner_user_id != user_id:
+        await query.answer(text=strings.SETTINGS_NOT_YOURS, show_alert=True)
+        return
+    msg = query.message
+    if not isinstance(msg, Message):
+        await query.answer()
+        return
+    _pending_clip_map(context).pop(choice_id, None)
+    await query.answer(text=strings.DIRECT_CANCELLED)
+    await msg.edit_text(strings.DIRECT_CANCELLED, reply_markup=None)
+
+
 async def direct_format_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Apply a private-chat Video or Audio choice to the pending link."""
     query = update.callback_query
@@ -1485,18 +1566,19 @@ async def direct_format_callback(update: Update, context: ContextTypes.DEFAULT_T
         return
     prefix, media_format, quality_override = selected
     choice_id = query.data.removeprefix(prefix)
-    pending = _pending_clip_map(context).pop(choice_id, None)
+    pending = _pending_clip_map(context).get(choice_id)
     if pending is None:
         await query.answer(text=strings.DIRECT_CLIP_EXPIRED, show_alert=True)
         return
     if pending.owner_user_id is not None and pending.owner_user_id != user_id:
         await query.answer(text=strings.SETTINGS_NOT_YOURS, show_alert=True)
         return
-    quality_policy = quality_override or pending.preferences.video_quality
     msg = query.message
     if not isinstance(msg, Message):
         await query.answer()
         return
+    _pending_clip_map(context).pop(choice_id, None)
+    quality_policy = quality_override or pending.preferences.video_quality
     await query.answer(text=strings.DIRECT_CLIP_CHOICE_ANSWER)
     await _run_direct_download(
         context,
@@ -1540,7 +1622,7 @@ async def clip_choice_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         return
     prefix, want_clip, media_format, quality_override = selected
     choice_id = data.removeprefix(prefix)
-    pending = _pending_clip_map(context).pop(choice_id, None)
+    pending = _pending_clip_map(context).get(choice_id)
     if pending is None:
         await query.answer(text=strings.DIRECT_CLIP_EXPIRED, show_alert=True)
         msg = query.message
@@ -1551,6 +1633,11 @@ async def clip_choice_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     if pending.owner_user_id is not None and pending.owner_user_id != user_id:
         await query.answer(text=strings.SETTINGS_NOT_YOURS, show_alert=True)
         return
+    msg = query.message
+    if not isinstance(msg, Message):
+        await query.answer()
+        return
+    _pending_clip_map(context).pop(choice_id, None)
     quality_policy = quality_override or pending.preferences.video_quality
 
     await query.answer(text=strings.DIRECT_CLIP_CHOICE_ANSWER)
@@ -1561,17 +1648,12 @@ async def clip_choice_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         and time_range.duration_seconds is not None
         and time_range.duration_seconds > MAX_CLIP_SECONDS
     ):
-        msg = query.message
-        if isinstance(msg, Message):
-            await msg.edit_text(
-                strings.DOWNLOAD_CLIP_TOO_LONG.format(max_minutes=MAX_CLIP_SECONDS // 60),
-                reply_markup=None,
-            )
+        await msg.edit_text(
+            strings.DOWNLOAD_CLIP_TOO_LONG.format(max_minutes=MAX_CLIP_SECONDS // 60),
+            reply_markup=None,
+        )
         return
 
-    msg = query.message
-    if not isinstance(msg, Message):
-        return
     await _run_direct_download(
         context,
         chat_id=pending.chat_id,
@@ -1942,6 +2024,7 @@ def _cancel_keyboard(result_id: str) -> InlineKeyboardMarkup:
                 InlineKeyboardButton(
                     strings.INLINE_CANCEL_BUTTON,
                     callback_data=f"{_CALLBACK_PREFIX}{result_id}",
+                    style=KeyboardButtonStyle.DANGER,
                 )
             ]
         ]
@@ -1960,6 +2043,7 @@ def _retry_keyboard(
         InlineKeyboardButton(
             retry_label,
             callback_data=f"{_RETRY_PREFIX}{result_id}",
+            style=KeyboardButtonStyle.PRIMARY,
         )
     ]
     if time_range is not None:

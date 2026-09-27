@@ -1,8 +1,28 @@
 # telegram-share-bot
 
-Lightweight Telegram **inline** bot: type `@YourBot <media-url>` in any chat and send the downloaded media as the result.
+Share videos, clips, audio, and TikTok photo slideshows as native Telegram messages. Paste a media link in a private chat with the bot, or type `@YourBot <media-url>` in another chat. The bot prepares the file and sends it where you chose to share it. It does not need to join the target chat.
 
-Works in private chats, groups, and channels. The bot does **not** need to be a member of the target chat.
+
+## See the sharing flow
+
+```text
+[Text placeholder for a future demo — no image or GIF]
+Paste a link → choose a result → native media appears
+```
+
+In a private chat sends Video or Audio format directly (depends on option chosen in settings). By default, both Audio and Video buttonts appears to choose from. Inline mode always shows explicit Video and Audio choice options.
+
+
+## What it can share
+
+- Videos and audio from YouTube, TikTok, Instagram, X, Reddit, Facebook, etc. links.
+- YouTube clips from a time range, with a choice to share the clip or full video.
+- TikTok photo slideshows as video, or their soundtrack as audio when available.
+- Media fitted to Telegram's upload limit, with Auto, Best, and Balanced video quality settings.
+- Previously prepared media from its cache (caching Telegram video ids) when compatible with the selected format and quality.
+
+The bot works in private chats, groups, and channels through inline mode. Supported content and quality depend on what the source makes available.
+
 
 ## BotFather setup (required)
 
@@ -13,11 +33,10 @@ Works in private chats, groups, and channels. The bot does **not** need to be a 
    - `/setinline` → select your bot → set placeholder text, e.g. `Paste a media URL…`
 5. **Enable inline feedback** (required for downloads to finish after you tap a result):
    - `/setinlinefeedback` → select your bot → enable (100% is fine)
-6. Optional:
-   - `/setdescription` and `/setabouttext` for store listing text
 
 Without `/setinline`, the bot will not appear when users type `@YourBot`.
 Without `/setinlinefeedback`, the bot cannot learn which result you chose, so the media never replaces the placeholder.
+
 
 ## Docker setup (Recommended)
 
@@ -66,6 +85,7 @@ Without `/setinlinefeedback`, the bot cannot learn which result you chose, so th
    docker compose up -d
    ```
    `pull` fetches the new image; `up -d` recreates the container if the image changed. To apply `.env` changes without pulling, use `docker compose up -d --force-recreate --pull never`.
+
 
 ## Local setup
 
@@ -131,14 +151,14 @@ Tap a Video or Audio result (or a clip / full-length choice). A placeholder appe
 
 ## Limits
 
-- Video outputs are checked with `ffprobe` before sending. Compatible files that fit are kept intact. When encoding is needed, the bot preserves the source dimensions and targets the available size budget, with at most two attempts from the original source. Best can fail if its source exceeds the download bound; it never silently substitutes a lower source. Local installations need both `ffmpeg` and `ffprobe`; Docker includes them.
+- Video outputs are checked with bundled `ffmpeg` before sending. Compatible files that fit are kept intact. When encoding is needed, the bot preserves the source dimensions and targets the available size budget, with at most two attempts from the original source. Best can fail if its source exceeds the download bound; it never silently substitutes a lower source. Local installations need `ffmpeg`; Docker includes it.
 - Max file size ≈ 45 MB (Telegram Bot API upload limit is 50 MB). Video quality is adapted to fit this limit rather than capped at one fixed resolution.
 - Download timeout defaults to 120 seconds; source transfers are bounded to twice the output size limit.
 - Auto video checks elapsed time and transferred bytes from five seconds onward. `MAX_ESTIMATED_DOWNLOAD_SECONDS=45` sets the projected total download target; `0` disables this speed-based step-down. Every retry shares the 120-second overall deadline. Best and Balanced use the full deadline without Auto's speed-based step-down. Best does not change source format; Balanced may fall back when its preferred format cannot be delivered.
 - Global concurrent downloads default to 6; each user may have 3 active requests. Set either limit to `0` to disable it. The per-user cooldown defaults to 2 seconds.
 - Each user may make 10 download requests per rolling 60-second window by default (`MAX_DOWNLOADS_PER_MINUTE`); rejected requests due to cooldown or active-download limits count too. Set it to `0` to disable this rate limit.
 - New full video and audio requests are limited to 30 minutes when source metadata provides a duration (`MAX_MEDIA_DURATION_SECONDS=1800`). Set `0` to disable this limit. Short YouTube clips from longer videos remain available under the 10-minute clip limit. Unknown durations still have the byte and timeout limits.
-- User URLs are limited to YouTube / X / Instagram / TikTok by default (`ALLOWED_MEDIA_HOSTS=*` allows any host).
+- User URLs are limited to YouTube / X / Instagram / TikTok / Reddit / Facebook by default (`ALLOWED_MEDIA_HOSTS=*` allows any host).
 - TikTok (including `vm.tiktok.com` / `vt.tiktok.com` short links) needs `curl-cffi` for browser impersonation — it is pinned in `requirements.txt`.
 - TikTok **photo posts** (image slideshows with sound) can be sent as a slideshow video or as the original soundtrack when present. Video slideshows are compiled into MP4 via `ffmpeg`: each image is shown for about `SLIDESHOW_SLIDE_MS` (default 2500 ms). `SLIDESHOW_IMAGES_LOOP=true` (default) makes the video match the **full** audio track and loops images to fill it; `false` shows each image once then trims the audio (a single-image post still uses the full audio). Multi-image posts get TikTok-style page dots at the bottom. At most `SLIDESHOW_MAX_IMAGES` (default 35) images are included. The Docker image already ships a static `ffmpeg`.
 - `HTTPS_ONLY` defaults to true (set `false` to allow plain `http://` media URLs).
@@ -151,5 +171,5 @@ Tap a Video or Audio result (or a clip / full-length choice). A placeholder appe
 
 - Users should `/start` the bot once before relying on inline mode.
 - Respect platform Terms of Service for downloaded content; this project is for personal/lightweight use.
-- Previously uploaded videos are reused when their recorded output quality is compatible with the requested policy. Auto prefers a cached Best upload when it is at least as good as the cached Auto upload. Clip ranges and full videos remain separate cache entries; captions are applied when sent. Older video cache entries created before stream validation are downloaded again once; cached audio is unaffected.
+- Previously uploaded videos are reused when their recorded output quality is compatible with the requested policy. Auto prefers a cached Best upload when it is at least as good as the cached Auto upload. Clip ranges and full videos remain separate cache entries; captions are applied when sent.
 - Signed / credentialed URLs are not stored in the shared media cache.

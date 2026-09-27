@@ -9,6 +9,8 @@ from contextlib import closing
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
+from telegram.constants import KeyboardButtonStyle
+
 from telegram_share_bot.cache import CachedMedia
 from telegram_share_bot.config import CaptionMode, Settings
 from telegram_share_bot.downloader import (
@@ -180,6 +182,7 @@ class TestSettingsPresentation(unittest.TestCase):
         self.assertEqual([button.text for button in keyboard[1]], ["✅ Custom", "Media title"])
         self.assertEqual(keyboard[2][0].text, "Not specified")
         self.assertEqual(keyboard[-1][0].text, "Reset to default")
+        self.assertEqual(keyboard[-1][0].to_dict()["style"], KeyboardButtonStyle.DANGER)
 
 
 class TestLinkedCaptionDelivery(unittest.IsolatedAsyncioTestCase):

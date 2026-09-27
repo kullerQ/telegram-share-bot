@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from telegram.constants import ChatType
+from telegram.constants import ChatType, KeyboardButtonStyle
 from telegram.error import BadRequest, NetworkError
 
 from telegram_share_bot import strings
@@ -23,12 +23,15 @@ from telegram_share_bot.downloader import (
 )
 from telegram_share_bot.handlers import (
     PendingClipChoice,
+    _cancel_keyboard,
     _clip_choice_keyboard,
     _format_choice_keyboard,
     _prepare_inline_media,
+    _retry_keyboard,
     _run_direct_download,
     clip_choice_callback,
     direct_format_callback,
+    private_choice_cancel_callback,
     url_message,
     video_command,
 )
@@ -136,7 +139,8 @@ class TestCacheFallback(unittest.IsolatedAsyncioTestCase):
             [button.callback_data.split(":", 1)[0] for button in keyboard.inline_keyboard[0]],
             ["video", "audio"],
         )
-        self.assertEqual(len(keyboard.inline_keyboard), 1)
+        self.assertEqual(len(keyboard.inline_keyboard), 2)
+        self.assertEqual(keyboard.inline_keyboard[1][0].callback_data[:14], "direct-cancel:")
         self.assertEqual(context.bot.send_video.call_count, 0)
 
         choice_id = keyboard.inline_keyboard[0][0].callback_data.split(":", 1)[1]
@@ -237,7 +241,7 @@ class TestCacheFallback(unittest.IsolatedAsyncioTestCase):
         markup = update.effective_message.reply_text.await_args.kwargs["reply_markup"]
         self.assertIn("clip-balanced:", markup.inline_keyboard[0][0].callback_data)
         self.assertIn("full-balanced:", markup.inline_keyboard[1][0].callback_data)
-        self.assertEqual(len(markup.inline_keyboard), 2)
+        self.assertEqual(len(markup.inline_keyboard), 3)
 
     async def test_private_choices_offer_only_saved_video_quality(self) -> None:
         for quality, video_prefix, clip_prefix, full_prefix in (
@@ -252,19 +256,140 @@ class TestCacheFallback(unittest.IsolatedAsyncioTestCase):
         ):
             with self.subTest(quality=quality):
                 plain = _format_choice_keyboard("id", quality).inline_keyboard
-                self.assertEqual(len(plain), 1)
+                self.assertEqual(len(plain), 2)
+                self.assertEqual(plain[1][0].callback_data, "direct-cancel:id")
+                self.assertEqual(plain[1][0].to_dict()["style"], KeyboardButtonStyle.DANGER)
                 self.assertEqual(len(plain[0]), 2)
                 self.assertEqual(plain[0][0].callback_data, f"{video_prefix}id")
                 self.assertEqual(plain[0][1].callback_data, "audio:id")
+                self.assertEqual(plain[0][0].to_dict()["style"], KeyboardButtonStyle.PRIMARY)
+                self.assertNotIn("style", plain[0][1].to_dict())
 
                 clip = _clip_choice_keyboard("id", TimeRange(60, 120), quality).inline_keyboard
-                self.assertEqual(len(clip), 2)
+                self.assertEqual(len(clip), 3)
+                self.assertEqual(clip[2][0].callback_data, "direct-cancel:id")
                 self.assertEqual(clip[0][0].callback_data, f"{clip_prefix}id")
                 self.assertEqual(clip[1][0].callback_data, f"{full_prefix}id")
                 self.assertEqual(clip[0][1].callback_data, "clipaudio:id")
                 self.assertEqual(clip[1][1].callback_data, "fullaudio:id")
                 self.assertIn(quality.name.title(), clip[0][0].text)
                 self.assertIn(quality.name.title(), clip[1][0].text)
+                self.assertEqual(clip[0][0].to_dict()["style"], KeyboardButtonStyle.PRIMARY)
+                self.assertNotIn("style", clip[0][1].to_dict())
+                self.assertNotIn("style", clip[1][0].to_dict())
+                self.assertNotIn("style", clip[1][1].to_dict())
+
+    async def test_button_styles_follow_action_and_saved_format(self) -> None:
+        clip = _clip_choice_keyboard(
+            "id", TimeRange(60, 120), VideoQualityPolicy.AUTO, MediaFormat.AUDIO
+        ).inline_keyboard
+        self.assertNotIn("style", clip[0][0].to_dict())
+        self.assertEqual(clip[0][1].to_dict()["style"], KeyboardButtonStyle.PRIMARY)
+        self.assertNotIn("style", clip[1][0].to_dict())
+        self.assertNotIn("style", clip[1][1].to_dict())
+
+        cancel = _cancel_keyboard("id").inline_keyboard[0][0]
+        retry = _retry_keyboard("id", TimeRange(60, 120)).inline_keyboard[0]
+        self.assertEqual(cancel.to_dict()["style"], KeyboardButtonStyle.DANGER)
+        self.assertEqual(retry[0].to_dict()["style"], KeyboardButtonStyle.PRIMARY)
+        self.assertNotIn("style", retry[1].to_dict())
+        self.assertEqual(clip[2][0].to_dict()["style"], KeyboardButtonStyle.DANGER)
+
+    async def test_cancel_private_choices_prevents_later_download(self) -> None:
+        for time_range, selected_callback, selected_data in (
+            (None, direct_format_callback, "video:choice"),
+            (TimeRange(60, 120), clip_choice_callback, "clip:choice"),
+        ):
+            with self.subTest(time_range=time_range):
+                context = MagicMock()
+                context.application.bot_data = {
+                    "settings": self.settings,
+                    "pending_clip_choice": {
+                        "choice": PendingClipChoice(
+                            "https://youtu.be/example1234", None, time_range, 42, owner_user_id=42
+                        )
+                    },
+                }
+                message = MagicMock(spec=__import__("telegram").Message)
+                message.edit_text = AsyncMock()
+                query = MagicMock()
+                query.from_user = MagicMock(id=42)
+                query.message = message
+                query.answer = AsyncMock()
+                query.data = "direct-cancel:choice"
+                update = MagicMock(callback_query=query)
+
+                await private_choice_cancel_callback(update, context)
+                self.assertEqual(context.application.bot_data["pending_clip_choice"], {})
+                message.edit_text.assert_awaited_once_with(
+                    strings.DIRECT_CANCELLED, reply_markup=None
+                )
+                query.data = selected_data
+                with patch(
+                    "telegram_share_bot.handlers._run_direct_download", new=AsyncMock()
+                ) as run_download:
+                    await selected_callback(update, context)
+                run_download.assert_not_awaited()
+                self.assertEqual(
+                    query.answer.await_args.kwargs["text"], strings.DIRECT_CLIP_EXPIRED
+                )
+
+    async def test_private_choice_cannot_be_cancelled_by_another_user(self) -> None:
+        context = MagicMock()
+        pending = PendingClipChoice(
+            "https://youtu.be/example1234", None, None, 42, owner_user_id=42
+        )
+        context.application.bot_data = {
+            "settings": self.settings,
+            "pending_clip_choice": {"choice": pending},
+        }
+        message = MagicMock(spec=__import__("telegram").Message)
+        message.edit_text = AsyncMock()
+        query = MagicMock()
+        query.from_user = MagicMock(id=99)
+        query.message = message
+        query.answer = AsyncMock()
+        query.data = "direct-cancel:choice"
+
+        await private_choice_cancel_callback(MagicMock(callback_query=query), context)
+        self.assertIs(context.application.bot_data["pending_clip_choice"]["choice"], pending)
+        message.edit_text.assert_not_awaited()
+        query.answer.assert_awaited_once_with(text=strings.SETTINGS_NOT_YOURS, show_alert=True)
+
+    async def test_private_choice_cannot_be_selected_by_another_user(self) -> None:
+        for selected_callback, selected_data in (
+            (direct_format_callback, "video:choice"),
+            (clip_choice_callback, "clip:choice"),
+        ):
+            with self.subTest(selected_data=selected_data):
+                context = MagicMock()
+                pending = PendingClipChoice(
+                    "https://youtu.be/example1234",
+                    None,
+                    TimeRange(60, 120),
+                    42,
+                    owner_user_id=42,
+                )
+                context.application.bot_data = {
+                    "settings": self.settings,
+                    "pending_clip_choice": {"choice": pending},
+                }
+                query = MagicMock()
+                query.from_user = MagicMock(id=99)
+                query.message = MagicMock(spec=__import__("telegram").Message)
+                query.answer = AsyncMock()
+                query.data = selected_data
+                with patch(
+                    "telegram_share_bot.handlers._run_direct_download", new=AsyncMock()
+                ) as run_download:
+                    await selected_callback(MagicMock(callback_query=query), context)
+                self.assertIs(
+                    context.application.bot_data["pending_clip_choice"]["choice"], pending
+                )
+                run_download.assert_not_awaited()
+                query.answer.assert_awaited_once_with(
+                    text=strings.SETTINGS_NOT_YOURS, show_alert=True
+                )
 
     async def test_private_quality_buttons_pass_the_selected_policy(self) -> None:
         context = MagicMock()
