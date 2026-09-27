@@ -87,18 +87,26 @@ class TestCacheFallback(unittest.IsolatedAsyncioTestCase):
         status = MagicMock()
         status.edit_text = AsyncMock()
         status.delete = AsyncMock()
-        with patch("telegram_share_bot.handlers.download_media", AsyncMock()) as download:
+        with (
+            self.assertLogs("telegram_share_bot.handlers", level="INFO") as captured,
+            patch("telegram_share_bot.handlers.download_media", AsyncMock()) as download,
+        ):
             await _run_direct_download(
                 context,
                 chat_id=42,
                 user_id=42,
                 url=url,
-                custom_caption=None,
+                custom_caption="private caption marker",
                 time_range=None,
                 status_message=status,
             )
         self.assertEqual(context.bot.send_video.await_args.kwargs["video"], "BEST_ID")
         download.assert_not_awaited()
+        self.assertTrue(any("route=direct format=video" in line for line in captured.output))
+        self.assertTrue(
+            any("stage=complete" in line and "cache=hit" in line for line in captured.output)
+        )
+        self.assertNotIn("private caption marker", " ".join(captured.output))
 
     async def test_private_url_offers_video_audio_and_selected_cache_fallback(self) -> None:
         url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
@@ -512,14 +520,29 @@ class TestCacheFallback(unittest.IsolatedAsyncioTestCase):
             patch("telegram_share_bot.handlers.get_direct_stream", AsyncMock(return_value=None)),
             patch("telegram_share_bot.handlers.download_media", download_mock),
             patch("telegram_share_bot.handlers._upload_for_file_id", upload_mock),
+            self.assertLogs("telegram_share_bot.handlers", level="INFO") as captured,
         ):
             await _prepare_inline_media(
                 context,
                 inline_message_id="msg_xyz",
                 url=url,
                 result_id="res_123",
+                custom_caption="private inline caption marker",
             )
 
+        operation_ids = {
+            line.split("op=", 1)[1].split()[0]
+            for line in captured.output
+            if "send op=" in line
+        }
+        self.assertEqual(len(operation_ids), 1)
+        self.assertTrue(any("route=inline format=video" in line for line in captured.output))
+        self.assertTrue(
+            any("cache=evicted" in line and "stage=complete" in line for line in captured.output)
+        )
+        self.assertTrue(any("stage=download" in line for line in captured.output))
+        self.assertTrue(any("stage=upload" in line for line in captured.output))
+        self.assertNotIn("private inline caption marker", " ".join(captured.output))
         # edit_message_media was called twice (once failed, once succeeded with fresh download)
         self.assertEqual(context.bot.edit_message_media.call_count, 2)
         # Cache was updated with new file_id

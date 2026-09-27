@@ -55,11 +55,14 @@ class TestInlineRetry(unittest.IsolatedAsyncioTestCase):
 
     async def test_transient_clip_failure_offers_retry_and_full_video(self) -> None:
         time_range = TimeRange(60, 120)
-        with patch(
-            "telegram_share_bot.handlers.download_media",
-            new=AsyncMock(
-                side_effect=DownloadError("Download timed out after 30 seconds.")
+        with (
+            patch(
+                "telegram_share_bot.handlers.download_media",
+                new=AsyncMock(
+                    side_effect=DownloadError("Download timed out after 30 seconds.")
+                ),
             ),
+            self.assertLogs("telegram_share_bot.handlers", level="INFO") as captured,
         ):
             await _prepare_inline_media(
                 self.context,
@@ -68,8 +71,15 @@ class TestInlineRetry(unittest.IsolatedAsyncioTestCase):
                 result_id="clip-result",
                 user_id=42,
                 time_range=time_range,
+                custom_caption="private retry caption marker",
             )
 
+        self.assertTrue(any("failure=timeout" in line for line in captured.output))
+        self.assertTrue(
+            any("route=inline" in line and "scope=clip" in line for line in captured.output)
+        )
+        self.assertNotIn("private retry caption marker", " ".join(captured.output))
+        self.assertNotIn("Traceback", " ".join(captured.output))
         markup = self.context.bot.edit_message_text.await_args.kwargs["reply_markup"]
         buttons = markup.inline_keyboard[0]
         self.assertEqual([button.text for button in buttons], ["Retry clip", "Send full video"])
