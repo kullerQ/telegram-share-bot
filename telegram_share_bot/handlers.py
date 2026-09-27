@@ -39,13 +39,10 @@ from telegram_share_bot.config import (
     CaptionMode,
     Settings,
 )
-from telegram_share_bot.downloader import (
-    cleanup_media,
-    download_media,
-    ensure_full_media_duration,
-    get_direct_stream,
-)
 from telegram_share_bot.media.captions import resolve_caption, sanitize_caption
+from telegram_share_bot.media.direct import get_direct_stream
+from telegram_share_bot.media.duration import ensure_full_media_duration
+from telegram_share_bot.media.jobs import cleanup_media, download_media
 from telegram_share_bot.media.models import (
     DirectMediaStream,
     DownloadedMedia,

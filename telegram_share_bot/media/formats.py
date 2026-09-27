@@ -8,7 +8,13 @@ from typing import Any
 
 import yt_dlp
 
-from telegram_share_bot.media.models import TimeRange, VideoQualityPolicy
+from telegram_share_bot import strings
+from telegram_share_bot.media.models import (
+    DownloadError,
+    MediaFormat,
+    TimeRange,
+    VideoQualityPolicy,
+)
 
 _SOURCE_SIZE_MULTIPLIER = 2
 _MAX_FORMAT_ATTEMPTS = 4
@@ -289,3 +295,59 @@ def _default_video_selector(time_range: TimeRange | None, source_limit: int) -> 
         "bv*[acodec=none][protocol=https]/"
         "bv*[acodec=none]"
     )
+
+
+def select_download_candidates(
+    info: dict[str, Any],
+    *,
+    time_range: TimeRange | None,
+    media_format: MediaFormat,
+    quality_policy: VideoQualityPolicy,
+    max_file_bytes: int,
+    source_limit: int,
+) -> tuple[float, list[_FormatCandidate], list[str]]:
+    """Choose ranked source formats and the fallback selector for one request."""
+    duration_scale = 1.0
+    source_duration = info.get("duration")
+    if (
+        time_range is not None
+        and time_range.duration_seconds is not None
+        and isinstance(source_duration, (int, float))
+        and source_duration > 0
+    ):
+        duration_scale = min(
+            1.0, time_range.duration_seconds / float(source_duration)
+        )
+    candidates = (
+        _audio_format_candidates(
+            info,
+            max_file_bytes=max_file_bytes,
+            duration_scale=duration_scale,
+        )
+        if media_format is MediaFormat.AUDIO
+        else _format_candidates(
+            info,
+            max_file_bytes=max_file_bytes,
+            duration_scale=duration_scale,
+            quality_policy=quality_policy,
+        )
+    )
+    selectors = [candidate.selector for candidate in candidates]
+    if media_format is MediaFormat.VIDEO and quality_policy is VideoQualityPolicy.BEST:
+        selectors = selectors[:1]
+    fallback_selector = (
+        _default_audio_selector(time_range, source_limit)
+        if media_format is MediaFormat.AUDIO
+        else _default_video_selector(time_range, source_limit)
+    )
+    if (
+        media_format is MediaFormat.VIDEO
+        and quality_policy is VideoQualityPolicy.BEST
+        and not selectors
+    ):
+        raise DownloadError(strings.DOWNLOAD_BEST_QUALITY_FAILED)
+    if not selectors or (
+        media_format is MediaFormat.AUDIO and fallback_selector not in selectors
+    ):
+        selectors.append(fallback_selector)
+    return duration_scale, candidates, selectors

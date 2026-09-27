@@ -10,23 +10,21 @@ from unittest.mock import MagicMock, patch
 
 import yt_dlp
 
-from telegram_share_bot.downloader import (
-    _download_sync,
-    _extract_info_cached,
-    _VideoProbe,
-)
 from telegram_share_bot.media.metadata import (
     _EXTRACT_INFO_CACHE_MAX,
     _EXTRACT_INFO_TTL_SECONDS,
     _extract_info_cache,
+    _extract_info_cached,
     _looks_like_stale_cdn_url,
     clear_extract_info_cache,
 )
 from telegram_share_bot.media.models import DownloadError
+from telegram_share_bot.media.transcode import _VideoProbe
+from telegram_share_bot.media.transfer import _download_sync
 
 
 @patch(
-    "telegram_share_bot.downloader._probe_video_file",
+    "telegram_share_bot.media.transcode._probe_video_file",
     new=lambda *_: _VideoProbe(60, "h264", "yuv420p", "aac", 1280, 720),
 )
 class TestExtractInfoCache(unittest.TestCase):
@@ -78,7 +76,7 @@ class TestExtractInfoCache(unittest.TestCase):
         url = "https://example.com/ttl"
 
         with patch(
-            "telegram_share_bot.downloader.time.monotonic",
+            "telegram_share_bot.media.metadata.time.monotonic",
             side_effect=[
                 100.0,
                 100.0 + _EXTRACT_INFO_TTL_SECONDS + 1,
@@ -164,7 +162,7 @@ class TestExtractInfoCache(unittest.TestCase):
             with patch("yt_dlp.YoutubeDL") as mock_cls:
                 mock_cls.return_value.__enter__.return_value = mock_ydl
                 with patch(
-                    "telegram_share_bot.downloader._resolve_downloaded_path",
+                    "telegram_share_bot.media.transfer._resolve_downloaded_path",
                     side_effect=fake_resolve,
                 ):
                     # Seed cache as if get_direct_stream already extracted.

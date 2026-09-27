@@ -10,7 +10,12 @@ from typing import TYPE_CHECKING, Any, cast
 import yt_dlp
 
 from telegram_share_bot import strings
-from telegram_share_bot.media.models import DownloadError
+from telegram_share_bot.media.models import (
+    DownloadError,
+    MediaFormat,
+    TimeRange,
+    VideoUnavailableError,
+)
 
 if TYPE_CHECKING:
     from yt_dlp.extractor.common import _InfoDict
@@ -116,3 +121,32 @@ def _pick_info(info: Any) -> dict[str, Any]:
     if picked.get("is_live") or picked.get("live_status") in ("is_live", "is_upcoming"):
         raise DownloadError(strings.DOWNLOAD_LIVE_UNSUPPORTED)
     return picked
+
+
+def ensure_video_available(info: dict[str, Any], media_format: MediaFormat) -> None:
+    """Reject audio-only sources when the user requested video."""
+    formats = info.get("formats")
+    if media_format is MediaFormat.VIDEO and isinstance(formats, list) and formats:
+        if all(
+            isinstance(item, dict) and item.get("vcodec") == "none"
+            for item in formats
+        ) and any(
+            isinstance(item, dict) and item.get("acodec") not in (None, "none")
+            for item in formats
+        ):
+            raise VideoUnavailableError()
+
+
+def source_title_and_duration(
+    info: dict[str, Any], time_range: TimeRange | None
+) -> tuple[str, int | None]:
+    """Return the clipped duration and short title used in send results."""
+    duration_raw = info.get("duration")
+    duration = (
+        time_range.duration_seconds
+        if time_range is not None
+        else int(duration_raw)
+        if isinstance(duration_raw, (int, float))
+        else None
+    )
+    return str(info.get("title") or "Media")[:64], duration

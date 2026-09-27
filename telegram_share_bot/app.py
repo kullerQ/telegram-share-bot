@@ -28,7 +28,6 @@ from telegram_share_bot.config import (
     Settings,
     load_settings,
 )
-from telegram_share_bot.downloader import cleanup_stale_downloads
 from telegram_share_bot.handlers import (
     audio_command,
     cancel_callback,
@@ -46,6 +45,7 @@ from telegram_share_bot.handlers import (
     video_command,
 )
 from telegram_share_bot.logging_filters import configure_logging
+from telegram_share_bot.media.jobs import cleanup_stale_downloads
 from telegram_share_bot.storage.media_cache import MediaCache
 from telegram_share_bot.storage.user_settings import UserSettingsStore
 
