@@ -9,8 +9,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from telegram_share_bot.cache import MediaCache
 from telegram_share_bot.downloader import MediaFormat, MediaKind
+from telegram_share_bot.storage.media_cache import MediaCache
 
 
 class TestMediaCache(unittest.IsolatedAsyncioTestCase):
@@ -156,7 +156,7 @@ class TestMediaCache(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(cached.file_id, file_id)
 
     async def test_unverified_legacy_video_is_not_reused(self) -> None:
-        from telegram_share_bot.cache import _legacy_cache_key
+        from telegram_share_bot.storage.media_cache import _legacy_cache_key
 
         url = "https://www.youtube.com/watch?v=legacy12345"
         legacy_key = _legacy_cache_key(url)

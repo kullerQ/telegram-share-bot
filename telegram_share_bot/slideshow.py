@@ -37,7 +37,7 @@ from telegram_share_bot.downloader import (
     ensure_full_media_duration,
     is_safe_media_url,
 )
-from telegram_share_bot.normalizer import safe_url_for_log
+from telegram_share_bot.platforms.urls import safe_url_for_log
 
 logger = logging.getLogger(__name__)
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from urllib.parse import parse_qs, urlsplit
 
-from telegram_share_bot.normalizer import normalize_url
+from telegram_share_bot.platforms.urls import normalize_url
 
 # Unpadded public originals of the bundled Round Square PNGs. Pinning the
 # commit keeps thumbnail availability testable while this branch is local.

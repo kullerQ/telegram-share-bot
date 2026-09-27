@@ -9,7 +9,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from telegram.error import NetworkError
 
-from telegram_share_bot.cache import MediaCache
 from telegram_share_bot.config import Settings
 from telegram_share_bot.downloader import (
     DirectMediaStream,
@@ -23,6 +22,7 @@ from telegram_share_bot.handlers import (
     _prepare_inline_media,
     retry_inline_callback,
 )
+from telegram_share_bot.storage.media_cache import MediaCache
 
 
 class TestInlineRetry(unittest.IsolatedAsyncioTestCase):

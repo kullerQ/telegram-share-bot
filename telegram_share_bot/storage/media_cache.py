@@ -12,7 +12,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from telegram_share_bot.downloader import MediaFormat, MediaKind, TimeRange
-from telegram_share_bot.normalizer import is_public_cacheable_url, normalize_url, safe_url_for_log
+from telegram_share_bot.platforms.urls import (
+    is_public_cacheable_url,
+    normalize_url,
+    safe_url_for_log,
+)
 
 logger = logging.getLogger(__name__)
 

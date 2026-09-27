@@ -11,7 +11,6 @@ from telegram.constants import ChatType, KeyboardButtonStyle
 from telegram.error import BadRequest, NetworkError
 
 from telegram_share_bot import strings
-from telegram_share_bot.cache import MediaCache
 from telegram_share_bot.config import Settings
 from telegram_share_bot.downloader import (
     DirectMediaStream,
@@ -35,7 +34,8 @@ from telegram_share_bot.handlers import (
     url_message,
     video_command,
 )
-from telegram_share_bot.user_settings import UserSettingsStore
+from telegram_share_bot.storage.media_cache import MediaCache
+from telegram_share_bot.storage.user_settings import UserSettingsStore
 
 
 class TestCacheFallback(unittest.IsolatedAsyncioTestCase):

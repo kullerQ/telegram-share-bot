@@ -33,8 +33,7 @@ from telegram.constants import ChatType, KeyboardButtonStyle, ParseMode
 from telegram.error import BadRequest, NetworkError, TelegramError, TimedOut
 from telegram.ext import ContextTypes
 
-from telegram_share_bot import platform_icons, platform_previews, strings
-from telegram_share_bot.cache import CachedMedia, MediaCache
+from telegram_share_bot import strings
 from telegram_share_bot.config import (
     DEFAULT_UPLOAD_TIMEOUT_SECONDS,
     CaptionMode,
@@ -61,8 +60,11 @@ from telegram_share_bot.downloader import (
     resolve_caption,
     sanitize_caption,
 )
-from telegram_share_bot.normalizer import safe_url_for_log
-from telegram_share_bot.user_settings import (
+from telegram_share_bot.platforms import icons as platform_icons
+from telegram_share_bot.platforms import previews as platform_previews
+from telegram_share_bot.platforms.urls import safe_url_for_log
+from telegram_share_bot.storage.media_cache import CachedMedia, MediaCache
+from telegram_share_bot.storage.user_settings import (
     CaptionPreference,
     UserSettingsStore,
     UserSharingSettings,

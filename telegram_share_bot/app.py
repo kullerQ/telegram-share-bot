@@ -22,7 +22,6 @@ from telegram.ext import (
 )
 
 from telegram_share_bot import strings
-from telegram_share_bot.cache import MediaCache
 from telegram_share_bot.config import (
     DEFAULT_MAX_CONCURRENT_DOWNLOADS,
     DEFAULT_UPLOAD_TIMEOUT_SECONDS,
@@ -47,7 +46,8 @@ from telegram_share_bot.handlers import (
     video_command,
 )
 from telegram_share_bot.logging_filters import configure_logging
-from telegram_share_bot.user_settings import UserSettingsStore
+from telegram_share_bot.storage.media_cache import MediaCache
+from telegram_share_bot.storage.user_settings import UserSettingsStore
 
 App = Application[
     ExtBot[None],

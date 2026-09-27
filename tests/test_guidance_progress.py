@@ -12,7 +12,6 @@ from telegram.constants import ParseMode
 from telegram.error import BadRequest
 
 from telegram_share_bot import strings
-from telegram_share_bot.cache import MediaCache
 from telegram_share_bot.config import Settings
 from telegram_share_bot.downloader import (
     DirectMediaStream,
@@ -31,6 +30,7 @@ from telegram_share_bot.handlers import (
     inline_query,
     start_command,
 )
+from telegram_share_bot.storage.media_cache import MediaCache
 
 
 class TestBotGuidance(unittest.IsolatedAsyncioTestCase):

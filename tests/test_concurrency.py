@@ -171,8 +171,8 @@ class TestConcurrencyLimiter(unittest.IsolatedAsyncioTestCase):
         semaphore_limit = 2
         sem = asyncio.Semaphore(semaphore_limit)
 
-        from telegram_share_bot.cache import MediaCache
         from telegram_share_bot.config import Settings
+        from telegram_share_bot.storage.media_cache import MediaCache
 
         mock_cache = MagicMock(spec=MediaCache)
         mock_cache.get = AsyncMock(return_value=None)
