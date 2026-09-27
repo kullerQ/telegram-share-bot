@@ -9,7 +9,8 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 from telegram_share_bot import strings
-from telegram_share_bot.media.models import DownloadError, MediaFormat, MediaKind
+from telegram_share_bot.media.models import DownloadedMedia, DownloadError, MediaFormat, MediaKind
+from telegram_share_bot.media.transfer import _download_sync
 from telegram_share_bot.tiktok.render import _build_ffmpeg_argv, build_slideshow_video
 from telegram_share_bot.tiktok.service import download_tiktok_slideshow
 from telegram_share_bot.tiktok.source import (
@@ -727,6 +728,34 @@ class TestSlideshowAudioChoice(unittest.TestCase):
                         media_format=MediaFormat.AUDIO,
                     )
         self.assertEqual(str(ctx.exception), strings.AUDIO_UNAVAILABLE)
+
+
+class TestSlideshowTransferRoute(unittest.TestCase):
+    def test_full_photo_post_uses_slideshow_before_ytdlp(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            result = DownloadedMedia(
+                path=Path(tmp) / "slideshow.mp4",
+                title="Photo post",
+                kind=MediaKind.VIDEO,
+                duration=12,
+            )
+            with (
+                patch("telegram_share_bot.media.transfer.is_safe_media_url", return_value=True),
+                patch(
+                    "telegram_share_bot.media.transfer.try_tiktok_slideshow",
+                    return_value=result,
+                ) as slideshow,
+                patch("telegram_share_bot.media.transfer.yt_dlp.YoutubeDL") as ydl,
+            ):
+                actual = _download_sync(
+                    "https://www.tiktok.com/@u/photo/1",
+                    Path(tmp),
+                    max_file_bytes=1024,
+                    timeout_seconds=30,
+                )
+            self.assertIs(actual, result)
+            slideshow.assert_called_once()
+            ydl.assert_not_called()
 
 
 if __name__ == "__main__":
