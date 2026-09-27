@@ -550,6 +550,7 @@ def _format_choice_keyboard(
             InlineKeyboardButton(
                 strings.DIRECT_CANCEL_BUTTON,
                 callback_data=f"{_DIRECT_CHOICE_CANCEL_PREFIX}{choice_id}",
+                style=KeyboardButtonStyle.DANGER,
             )
         ]
     )
@@ -622,6 +623,7 @@ def _clip_choice_keyboard(
             InlineKeyboardButton(
                 strings.DIRECT_CANCEL_BUTTON,
                 callback_data=f"{_DIRECT_CHOICE_CANCEL_PREFIX}{choice_id}",
+                style=KeyboardButtonStyle.DANGER,
             )
         ]
     )

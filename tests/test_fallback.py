@@ -258,6 +258,7 @@ class TestCacheFallback(unittest.IsolatedAsyncioTestCase):
                 plain = _format_choice_keyboard("id", quality).inline_keyboard
                 self.assertEqual(len(plain), 2)
                 self.assertEqual(plain[1][0].callback_data, "direct-cancel:id")
+                self.assertEqual(plain[1][0].to_dict()["style"], KeyboardButtonStyle.DANGER)
                 self.assertEqual(len(plain[0]), 2)
                 self.assertEqual(plain[0][0].callback_data, f"{video_prefix}id")
                 self.assertEqual(plain[0][1].callback_data, "audio:id")
@@ -292,7 +293,7 @@ class TestCacheFallback(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cancel.to_dict()["style"], KeyboardButtonStyle.DANGER)
         self.assertEqual(retry[0].to_dict()["style"], KeyboardButtonStyle.PRIMARY)
         self.assertNotIn("style", retry[1].to_dict())
-        self.assertNotIn("style", clip[2][0].to_dict())
+        self.assertEqual(clip[2][0].to_dict()["style"], KeyboardButtonStyle.DANGER)
 
     async def test_cancel_private_choices_prevents_later_download(self) -> None:
         for time_range, selected_callback, selected_data in (
