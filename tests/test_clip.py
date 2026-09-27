@@ -7,7 +7,6 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from telegram_share_bot.cache import MediaCache, _cache_key
 from telegram_share_bot.config import Settings
 from telegram_share_bot.downloader import (
     MAX_CLIP_SECONDS,
@@ -26,8 +25,9 @@ from telegram_share_bot.downloader import (
     parse_youtube_start_seconds,
 )
 from telegram_share_bot.handlers import inline_query
-from telegram_share_bot.normalizer import is_youtube_url
-from telegram_share_bot.user_settings import UserSettingsStore
+from telegram_share_bot.platforms.urls import is_youtube_url
+from telegram_share_bot.storage.media_cache import MediaCache, _cache_key
+from telegram_share_bot.storage.user_settings import UserSettingsStore
 
 
 class TestParseTimeRangeToken(unittest.TestCase):

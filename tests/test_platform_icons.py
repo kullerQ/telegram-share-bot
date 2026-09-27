@@ -5,7 +5,7 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-from telegram_share_bot.platform_icons import (
+from telegram_share_bot.platforms.icons import (
     _LOGO_BY_HOST,
     thumbnail_url,
     video_thumbnail_url,

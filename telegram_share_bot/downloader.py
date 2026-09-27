@@ -36,7 +36,7 @@ from telegram_share_bot.config import (
     TELEGRAM_CAPTION_MAX_LENGTH,
     CaptionMode,
 )
-from telegram_share_bot.normalizer import is_youtube_url, safe_url_for_log
+from telegram_share_bot.platforms.urls import is_youtube_url, safe_url_for_log
 
 logger = logging.getLogger(__name__)
 

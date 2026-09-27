@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, patch
 
 import httpx
 
-from telegram_share_bot.platform_previews import (
+from telegram_share_bot.platforms.previews import (
     _PREVIEW_CACHE,
     Preview,
     _lookup_page_image,
@@ -25,7 +25,7 @@ class TestPlatformPreviews(unittest.IsolatedAsyncioTestCase):
         _PREVIEW_CACHE.clear()
 
     async def test_youtube_preview_needs_no_http_request(self) -> None:
-        with patch("telegram_share_bot.platform_previews.httpx.AsyncClient") as client:
+        with patch("telegram_share_bot.platforms.previews.httpx.AsyncClient") as client:
             preview = await resolve_preview("https://youtu.be/GKq9nKZpmu0")
         client.assert_not_called()
         self.assertEqual(
@@ -150,7 +150,7 @@ class TestPlatformPreviews(unittest.IsolatedAsyncioTestCase):
     async def test_x_lookup_preserves_account_case_and_strips_tracking(self) -> None:
         expected = Preview("https://pbs.twimg.com/ext_tw_video_thumb/example.jpg")
         with patch(
-            "telegram_share_bot.platform_previews._lookup_page_image",
+            "telegram_share_bot.platforms.previews._lookup_page_image",
             new=AsyncMock(return_value=expected),
         ) as lookup:
             preview = await resolve_preview(
@@ -165,7 +165,7 @@ class TestPlatformPreviews(unittest.IsolatedAsyncioTestCase):
     async def test_x_video_path_uses_canonical_post_for_preview(self) -> None:
         expected = Preview("https://pbs.twimg.com/amplify_video_thumb/example.jpg")
         with patch(
-            "telegram_share_bot.platform_previews._lookup_page_image",
+            "telegram_share_bot.platforms.previews._lookup_page_image",
             new=AsyncMock(return_value=expected),
         ) as lookup:
             preview = await resolve_preview(
@@ -179,7 +179,7 @@ class TestPlatformPreviews(unittest.IsolatedAsyncioTestCase):
 
     async def test_failed_lookup_is_cached_as_logo_fallback(self) -> None:
         with patch(
-            "telegram_share_bot.platform_previews._lookup_page_image",
+            "telegram_share_bot.platforms.previews._lookup_page_image",
             new=AsyncMock(return_value=None),
         ) as lookup:
             for _ in range(2):
@@ -192,8 +192,8 @@ class TestPlatformPreviews(unittest.IsolatedAsyncioTestCase):
             return Preview("https://pbs.twimg.com/late.jpg")
 
         with (
-            patch("telegram_share_bot.platform_previews._LOOKUP_TIMEOUT_SECONDS", 0.01),
-            patch("telegram_share_bot.platform_previews._lookup_page_image", slow_lookup),
+            patch("telegram_share_bot.platforms.previews._LOOKUP_TIMEOUT_SECONDS", 0.01),
+            patch("telegram_share_bot.platforms.previews._lookup_page_image", slow_lookup),
         ):
             self.assertIsNone(await resolve_preview("https://x.com/user/status/456"))
 

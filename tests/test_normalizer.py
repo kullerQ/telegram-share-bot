@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import unittest
 
-from telegram_share_bot.normalizer import (
+from telegram_share_bot.platforms.urls import (
     is_public_cacheable_url,
     looks_signed_url,
     normalize_url,

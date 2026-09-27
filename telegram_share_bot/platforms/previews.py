@@ -13,8 +13,8 @@ from urllib.parse import urlencode, urljoin, urlsplit, urlunsplit
 
 import httpx
 
-from telegram_share_bot.normalizer import normalize_url, safe_url_for_log
-from telegram_share_bot.platform_icons import video_thumbnail_url
+from telegram_share_bot.platforms.icons import video_thumbnail_url
+from telegram_share_bot.platforms.urls import normalize_url, safe_url_for_log
 
 logger = logging.getLogger(__name__)
 
