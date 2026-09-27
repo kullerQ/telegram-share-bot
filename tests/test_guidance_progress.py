@@ -144,19 +144,19 @@ class TestMediaProgress(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch(
-                "telegram_share_bot.handlers.get_direct_stream",
+                "telegram_share_bot.handlers.direct.get_direct_stream",
                 new=AsyncMock(return_value=None),
             ),
             patch(
-                "telegram_share_bot.handlers.download_media",
+                "telegram_share_bot.handlers.direct.download_media",
                 new=AsyncMock(side_effect=download_with_optimization),
             ),
             patch(
-                "telegram_share_bot.handlers._send_media_to_chat",
+                "telegram_share_bot.handlers.direct._send_media_to_chat",
                 new=AsyncMock(return_value=MagicMock()),
             ),
             patch(
-                "telegram_share_bot.handlers._file_id_and_kind_from_message",
+                "telegram_share_bot.handlers.direct._file_id_and_kind_from_message",
                 return_value=("FILE_ID", MediaKind.VIDEO),
             ),
         ):
@@ -191,12 +191,12 @@ class TestMediaProgress(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch(
-                "telegram_share_bot.handlers.download_media",
+                "telegram_share_bot.handlers.direct.download_media",
                 new=AsyncMock(return_value=media),
             ),
-            patch("telegram_share_bot.handlers._send_media_to_chat", new=send),
+            patch("telegram_share_bot.handlers.direct._send_media_to_chat", new=send),
             patch(
-                "telegram_share_bot.handlers._file_id_and_kind_from_message",
+                "telegram_share_bot.handlers.direct._file_id_and_kind_from_message",
                 return_value=("FILE_ID", MediaKind.VIDEO),
             ),
         ):
@@ -229,11 +229,11 @@ class TestMediaProgress(unittest.IsolatedAsyncioTestCase):
         status.delete = AsyncMock()
         with (
             patch(
-                "telegram_share_bot.handlers.get_direct_stream",
+                "telegram_share_bot.handlers.direct.get_direct_stream",
                 new=AsyncMock(return_value=None),
             ),
             patch(
-                "telegram_share_bot.handlers.download_media",
+                "telegram_share_bot.handlers.direct.download_media",
                 new=AsyncMock(side_effect=DownloadError(strings.AUDIO_UNAVAILABLE)),
             ),
         ):
@@ -255,6 +255,7 @@ class TestMediaProgress(unittest.IsolatedAsyncioTestCase):
         status.delete.assert_not_awaited()
 
     async def test_long_direct_stream_is_rejected_before_upload(self) -> None:
+        url = "https://youtube.com/watch?v=dQw4w9WgXcQ"
         stream = DirectMediaStream(
             direct_url="https://example.com/long.m4a",
             title="Long video",
@@ -270,11 +271,19 @@ class TestMediaProgress(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch(
-                "telegram_share_bot.handlers.get_direct_stream",
+                "telegram_share_bot.handlers.direct.get_direct_stream",
                 new=AsyncMock(return_value=stream),
             ),
             patch(
-                "telegram_share_bot.handlers._upload_direct_url_for_file_id",
+                "telegram_share_bot.handlers.direct._upload_direct_url_for_file_id",
+                new=upload,
+            ),
+            patch(
+                "telegram_share_bot.handlers.prepare.get_direct_stream",
+                new=AsyncMock(return_value=stream),
+            ),
+            patch(
+                "telegram_share_bot.handlers.prepare._upload_direct_url_for_file_id",
                 new=upload,
             ),
         ):
@@ -282,7 +291,7 @@ class TestMediaProgress(unittest.IsolatedAsyncioTestCase):
                 self.context,
                 chat_id=42,
                 user_id=42,
-                url="https://example.com/long",
+                url=url,
                 custom_caption=None,
                 time_range=None,
                 status_message=status,
@@ -291,7 +300,7 @@ class TestMediaProgress(unittest.IsolatedAsyncioTestCase):
             await _prepare_inline_media(
                 self.context,
                 inline_message_id="long-inline",
-                url="https://example.com/long",
+                url=url,
                 result_id="long-result",
                 user_id=42,
                 media_format=MediaFormat.AUDIO,
@@ -310,15 +319,15 @@ class TestMediaProgress(unittest.IsolatedAsyncioTestCase):
         media = self._media("inline")
         with (
             patch(
-                "telegram_share_bot.handlers.get_direct_stream",
+                "telegram_share_bot.handlers.prepare.get_direct_stream",
                 new=AsyncMock(return_value=None),
             ),
             patch(
-                "telegram_share_bot.handlers.download_media",
+                "telegram_share_bot.handlers.prepare.download_media",
                 new=AsyncMock(return_value=media),
             ),
             patch(
-                "telegram_share_bot.handlers._upload_for_file_id",
+                "telegram_share_bot.handlers.prepare._upload_for_file_id",
                 new=AsyncMock(return_value=("FILE_ID", "Example video", MediaKind.VIDEO, 1080)),
             ),
         ):
@@ -369,8 +378,8 @@ class TestMediaProgress(unittest.IsolatedAsyncioTestCase):
         update.inline_query = query
 
         with (
-            patch("telegram_share_bot.handlers.get_direct_stream") as direct,
-            patch("telegram_share_bot.handlers.download_media") as download,
+            patch("telegram_share_bot.media.direct.get_direct_stream") as direct,
+            patch("telegram_share_bot.media.jobs.download_media") as download,
         ):
             await inline_query(update, self.context)
         direct.assert_not_called()
@@ -432,7 +441,7 @@ class TestMediaProgress(unittest.IsolatedAsyncioTestCase):
         update.inline_query = query
 
         with patch(
-            "telegram_share_bot.handlers.platform_previews.resolve_preview",
+            "telegram_share_bot.handlers.query.platform_previews.resolve_preview",
             new=AsyncMock(return_value=None),
         ):
             await inline_query(update, self.context)
@@ -454,7 +463,7 @@ class TestMediaProgress(unittest.IsolatedAsyncioTestCase):
                 update = MagicMock()
                 update.inline_query = query
                 with patch(
-                    "telegram_share_bot.handlers.platform_previews.resolve_preview",
+                    "telegram_share_bot.handlers.query.platform_previews.resolve_preview",
                     new=AsyncMock(return_value=None),
                 ):
                     await inline_query(update, self.context)
@@ -473,10 +482,10 @@ class TestMediaProgress(unittest.IsolatedAsyncioTestCase):
         direct = AsyncMock(return_value=None)
         download = AsyncMock(return_value=audio)
         with (
-            patch("telegram_share_bot.handlers.get_direct_stream", direct),
-            patch("telegram_share_bot.handlers.download_media", download),
+            patch("telegram_share_bot.handlers.prepare.get_direct_stream", direct),
+            patch("telegram_share_bot.handlers.prepare.download_media", download),
             patch(
-                "telegram_share_bot.handlers._upload_for_file_id",
+                "telegram_share_bot.handlers.prepare._upload_for_file_id",
                 AsyncMock(return_value=("AUDIO_FILE_ID", "Example audio", MediaKind.AUDIO, None)),
             ),
         ):
@@ -509,11 +518,11 @@ class TestMediaProgress(unittest.IsolatedAsyncioTestCase):
         media = self._media("clip")
         with (
             patch(
-                "telegram_share_bot.handlers.download_media",
+                "telegram_share_bot.handlers.prepare.download_media",
                 new=AsyncMock(return_value=media),
             ),
             patch(
-                "telegram_share_bot.handlers._upload_for_file_id",
+                "telegram_share_bot.handlers.prepare._upload_for_file_id",
                 new=AsyncMock(return_value=("FILE_ID", "Clip", MediaKind.VIDEO, 720)),
             ),
         ):
