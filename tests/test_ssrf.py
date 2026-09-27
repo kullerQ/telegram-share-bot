@@ -9,7 +9,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from telegram_share_bot import strings
-from telegram_share_bot.downloader import download_media, get_direct_stream
+from telegram_share_bot.media.direct import get_direct_stream
+from telegram_share_bot.media.jobs import download_media
 from telegram_share_bot.media.models import DownloadError
 from telegram_share_bot.media.security import (
     _safe_dns_resolution,

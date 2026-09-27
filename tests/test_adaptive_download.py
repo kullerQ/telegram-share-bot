@@ -12,14 +12,7 @@ from unittest.mock import MagicMock, patch
 import yt_dlp
 
 from telegram_share_bot import strings
-from telegram_share_bot.downloader import (
-    _download_sync,
-    _optimize_video_file,
-    _probe_video_file,
-    _run_bounded_clip_ffmpeg,
-    _VideoProbe,
-    _youtube_hls_clip_streams,
-)
+from telegram_share_bot.media.clips import _youtube_hls_clip_streams
 from telegram_share_bot.media.formats import (
     _audio_format_candidates,
     _format_candidates,
@@ -35,6 +28,13 @@ from telegram_share_bot.media.models import (
     TimeRange,
     VideoQualityPolicy,
 )
+from telegram_share_bot.media.transcode import (
+    _optimize_video_file,
+    _probe_video_file,
+    _run_bounded_clip_ffmpeg,
+    _VideoProbe,
+)
+from telegram_share_bot.media.transfer import _download_sync
 
 
 def _outtmpl_template(params: dict[str, object]) -> str:
@@ -252,7 +252,7 @@ class TestFormatRanking(unittest.TestCase):
 
 
 @patch(
-    "telegram_share_bot.downloader._probe_video_file",
+    "telegram_share_bot.media.transcode._probe_video_file",
     new=lambda *_: _VideoProbe(60, "h264", "yuv420p", "aac", 1280, 720),
 )
 class TestYoutubeHlsClip(unittest.TestCase):
@@ -292,22 +292,22 @@ class TestYoutubeHlsClip(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             with (
-                patch("telegram_share_bot.downloader.shutil.which", return_value="ffmpeg"),
-                patch("telegram_share_bot.downloader.is_safe_media_url", return_value=True),
+                patch("telegram_share_bot.media.transfer.shutil.which", return_value="ffmpeg"),
+                patch("telegram_share_bot.media.transfer.is_safe_media_url", return_value=True),
                 patch(
-                    "telegram_share_bot.downloader._safe_dns_resolution",
+                    "telegram_share_bot.media.transfer._safe_dns_resolution",
                     return_value=contextlib.nullcontext(),
                 ),
                 patch(
-                    "telegram_share_bot.downloader._extract_info_cached",
+                    "telegram_share_bot.media.transfer._extract_info_cached",
                     return_value=(info, False),
                 ),
                 patch(
-                    "telegram_share_bot.downloader._run_bounded_clip_ffmpeg",
+                    "telegram_share_bot.media.clips._run_bounded_clip_ffmpeg",
                     side_effect=fake_ffmpeg,
                 ),
             ):
-                with self.assertLogs("telegram_share_bot.downloader", level="INFO") as logs:
+                with self.assertLogs("telegram_share_bot.media.clips", level="INFO") as logs:
                     media = _download_sync(
                         "https://youtu.be/example1234",
                         Path(tmp),
@@ -332,7 +332,7 @@ class TestYoutubeHlsClip(unittest.TestCase):
     def test_expired_clip_stage_kills_ffmpeg_process(self) -> None:
         process = MagicMock()
         process.poll.return_value = None
-        with patch("telegram_share_bot.downloader.subprocess.Popen", return_value=process):
+        with patch("telegram_share_bot.media.transcode.subprocess.Popen", return_value=process):
             with self.assertRaises(DownloadError):
                 _run_bounded_clip_ffmpeg(
                     ["ffmpeg"],
@@ -375,8 +375,8 @@ class TestYoutubeHlsClip(unittest.TestCase):
             output = Path(tmp) / "clip.mp4"
             output.write_bytes(b"x" * 10)
             with (
-                patch("telegram_share_bot.downloader.subprocess.Popen", return_value=process),
-                patch("telegram_share_bot.downloader.time", clock),
+                patch("telegram_share_bot.media.transcode.subprocess.Popen", return_value=process),
+                patch("telegram_share_bot.media.transcode.time", clock),
             ):
                 with self.assertRaises(DownloadError) as caught:
                     _run_bounded_clip_ffmpeg(
@@ -419,18 +419,18 @@ class TestYoutubeHlsClip(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             with (
-                patch("telegram_share_bot.downloader.shutil.which", return_value="ffmpeg"),
-                patch("telegram_share_bot.downloader.is_safe_media_url", return_value=True),
+                patch("telegram_share_bot.media.transfer.shutil.which", return_value="ffmpeg"),
+                patch("telegram_share_bot.media.transfer.is_safe_media_url", return_value=True),
                 patch(
-                    "telegram_share_bot.downloader._safe_dns_resolution",
+                    "telegram_share_bot.media.transfer._safe_dns_resolution",
                     return_value=contextlib.nullcontext(),
                 ),
                 patch(
-                    "telegram_share_bot.downloader._extract_info_cached",
+                    "telegram_share_bot.media.transfer._extract_info_cached",
                     return_value=(info, False),
                 ),
                 patch(
-                    "telegram_share_bot.downloader._run_bounded_clip_ffmpeg",
+                    "telegram_share_bot.media.clips._run_bounded_clip_ffmpeg",
                     side_effect=fake_ffmpeg,
                 ),
             ):
@@ -547,11 +547,13 @@ class TestAudioFormatSelection(unittest.TestCase):
                     return str(Path(_outtmpl_template(self.params)).parent / "result.m4a")
 
             with (
-                patch("telegram_share_bot.downloader.is_safe_media_url", return_value=True),
-                patch("telegram_share_bot.downloader._safe_dns_resolution", contextlib.nullcontext),
-                patch("telegram_share_bot.downloader.yt_dlp.YoutubeDL", FakeYdl),
+                patch("telegram_share_bot.media.transfer.is_safe_media_url", return_value=True),
                 patch(
-                    "telegram_share_bot.downloader._extract_info_cached",
+                    "telegram_share_bot.media.transfer._safe_dns_resolution", contextlib.nullcontext
+                ),
+                patch("telegram_share_bot.media.transfer.yt_dlp.YoutubeDL", FakeYdl),
+                patch(
+                    "telegram_share_bot.media.transfer._extract_info_cached",
                     return_value=(
                         {"title": "Audio test", "duration": 60, "formats": formats},
                         False,
@@ -601,16 +603,16 @@ class TestAudioFormatSelection(unittest.TestCase):
 
                 with (
                     patch(
-                        "telegram_share_bot.downloader.is_safe_media_url",
+                        "telegram_share_bot.media.transfer.is_safe_media_url",
                         return_value=True,
                     ),
                     patch(
-                        "telegram_share_bot.downloader._safe_dns_resolution",
+                        "telegram_share_bot.media.transfer._safe_dns_resolution",
                         contextlib.nullcontext,
                     ),
-                    patch("telegram_share_bot.downloader.yt_dlp.YoutubeDL", FakeYdl),
+                    patch("telegram_share_bot.media.transfer.yt_dlp.YoutubeDL", FakeYdl),
                     patch(
-                        "telegram_share_bot.downloader._extract_info_cached",
+                        "telegram_share_bot.media.transfer._extract_info_cached",
                         return_value=(
                             {
                                 "title": "No audio",
@@ -686,7 +688,7 @@ class TestYtDlpOutputTemplate(unittest.TestCase):
 
 
 @patch(
-    "telegram_share_bot.downloader._probe_video_file",
+    "telegram_share_bot.media.transcode._probe_video_file",
     new=lambda *_: _VideoProbe(60, "h264", "yuv420p", "aac", 1280, 720),
 )
 class TestMeasuredFallback(unittest.TestCase):
@@ -763,17 +765,19 @@ class TestMeasuredFallback(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             with (
-                patch("telegram_share_bot.downloader.is_safe_media_url", return_value=True),
-                patch("telegram_share_bot.downloader._safe_dns_resolution", contextlib.nullcontext),
-                patch("telegram_share_bot.downloader.yt_dlp.YoutubeDL", FakeYdl),
+                patch("telegram_share_bot.media.transfer.is_safe_media_url", return_value=True),
                 patch(
-                    "telegram_share_bot.downloader._extract_info_cached",
+                    "telegram_share_bot.media.transfer._safe_dns_resolution", contextlib.nullcontext
+                ),
+                patch("telegram_share_bot.media.transfer.yt_dlp.YoutubeDL", FakeYdl),
+                patch(
+                    "telegram_share_bot.media.transfer._extract_info_cached",
                     return_value=(
                         {"title": "Quality test", "duration": 60, "formats": formats},
                         False,
                     ),
                 ),
-                patch("telegram_share_bot.downloader.time", clock),
+                patch("telegram_share_bot.media.transfer.time", clock),
             ):
                 for policy, expected in (
                     (VideoQualityPolicy.AUTO, ["v1080+audio", "v720+audio"]),
@@ -854,18 +858,20 @@ class TestMeasuredFallback(unittest.TestCase):
                     return str(Path(_outtmpl_template(self.params)).parent / "result.mp4")
 
             with (
-                patch("telegram_share_bot.downloader.is_safe_media_url", return_value=True),
-                patch("telegram_share_bot.downloader._safe_dns_resolution", contextlib.nullcontext),
-                patch("telegram_share_bot.downloader.yt_dlp.YoutubeDL", FakeYdl),
+                patch("telegram_share_bot.media.transfer.is_safe_media_url", return_value=True),
                 patch(
-                    "telegram_share_bot.downloader._extract_info_cached",
+                    "telegram_share_bot.media.transfer._safe_dns_resolution", contextlib.nullcontext
+                ),
+                patch("telegram_share_bot.media.transfer.yt_dlp.YoutubeDL", FakeYdl),
+                patch(
+                    "telegram_share_bot.media.transfer._extract_info_cached",
                     return_value=(
                         {"title": "Adaptive test", "duration": 60, "formats": formats},
                         False,
                     ),
                 ),
             ):
-                with self.assertLogs("telegram_share_bot.downloader", level="INFO") as logs:
+                with self.assertLogs("telegram_share_bot.media.transfer", level="INFO") as logs:
                     media = _download_sync(
                         "https://youtube.com/watch?v=example",
                         root,
@@ -884,11 +890,13 @@ class TestMediaDurationLimit(unittest.TestCase):
     def test_long_full_media_is_rejected_before_transfer(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             with (
-                patch("telegram_share_bot.downloader.is_safe_media_url", return_value=True),
-                patch("telegram_share_bot.downloader._safe_dns_resolution", contextlib.nullcontext),
-                patch("telegram_share_bot.downloader.yt_dlp.YoutubeDL") as ydl_class,
+                patch("telegram_share_bot.media.transfer.is_safe_media_url", return_value=True),
                 patch(
-                    "telegram_share_bot.downloader._extract_info_cached",
+                    "telegram_share_bot.media.transfer._safe_dns_resolution", contextlib.nullcontext
+                ),
+                patch("telegram_share_bot.media.transfer.yt_dlp.YoutubeDL") as ydl_class,
+                patch(
+                    "telegram_share_bot.media.transfer._extract_info_cached",
                     return_value=(
                         {"id": "long", "title": "Long video", "duration": 3600},
                         False,
@@ -939,18 +947,19 @@ class TestVideoIntegrity(unittest.TestCase):
                     ],
                 }
                 with (
-                    patch("telegram_share_bot.downloader.yt_dlp.YoutubeDL", return_value=ydl),
-                    patch("telegram_share_bot.downloader.is_safe_media_url", return_value=True),
+                    patch("telegram_share_bot.media.transfer.yt_dlp.YoutubeDL", return_value=ydl),
+                    patch("telegram_share_bot.media.transfer.is_safe_media_url", return_value=True),
                     patch(
-                        "telegram_share_bot.downloader._safe_dns_resolution", contextlib.nullcontext
+                        "telegram_share_bot.media.transfer._safe_dns_resolution",
+                        contextlib.nullcontext,
                     ),
                     patch(
-                        "telegram_share_bot.downloader._extract_info_cached",
+                        "telegram_share_bot.media.transfer._extract_info_cached",
                         return_value=(info, False),
                     ),
-                    patch("telegram_share_bot.downloader.shutil.which", return_value="ffmpeg"),
+                    patch("telegram_share_bot.media.transfer.shutil.which", return_value="ffmpeg"),
                     patch(
-                        "telegram_share_bot.downloader.subprocess.run",
+                        "telegram_share_bot.media.transcode.subprocess.run",
                         return_value=subprocess.CompletedProcess(
                             [], 0, b"", b"  Stream #0:0: Audio: opus, 48000 Hz\n"
                         ),
@@ -984,13 +993,14 @@ class TestVideoIntegrity(unittest.TestCase):
                 ydl.params = {}
                 ydl.__enter__.return_value = ydl
                 with (
-                    patch("telegram_share_bot.downloader.yt_dlp.YoutubeDL", return_value=ydl),
-                    patch("telegram_share_bot.downloader.is_safe_media_url", return_value=True),
+                    patch("telegram_share_bot.media.transfer.yt_dlp.YoutubeDL", return_value=ydl),
+                    patch("telegram_share_bot.media.transfer.is_safe_media_url", return_value=True),
                     patch(
-                        "telegram_share_bot.downloader._safe_dns_resolution", contextlib.nullcontext
+                        "telegram_share_bot.media.transfer._safe_dns_resolution",
+                        contextlib.nullcontext,
                     ),
                     patch(
-                        "telegram_share_bot.downloader._extract_info_cached",
+                        "telegram_share_bot.media.transfer._extract_info_cached",
                         return_value=(info, False),
                     ),
                 ):
@@ -1027,16 +1037,17 @@ class TestVideoOptimization(unittest.TestCase):
                     output.write_bytes(b"normalized")
 
                 with (
-                    patch("telegram_share_bot.downloader.shutil.which", return_value="ffmpeg"),
+                    patch("telegram_share_bot.media.transfer.shutil.which", return_value="ffmpeg"),
                     patch(
-                        "telegram_share_bot.downloader._probe_video_file",
+                        "telegram_share_bot.media.transcode._probe_video_file",
                         side_effect=[
                             _VideoProbe(10, codec, "yuv420p", "opus", 1920, 1080),
                             _VideoProbe(10, "h264", "yuv420p", "aac", 1920, 1080),
                         ],
                     ),
                     patch(
-                        "telegram_share_bot.downloader._run_bounded_clip_ffmpeg", side_effect=encode
+                        "telegram_share_bot.media.transcode._run_bounded_clip_ffmpeg",
+                        side_effect=encode,
                     ),
                 ):
                     result = _optimize_video_file(
@@ -1067,15 +1078,15 @@ class TestVideoOptimization(unittest.TestCase):
             def notice() -> None:
                 notices.append(True)
 
-            with self.assertLogs("telegram_share_bot.downloader", level="INFO") as logs:
+            with self.assertLogs("telegram_share_bot.media.transcode", level="INFO") as logs:
                 with (
-                    patch("telegram_share_bot.downloader.shutil.which", return_value="ffmpeg"),
+                    patch("telegram_share_bot.media.transfer.shutil.which", return_value="ffmpeg"),
                     patch(
-                        "telegram_share_bot.downloader._run_bounded_clip_ffmpeg",
+                        "telegram_share_bot.media.transcode._run_bounded_clip_ffmpeg",
                         side_effect=fake_run,
                     ),
                     patch(
-                        "telegram_share_bot.downloader._probe_video_file",
+                        "telegram_share_bot.media.transcode._probe_video_file",
                         return_value=_VideoProbe(1, "h264", "yuv420p", None, 3840, 2160),
                     ),
                 ):
@@ -1093,9 +1104,9 @@ class TestVideoOptimization(unittest.TestCase):
 
     def test_rejects_audio_only_file_despite_mp4_extension(self) -> None:
         with (
-            patch("telegram_share_bot.downloader.shutil.which", return_value="ffmpeg"),
+            patch("telegram_share_bot.media.transfer.shutil.which", return_value="ffmpeg"),
             patch(
-                "telegram_share_bot.downloader.subprocess.run",
+                "telegram_share_bot.media.transcode.subprocess.run",
                 return_value=subprocess.CompletedProcess(
                     [],
                     0,
@@ -1115,9 +1126,9 @@ class TestVideoOptimization(unittest.TestCase):
             b"  Stream #0:1: Audio: aac, 44100 Hz, stereo\n"
         )
         with (
-            patch("telegram_share_bot.downloader.shutil.which", return_value="ffmpeg"),
+            patch("telegram_share_bot.media.transfer.shutil.which", return_value="ffmpeg"),
             patch(
-                "telegram_share_bot.downloader.subprocess.run",
+                "telegram_share_bot.media.transcode.subprocess.run",
                 return_value=subprocess.CompletedProcess([], 0, b"", stderr),
             ),
         ):
@@ -1137,9 +1148,9 @@ class TestVideoOptimization(unittest.TestCase):
             b"  Stream #0:0: Video: wrapped_avframe, yuv420p, 1920x1080\n"
         )
         with (
-            patch("telegram_share_bot.downloader.shutil.which", return_value="ffmpeg"),
+            patch("telegram_share_bot.media.transfer.shutil.which", return_value="ffmpeg"),
             patch(
-                "telegram_share_bot.downloader.subprocess.run",
+                "telegram_share_bot.media.transcode.subprocess.run",
                 return_value=subprocess.CompletedProcess([], 0, b"", stderr),
             ) as run,
         ):
@@ -1156,9 +1167,9 @@ class TestVideoOptimization(unittest.TestCase):
             b"  Stream #0:2: Video: vp9, yuv420p, 1280x720, 30 fps\n"
         )
         with (
-            patch("telegram_share_bot.downloader.shutil.which", return_value="ffmpeg"),
+            patch("telegram_share_bot.media.transfer.shutil.which", return_value="ffmpeg"),
             patch(
-                "telegram_share_bot.downloader.subprocess.run",
+                "telegram_share_bot.media.transcode.subprocess.run",
                 return_value=subprocess.CompletedProcess([], 0, b"", stderr),
             ),
         ):
@@ -1172,10 +1183,10 @@ class TestVideoOptimization(unittest.TestCase):
             source.write_bytes(b"video")
             with (
                 patch(
-                    "telegram_share_bot.downloader._probe_video_file",
+                    "telegram_share_bot.media.transcode._probe_video_file",
                     return_value=_VideoProbe(10, "h264", "yuv420p", "aac", 1920, 1080),
                 ),
-                patch("telegram_share_bot.downloader._run_bounded_clip_ffmpeg") as encode,
+                patch("telegram_share_bot.media.transcode._run_bounded_clip_ffmpeg") as encode,
             ):
                 result = _optimize_video_file(
                     source,

@@ -8,15 +8,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from telegram_share_bot.downloader import (
-    _download_sync,
-    _extract_direct_stream_sync,
-    _VideoProbe,
-)
+from telegram_share_bot.media.direct import _extract_direct_stream_sync
+from telegram_share_bot.media.transcode import _VideoProbe
+from telegram_share_bot.media.transfer import _download_sync
 
 
 @patch(
-    "telegram_share_bot.downloader._probe_video_file",
+    "telegram_share_bot.media.transcode._probe_video_file",
     new=lambda *_: _VideoProbe(60, "h264", "yuv420p", "aac", 1280, 720),
 )
 class TestRedditFormats(unittest.TestCase):
@@ -30,11 +28,11 @@ class TestRedditFormats(unittest.TestCase):
             "filesize_approx": 78_750_000,
         }
         with (
-            patch("telegram_share_bot.downloader.is_safe_media_url", return_value=True),
-            patch("telegram_share_bot.downloader._safe_dns_resolution", contextlib.nullcontext),
-            patch("telegram_share_bot.downloader.yt_dlp.YoutubeDL") as ydl,
+            patch("telegram_share_bot.media.direct.is_safe_media_url", return_value=True),
+            patch("telegram_share_bot.media.direct._safe_dns_resolution", contextlib.nullcontext),
+            patch("telegram_share_bot.media.direct.yt_dlp.YoutubeDL") as ydl,
             patch(
-                "telegram_share_bot.downloader._extract_info_cached",
+                "telegram_share_bot.media.direct._extract_info_cached",
                 return_value=(selected, False),
             ),
         ):
@@ -75,15 +73,17 @@ class TestRedditFormats(unittest.TestCase):
                     return str(file_path)
 
             with (
-                patch("telegram_share_bot.downloader.is_safe_media_url", return_value=True),
-                patch("telegram_share_bot.downloader._safe_dns_resolution", contextlib.nullcontext),
-                patch("telegram_share_bot.downloader.yt_dlp.YoutubeDL", FakeYdl),
+                patch("telegram_share_bot.media.transfer.is_safe_media_url", return_value=True),
                 patch(
-                    "telegram_share_bot.downloader._extract_info_cached",
+                    "telegram_share_bot.media.transfer._safe_dns_resolution", contextlib.nullcontext
+                ),
+                patch("telegram_share_bot.media.transfer.yt_dlp.YoutubeDL", FakeYdl),
+                patch(
+                    "telegram_share_bot.media.transfer._extract_info_cached",
                     return_value=({"title": "Silent", "ext": "mp4"}, False),
                 ),
                 patch(
-                    "telegram_share_bot.downloader._resolve_downloaded_path",
+                    "telegram_share_bot.media.transfer._resolve_downloaded_path",
                     return_value=file_path,
                 ),
             ):

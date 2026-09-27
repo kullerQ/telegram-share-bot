@@ -8,8 +8,8 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from telegram_share_bot.config import Settings
-from telegram_share_bot.downloader import _clamp_time_range, _download_sync, _VideoProbe
 from telegram_share_bot.handlers import inline_query
+from telegram_share_bot.media.clips import _clamp_time_range
 from telegram_share_bot.media.models import (
     DownloadError,
     MediaFormat,
@@ -25,6 +25,8 @@ from telegram_share_bot.media.requests import (
     parse_time_range_token,
     parse_youtube_start_seconds,
 )
+from telegram_share_bot.media.transcode import _VideoProbe
+from telegram_share_bot.media.transfer import _download_sync
 from telegram_share_bot.platforms.urls import is_youtube_url
 from telegram_share_bot.storage.media_cache import MediaCache, _cache_key
 from telegram_share_bot.storage.user_settings import UserSettingsStore
@@ -71,7 +73,7 @@ class TestClampOpenEnded(unittest.TestCase):
         self.assertEqual(resolved, TimeRange(100, 250))
 
     def test_clamp_open_ended_over_max_checked_by_resolve(self) -> None:
-        from telegram_share_bot.downloader import _resolve_clip_range
+        from telegram_share_bot.media.clips import _resolve_clip_range
 
         with self.assertRaises(DownloadError):
             _resolve_clip_range(TimeRange(0, None), {"duration": MAX_CLIP_SECONDS + 100})
@@ -348,7 +350,7 @@ class TestInlineClipChoice(unittest.IsolatedAsyncioTestCase):
 
 
 @patch(
-    "telegram_share_bot.downloader._probe_video_file",
+    "telegram_share_bot.media.transcode._probe_video_file",
     new=lambda *_: _VideoProbe(60, "h264", "yuv420p", "aac", 1280, 720),
 )
 class TestClipDownloadOpts(unittest.TestCase):
@@ -383,15 +385,15 @@ class TestClipDownloadOpts(unittest.TestCase):
 
             with (
                 patch(
-                    "telegram_share_bot.downloader.yt_dlp.YoutubeDL",
+                    "telegram_share_bot.media.transfer.yt_dlp.YoutubeDL",
                     FakeYdl,
                 ),
                 patch(
-                    "telegram_share_bot.downloader.shutil.which",
+                    "telegram_share_bot.media.transfer.shutil.which",
                     return_value="/usr/bin/ffmpeg",
                 ),
                 patch(
-                    "telegram_share_bot.downloader._safe_dns_resolution",
+                    "telegram_share_bot.media.transfer._safe_dns_resolution",
                     MagicMock(
                         return_value=MagicMock(
                             __enter__=MagicMock(return_value=None),
@@ -400,11 +402,11 @@ class TestClipDownloadOpts(unittest.TestCase):
                     ),
                 ),
                 patch(
-                    "telegram_share_bot.downloader._resolve_downloaded_path",
+                    "telegram_share_bot.media.transfer._resolve_downloaded_path",
                     return_value=fake_path,
                 ),
                 patch(
-                    "telegram_share_bot.downloader._extract_info_cached",
+                    "telegram_share_bot.media.transfer._extract_info_cached",
                     side_effect=lambda ydl, url, force_refresh=False: (
                         {
                             "id": "abc",
@@ -433,7 +435,7 @@ class TestClipDownloadOpts(unittest.TestCase):
     def test_clip_too_long_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             with patch(
-                "telegram_share_bot.downloader.shutil.which",
+                "telegram_share_bot.media.transfer.shutil.which",
                 return_value="/usr/bin/ffmpeg",
             ):
                 with self.assertRaises(DownloadError) as ctx:

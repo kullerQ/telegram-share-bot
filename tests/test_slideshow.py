@@ -10,18 +10,16 @@ from unittest.mock import MagicMock, patch
 
 from telegram_share_bot import strings
 from telegram_share_bot.media.models import DownloadError, MediaFormat, MediaKind
-from telegram_share_bot.slideshow import (
+from telegram_share_bot.tiktok.render import _build_ffmpeg_argv, build_slideshow_video
+from telegram_share_bot.tiktok.service import download_tiktok_slideshow
+from telegram_share_bot.tiktok.source import (
     SlideshowSource,
     TikTokPhotoRef,
-    _build_ffmpeg_argv,
-    _cycle_images,
-    build_slideshow_video,
     clear_short_link_cache,
     detect_tiktok_photo_post,
-    download_tiktok_slideshow,
     extract_slideshow,
-    plan_slideshow_timeline,
 )
+from telegram_share_bot.tiktok.timeline import _cycle_images, plan_slideshow_timeline
 
 
 class TestDetectTikTokPhotoPost(unittest.TestCase):
@@ -73,14 +71,14 @@ class TestDetectTikTokPhotoPost(unittest.TestCase):
         fake_ydl.__enter__ = MagicMock(return_value=fake_ydl)
         fake_ydl.__exit__ = MagicMock(return_value=False)
 
-        with patch("telegram_share_bot.slideshow.yt_dlp.YoutubeDL", return_value=fake_ydl):
+        with patch("telegram_share_bot.tiktok.source.yt_dlp.YoutubeDL", return_value=fake_ydl):
             ref = detect_tiktok_photo_post("https://vt.tiktok.com/ZSqcbj3bf/")
         self.assertIsNotNone(ref)
         assert ref is not None
         self.assertEqual(ref.video_id, "7687274479570980128")
 
         # Second call should hit the memo cache (no extra urlopen).
-        with patch("telegram_share_bot.slideshow.yt_dlp.YoutubeDL") as ydl_cls:
+        with patch("telegram_share_bot.tiktok.source.yt_dlp.YoutubeDL") as ydl_cls:
             ref2 = detect_tiktok_photo_post("https://vt.tiktok.com/ZSqcbj3bf/")
         ydl_cls.assert_not_called()
         self.assertEqual(ref2, ref)
@@ -121,9 +119,9 @@ class TestExtractSlideshow(unittest.TestCase):
             canonical_url="https://www.tiktok.com/@u/photo/1",
         )
         with (
-            patch("telegram_share_bot.slideshow.yt_dlp.YoutubeDL", return_value=fake_ydl),
+            patch("telegram_share_bot.tiktok.source.yt_dlp.YoutubeDL", return_value=fake_ydl),
             patch(
-                "telegram_share_bot.slideshow.is_safe_media_url",
+                "telegram_share_bot.tiktok.source.is_safe_media_url",
                 return_value=True,
             ),
         ):
@@ -150,7 +148,7 @@ class TestExtractSlideshow(unittest.TestCase):
             canonical_url="https://www.tiktok.com/@u/photo/1",
         )
         with patch(
-            "telegram_share_bot.slideshow.yt_dlp.YoutubeDL", return_value=fake_ydl
+            "telegram_share_bot.tiktok.source.yt_dlp.YoutubeDL", return_value=fake_ydl
         ):
             with self.assertRaises(DownloadError) as ctx:
                 extract_slideshow(ref)
@@ -208,14 +206,14 @@ class TestProbeMediaDuration(unittest.TestCase):
     def test_prefers_mutagen(self) -> None:
         with (
             patch(
-                "telegram_share_bot.slideshow._duration_from_mutagen",
+                "telegram_share_bot.tiktok.assets._duration_from_mutagen",
                 return_value=12.5,
             ) as mutagen_probe,
             patch(
-                "telegram_share_bot.slideshow._duration_from_ffmpeg",
+                "telegram_share_bot.tiktok.assets._duration_from_ffmpeg",
             ) as ffmpeg_probe,
         ):
-            from telegram_share_bot.slideshow import _probe_media_duration
+            from telegram_share_bot.tiktok.assets import _probe_media_duration
 
             result = _probe_media_duration(Path("audio.mp3"))
         self.assertEqual(result, 12.5)
@@ -232,16 +230,16 @@ class TestProbeMediaDuration(unittest.TestCase):
 
         with (
             patch(
-                "telegram_share_bot.slideshow._duration_from_mutagen",
+                "telegram_share_bot.tiktok.assets._duration_from_mutagen",
                 return_value=None,
             ),
-            patch("telegram_share_bot.slideshow.shutil.which", return_value="ffmpeg"),
+            patch("telegram_share_bot.tiktok.render.shutil.which", return_value="ffmpeg"),
             patch(
-                "telegram_share_bot.slideshow.subprocess.run",
+                "telegram_share_bot.tiktok.render.subprocess.run",
                 return_value=completed,
             ) as run_mock,
         ):
-            from telegram_share_bot.slideshow import _probe_media_duration
+            from telegram_share_bot.tiktok.assets import _probe_media_duration
 
             result = _probe_media_duration(Path("audio.mp3"))
         self.assertAlmostEqual(result or 0.0, 27.4, places=2)
@@ -253,15 +251,15 @@ class TestProbeMediaDuration(unittest.TestCase):
     def test_returns_none_when_both_fail(self) -> None:
         with (
             patch(
-                "telegram_share_bot.slideshow._duration_from_mutagen",
+                "telegram_share_bot.tiktok.assets._duration_from_mutagen",
                 return_value=None,
             ),
             patch(
-                "telegram_share_bot.slideshow._duration_from_ffmpeg",
+                "telegram_share_bot.tiktok.assets._duration_from_ffmpeg",
                 return_value=None,
             ),
         ):
-            from telegram_share_bot.slideshow import _probe_media_duration
+            from telegram_share_bot.tiktok.assets import _probe_media_duration
 
             self.assertIsNone(_probe_media_duration(Path("missing.mp3")))
 
@@ -339,7 +337,7 @@ class TestBuildFfmpegArgv(unittest.TestCase):
 
 class TestNavDots(unittest.TestCase):
     def test_render_nav_dot_png(self) -> None:
-        from telegram_share_bot.slideshow import render_nav_dot_png
+        from telegram_share_bot.tiktok.timeline import render_nav_dot_png
 
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "nav.png"
@@ -364,7 +362,7 @@ class TestBuildSlideshowVideo(unittest.TestCase):
             canonical_url="https://www.tiktok.com/@u/photo/1",
         )
         with tempfile.TemporaryDirectory() as tmp:
-            with patch("telegram_share_bot.slideshow.shutil.which", return_value=None):
+            with patch("telegram_share_bot.tiktok.render.shutil.which", return_value=None):
                 with self.assertRaises(DownloadError) as ctx:
                     build_slideshow_video(
                         source,
@@ -417,18 +415,18 @@ class TestBuildSlideshowVideo(unittest.TestCase):
             work = Path(tmp)
             with (
                 patch(
-                    "telegram_share_bot.slideshow.shutil.which",
+                    "telegram_share_bot.tiktok.render.shutil.which",
                     return_value="ffmpeg",
                 ),
                 patch(
-                    "telegram_share_bot.slideshow.yt_dlp.YoutubeDL",
+                    "telegram_share_bot.tiktok.source.yt_dlp.YoutubeDL",
                     return_value=fake_ydl,
                 ),
                 patch(
-                    "telegram_share_bot.slideshow._safe_dns_resolution",
+                    "telegram_share_bot.tiktok.render._safe_dns_resolution",
                 ) as dns_cm,
                 patch(
-                    "telegram_share_bot.slideshow.subprocess.run",
+                    "telegram_share_bot.tiktok.render.subprocess.run",
                     side_effect=fake_run,
                 ),
             ):
@@ -504,22 +502,22 @@ class TestBuildSlideshowVideo(unittest.TestCase):
             work = Path(tmp)
             with (
                 patch(
-                    "telegram_share_bot.slideshow.shutil.which",
+                    "telegram_share_bot.tiktok.render.shutil.which",
                     return_value="ffmpeg",
                 ),
                 patch(
-                    "telegram_share_bot.slideshow.yt_dlp.YoutubeDL",
+                    "telegram_share_bot.tiktok.source.yt_dlp.YoutubeDL",
                     return_value=fake_ydl,
                 ),
                 patch(
-                    "telegram_share_bot.slideshow._safe_dns_resolution",
+                    "telegram_share_bot.tiktok.render._safe_dns_resolution",
                 ) as dns_cm,
                 patch(
-                    "telegram_share_bot.slideshow.subprocess.run",
+                    "telegram_share_bot.tiktok.render.subprocess.run",
                     side_effect=fake_run,
                 ),
                 patch(
-                    "telegram_share_bot.slideshow._probe_media_duration",
+                    "telegram_share_bot.tiktok.render._probe_media_duration",
                     return_value=None,
                 ),
             ):
@@ -594,18 +592,18 @@ class TestBuildSlideshowVideo(unittest.TestCase):
             work = Path(tmp)
             with (
                 patch(
-                    "telegram_share_bot.slideshow.shutil.which",
+                    "telegram_share_bot.tiktok.render.shutil.which",
                     return_value="ffmpeg",
                 ),
                 patch(
-                    "telegram_share_bot.slideshow.yt_dlp.YoutubeDL",
+                    "telegram_share_bot.tiktok.source.yt_dlp.YoutubeDL",
                     return_value=fake_ydl,
                 ),
                 patch(
-                    "telegram_share_bot.slideshow._safe_dns_resolution",
+                    "telegram_share_bot.tiktok.render._safe_dns_resolution",
                 ) as dns_cm,
                 patch(
-                    "telegram_share_bot.slideshow.subprocess.run",
+                    "telegram_share_bot.tiktok.render.subprocess.run",
                     side_effect=fake_run,
                 ),
             ):
@@ -648,10 +646,13 @@ class TestSlideshowAudioChoice(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             with (
-                patch("telegram_share_bot.slideshow.detect_tiktok_photo_post", return_value=ref),
-                patch("telegram_share_bot.slideshow.extract_slideshow", return_value=source),
-                patch("telegram_share_bot.slideshow._safe_dns_resolution") as dns_cm,
-                patch("telegram_share_bot.slideshow._download_bytes", side_effect=save_audio),
+                patch(
+                    "telegram_share_bot.tiktok.service.detect_tiktok_photo_post",
+                    return_value=ref,
+                ),
+                patch("telegram_share_bot.tiktok.service.extract_slideshow", return_value=source),
+                patch("telegram_share_bot.tiktok.service._safe_dns_resolution") as dns_cm,
+                patch("telegram_share_bot.tiktok.service._download_bytes", side_effect=save_audio),
             ):
                 dns_cm.return_value.__enter__ = MagicMock(return_value=None)
                 dns_cm.return_value.__exit__ = MagicMock(return_value=False)
@@ -682,9 +683,12 @@ class TestSlideshowAudioChoice(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as tmp:
             with (
-                patch("telegram_share_bot.slideshow.detect_tiktok_photo_post", return_value=ref),
-                patch("telegram_share_bot.slideshow.extract_slideshow", return_value=source),
-                patch("telegram_share_bot.slideshow._download_bytes") as download_bytes,
+                patch(
+                    "telegram_share_bot.tiktok.service.detect_tiktok_photo_post",
+                    return_value=ref,
+                ),
+                patch("telegram_share_bot.tiktok.service.extract_slideshow", return_value=source),
+                patch("telegram_share_bot.tiktok.service._download_bytes") as download_bytes,
             ):
                 with self.assertRaises(DownloadError) as ctx:
                     download_tiktok_slideshow(
@@ -708,8 +712,11 @@ class TestSlideshowAudioChoice(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as tmp:
             with (
-                patch("telegram_share_bot.slideshow.detect_tiktok_photo_post", return_value=ref),
-                patch("telegram_share_bot.slideshow.extract_slideshow", return_value=source),
+                patch(
+                    "telegram_share_bot.tiktok.service.detect_tiktok_photo_post",
+                    return_value=ref,
+                ),
+                patch("telegram_share_bot.tiktok.service.extract_slideshow", return_value=source),
             ):
                 with self.assertRaises(DownloadError) as ctx:
                     download_tiktok_slideshow(

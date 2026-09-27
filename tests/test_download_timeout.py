@@ -9,8 +9,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from telegram_share_bot.downloader import _download_sync, download_media
+from telegram_share_bot.media.jobs import download_media
 from telegram_share_bot.media.models import DownloadError
+from telegram_share_bot.media.transfer import _download_sync
 
 
 class TestDownloadTimeout(unittest.IsolatedAsyncioTestCase):
@@ -49,7 +50,7 @@ class TestDownloadTimeout(unittest.IsolatedAsyncioTestCase):
                     worker_finished.set()
 
             with patch(
-                "telegram_share_bot.downloader._download_sync",
+                "telegram_share_bot.media.jobs._download_sync",
                 side_effect=slow_download,
             ):
                 request = asyncio.create_task(
