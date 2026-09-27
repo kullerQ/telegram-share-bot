@@ -111,7 +111,7 @@ SETTINGS_MESSAGE = (
     "{quality_auto}\n{quality_best}\n{quality_balanced}\n\n"
     "<b>Caption</b>\n"
     "{caption_custom}\n{caption_title}{caption_note}\n\n"
-    "<b>Default format</b>\n"
+    "<b>Default format</b> <i>(direct messages to this bot only)</i>\n"
     "{format_unspecified}\n{format_video}\n{format_audio}\n\n"
     "Reset to default restores Auto, Not specified, and the bot's usual caption choice."
 )
