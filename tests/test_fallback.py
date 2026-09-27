@@ -102,7 +102,9 @@ class TestCacheFallback(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(context.bot.send_video.await_args.kwargs["video"], "BEST_ID")
         download.assert_not_awaited()
-        self.assertTrue(any("route=direct format=video" in line for line in captured.output))
+        self.assertTrue(
+            any("user_id=42 route=direct format=video" in line for line in captured.output)
+        )
         self.assertTrue(
             any("stage=complete" in line and "cache=hit" in line for line in captured.output)
         )
@@ -527,6 +529,7 @@ class TestCacheFallback(unittest.IsolatedAsyncioTestCase):
                 inline_message_id="msg_xyz",
                 url=url,
                 result_id="res_123",
+                user_id=42,
                 custom_caption="private inline caption marker",
             )
 
@@ -536,7 +539,9 @@ class TestCacheFallback(unittest.IsolatedAsyncioTestCase):
             if "send op=" in line
         }
         self.assertEqual(len(operation_ids), 1)
-        self.assertTrue(any("route=inline format=video" in line for line in captured.output))
+        self.assertTrue(
+            any("user_id=42 route=inline format=video" in line for line in captured.output)
+        )
         self.assertTrue(
             any("cache=evicted" in line and "stage=complete" in line for line in captured.output)
         )

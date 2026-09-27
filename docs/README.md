@@ -70,7 +70,7 @@ Without `/setinlinefeedback`, the bot cannot learn which result you chose, so th
      docker compose logs -f
      ```
    - Direct file access on host:
-     Open `./logs/bot.log` in your editor. Send events share an `op` ID and show route, format, stage timing, cache outcome, and failure category. Captions are not logged; bot tokens and URL query strings are redacted. Routine polling requests are hidden.
+     Open `./logs/bot.log` in your editor. Send events share an `op` ID and show Telegram user ID, route, format, stage timing, cache outcome, and failure category. Captions are not logged; bot tokens and URL query strings are redacted. Routine polling requests are hidden.
    - Health: `docker compose ps` should show the bot as `healthy` after startup.
 
 5. Stop or restart:

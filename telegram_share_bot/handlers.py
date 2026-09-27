@@ -77,6 +77,7 @@ class _SendTrace:
     route: str
     media_format: MediaFormat
     time_range: TimeRange | None
+    user_id: int | None
     started_at: float = field(default_factory=time.monotonic)
     cache_outcome: str = "miss"
 
@@ -97,9 +98,10 @@ class _SendTrace:
         )
         logger.log(
             level,
-            "send op=%s route=%s format=%s scope=%s stage=%s elapsed_s=%.1f "
+            "send op=%s user_id=%s route=%s format=%s scope=%s stage=%s elapsed_s=%.1f "
             "stage_s=%s cache=%s failure=%s",
             self.operation_id,
+            self.user_id if self.user_id is not None else "-",
             self.route,
             self.media_format.value,
             "clip" if self.time_range is not None else "full",
@@ -1050,7 +1052,7 @@ async def _run_direct_download(
     preferences: UserSharingSettings | None = None,
     skip_cache: bool = False,
 ) -> None:
-    trace = _SendTrace(uuid4().hex[:12], "direct", media_format, time_range)
+    trace = _SendTrace(uuid4().hex[:12], "direct", media_format, time_range, user_id)
     trace.cache_outcome = "bypass" if skip_cache else "miss"
     trace.event("start")
     cache = _cache(context)
@@ -1462,7 +1464,7 @@ async def chosen_inline_result(update: Update, context: ContextTypes.DEFAULT_TYP
 
     denial = await _try_acquire_user_download_slot(context, user_id)
     if denial is not None:
-        _SendTrace(uuid4().hex[:12], "inline", media_format, time_range).event(
+        _SendTrace(uuid4().hex[:12], "inline", media_format, time_range, user_id).event(
             "denied", failure="rate_limit"
         )
         await _edit_inline_text(
@@ -1802,7 +1804,7 @@ async def _prepare_inline_media(
     display_url = safe_url_for_log(url)
     media: DownloadedMedia | None = None
     keep_pending_for_retry = False
-    trace = _SendTrace(uuid4().hex[:12], "inline", media_format, time_range)
+    trace = _SendTrace(uuid4().hex[:12], "inline", media_format, time_range, user_id)
     trace.event("start")
 
     try:
