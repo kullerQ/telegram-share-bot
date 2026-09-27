@@ -9,18 +9,17 @@ from pathlib import Path
 from unittest.mock import patch
 
 from telegram_share_bot import strings
-from telegram_share_bot.downloader import (
-    DownloadError,
+from telegram_share_bot.downloader import download_media, get_direct_stream
+from telegram_share_bot.media.models import DownloadError
+from telegram_share_bot.media.security import (
     _safe_dns_resolution,
-    download_media,
-    get_direct_stream,
     is_allowed_media_host,
     is_safe_media_url,
 )
 
 # Patch the resolver the DNS guard calls — not socket.getaddrinfo itself,
 # which is permanently wrapped once the guard is installed.
-_RESOLVER = "telegram_share_bot.downloader._REAL_GETADDRINFO"
+_RESOLVER = "telegram_share_bot.media.security._REAL_GETADDRINFO"
 
 
 class TestSsrfProtection(unittest.IsolatedAsyncioTestCase):

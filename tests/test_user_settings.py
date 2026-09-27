@@ -12,12 +12,6 @@ from unittest.mock import AsyncMock, MagicMock
 from telegram.constants import KeyboardButtonStyle
 
 from telegram_share_bot.config import CaptionMode, Settings
-from telegram_share_bot.downloader import (
-    DownloadedMedia,
-    MediaFormat,
-    MediaKind,
-    VideoQualityPolicy,
-)
 from telegram_share_bot.handlers import (
     _input_media,
     _resolve_user_caption,
@@ -26,6 +20,12 @@ from telegram_share_bot.handlers import (
     _settings_keyboard,
     _settings_text,
     settings_callback,
+)
+from telegram_share_bot.media.models import (
+    DownloadedMedia,
+    MediaFormat,
+    MediaKind,
+    VideoQualityPolicy,
 )
 from telegram_share_bot.storage.media_cache import CachedMedia
 from telegram_share_bot.storage.user_settings import (

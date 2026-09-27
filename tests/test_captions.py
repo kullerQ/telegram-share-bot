@@ -14,11 +14,8 @@ from telegram_share_bot.config import (
     load_settings,
     parse_caption_mode,
 )
-from telegram_share_bot.downloader import (
-    extract_url_and_caption,
-    resolve_caption,
-    sanitize_caption,
-)
+from telegram_share_bot.media.captions import resolve_caption, sanitize_caption
+from telegram_share_bot.media.requests import extract_url_and_caption
 
 
 class TestCaptionExtraction(unittest.TestCase):

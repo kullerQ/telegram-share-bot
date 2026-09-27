@@ -11,7 +11,7 @@ from collections.abc import Generator
 from dataclasses import dataclass
 from pathlib import Path
 
-from telegram_share_bot.downloader import MediaFormat, MediaKind, TimeRange
+from telegram_share_bot.media.models import MediaFormat, MediaKind, TimeRange
 from telegram_share_bot.platforms.urls import (
     is_public_cacheable_url,
     normalize_url,

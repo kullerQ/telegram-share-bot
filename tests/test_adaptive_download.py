@@ -13,23 +13,27 @@ import yt_dlp
 
 from telegram_share_bot import strings
 from telegram_share_bot.downloader import (
+    _download_sync,
+    _optimize_video_file,
+    _probe_video_file,
+    _run_bounded_clip_ffmpeg,
+    _VideoProbe,
+    _youtube_hls_clip_streams,
+)
+from telegram_share_bot.media.formats import (
+    _audio_format_candidates,
+    _format_candidates,
+    _projected_transfer_seconds,
+    _set_attempt_format_selector,
+    _set_attempt_output_template,
+)
+from telegram_share_bot.media.models import (
     DownloadedMedia,
     DownloadError,
     MediaFormat,
     MediaKind,
     TimeRange,
     VideoQualityPolicy,
-    _audio_format_candidates,
-    _download_sync,
-    _format_candidates,
-    _optimize_video_file,
-    _probe_video_file,
-    _projected_transfer_seconds,
-    _run_bounded_clip_ffmpeg,
-    _set_attempt_format_selector,
-    _set_attempt_output_template,
-    _VideoProbe,
-    _youtube_hls_clip_streams,
 )
 
 

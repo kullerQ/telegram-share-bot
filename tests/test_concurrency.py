@@ -16,13 +16,13 @@ from telegram_share_bot.config import (
     Settings,
     load_settings,
 )
-from telegram_share_bot.downloader import DownloadedMedia, MediaKind
 from telegram_share_bot.handlers import (
     _release_user_download_slot,
     _try_acquire_user_download_slot,
     direct_format_callback,
     url_message,
 )
+from telegram_share_bot.media.models import DownloadedMedia, MediaKind
 
 
 class TestConcurrencyLimiter(unittest.IsolatedAsyncioTestCase):

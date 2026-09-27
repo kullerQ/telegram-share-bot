@@ -13,15 +13,6 @@ from telegram.error import BadRequest
 
 from telegram_share_bot import strings
 from telegram_share_bot.config import Settings
-from telegram_share_bot.downloader import (
-    DirectMediaStream,
-    DownloadedMedia,
-    DownloadError,
-    MediaFormat,
-    MediaKind,
-    TimeRange,
-    VideoQualityPolicy,
-)
 from telegram_share_bot.handlers import (
     _edit_direct_status,
     _prepare_inline_media,
@@ -29,6 +20,15 @@ from telegram_share_bot.handlers import (
     help_command,
     inline_query,
     start_command,
+)
+from telegram_share_bot.media.models import (
+    DirectMediaStream,
+    DownloadedMedia,
+    DownloadError,
+    MediaFormat,
+    MediaKind,
+    TimeRange,
+    VideoQualityPolicy,
 )
 from telegram_share_bot.storage.media_cache import MediaCache
 

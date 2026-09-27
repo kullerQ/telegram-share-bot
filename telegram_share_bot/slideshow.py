@@ -28,15 +28,9 @@ from telegram_share_bot.config import (
     DEFAULT_SLIDESHOW_MAX_IMAGES,
     DEFAULT_SLIDESHOW_SLIDE_MS,
 )
-from telegram_share_bot.downloader import (
-    DownloadedMedia,
-    DownloadError,
-    MediaFormat,
-    MediaKind,
-    _safe_dns_resolution,
-    ensure_full_media_duration,
-    is_safe_media_url,
-)
+from telegram_share_bot.downloader import ensure_full_media_duration
+from telegram_share_bot.media.models import DownloadedMedia, DownloadError, MediaFormat, MediaKind
+from telegram_share_bot.media.security import _safe_dns_resolution, is_safe_media_url
 from telegram_share_bot.platforms.urls import safe_url_for_log
 
 logger = logging.getLogger(__name__)

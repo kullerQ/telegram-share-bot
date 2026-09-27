@@ -11,16 +11,18 @@ from unittest.mock import MagicMock, patch
 import yt_dlp
 
 from telegram_share_bot.downloader import (
+    _download_sync,
+    _extract_info_cached,
+    _VideoProbe,
+)
+from telegram_share_bot.media.metadata import (
     _EXTRACT_INFO_CACHE_MAX,
     _EXTRACT_INFO_TTL_SECONDS,
-    DownloadError,
-    _download_sync,
     _extract_info_cache,
-    _extract_info_cached,
     _looks_like_stale_cdn_url,
-    _VideoProbe,
     clear_extract_info_cache,
 )
+from telegram_share_bot.media.models import DownloadError
 
 
 @patch(
