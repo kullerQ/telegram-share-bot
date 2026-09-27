@@ -257,5 +257,3 @@ def parse_path(
                 f"path must be under {must_be_under}"
             ) from exc
     return path
-
-

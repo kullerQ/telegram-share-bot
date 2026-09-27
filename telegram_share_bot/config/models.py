@@ -98,4 +98,3 @@ class Settings:
     slideshow_slide_ms: int = DEFAULT_SLIDESHOW_SLIDE_MS
     slideshow_max_images: int = DEFAULT_SLIDESHOW_MAX_IMAGES
     slideshow_images_loop: bool = DEFAULT_SLIDESHOW_IMAGES_LOOP
-
