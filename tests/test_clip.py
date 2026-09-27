@@ -8,23 +8,23 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from telegram_share_bot.config import Settings
-from telegram_share_bot.downloader import (
-    MAX_CLIP_SECONDS,
+from telegram_share_bot.downloader import _clamp_time_range, _download_sync, _VideoProbe
+from telegram_share_bot.handlers import inline_query
+from telegram_share_bot.media.models import (
     DownloadError,
     MediaFormat,
     MediaKind,
     TimeRange,
     VideoQualityPolicy,
-    _clamp_time_range,
-    _download_sync,
-    _VideoProbe,
+)
+from telegram_share_bot.media.requests import (
+    MAX_CLIP_SECONDS,
     extract_media_request,
     format_time_range,
     parse_duration_seconds_token,
     parse_time_range_token,
     parse_youtube_start_seconds,
 )
-from telegram_share_bot.handlers import inline_query
 from telegram_share_bot.platforms.urls import is_youtube_url
 from telegram_share_bot.storage.media_cache import MediaCache, _cache_key
 from telegram_share_bot.storage.user_settings import UserSettingsStore

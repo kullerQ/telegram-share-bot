@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from telegram_share_bot.downloader import MediaFormat, MediaKind
+from telegram_share_bot.media.models import MediaFormat, MediaKind
 from telegram_share_bot.storage.media_cache import MediaCache
 
 
@@ -179,7 +179,7 @@ class TestMediaCache(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(await self.cache.get(url, quality_policy="auto-best"))
 
     async def test_best_video_preferred_over_auto_for_same_clip(self) -> None:
-        from telegram_share_bot.downloader import TimeRange
+        from telegram_share_bot.media.models import TimeRange
 
         url = "https://www.youtube.com/watch?v=quality12345"
         clip = TimeRange(start=60, end=120)

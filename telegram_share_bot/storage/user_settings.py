@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
-from telegram_share_bot.downloader import MediaFormat, VideoQualityPolicy
+from telegram_share_bot.media.models import MediaFormat, VideoQualityPolicy
 
 
 class CaptionPreference(str, Enum):

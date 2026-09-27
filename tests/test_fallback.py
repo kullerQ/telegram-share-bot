@@ -12,14 +12,6 @@ from telegram.error import BadRequest, NetworkError
 
 from telegram_share_bot import strings
 from telegram_share_bot.config import Settings
-from telegram_share_bot.downloader import (
-    DirectMediaStream,
-    DownloadedMedia,
-    MediaFormat,
-    MediaKind,
-    TimeRange,
-    VideoQualityPolicy,
-)
 from telegram_share_bot.handlers import (
     PendingClipChoice,
     _cancel_keyboard,
@@ -33,6 +25,14 @@ from telegram_share_bot.handlers import (
     private_choice_cancel_callback,
     url_message,
     video_command,
+)
+from telegram_share_bot.media.models import (
+    DirectMediaStream,
+    DownloadedMedia,
+    MediaFormat,
+    MediaKind,
+    TimeRange,
+    VideoQualityPolicy,
 )
 from telegram_share_bot.storage.media_cache import MediaCache
 from telegram_share_bot.storage.user_settings import UserSettingsStore

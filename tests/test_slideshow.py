@@ -9,7 +9,7 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 from telegram_share_bot import strings
-from telegram_share_bot.downloader import DownloadError, MediaFormat, MediaKind
+from telegram_share_bot.media.models import DownloadError, MediaFormat, MediaKind
 from telegram_share_bot.slideshow import (
     SlideshowSource,
     TikTokPhotoRef,

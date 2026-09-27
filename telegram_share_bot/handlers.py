@@ -40,7 +40,13 @@ from telegram_share_bot.config import (
     Settings,
 )
 from telegram_share_bot.downloader import (
-    MAX_CLIP_SECONDS,
+    cleanup_media,
+    download_media,
+    ensure_full_media_duration,
+    get_direct_stream,
+)
+from telegram_share_bot.media.captions import resolve_caption, sanitize_caption
+from telegram_share_bot.media.models import (
     DirectMediaStream,
     DownloadedMedia,
     DownloadError,
@@ -49,17 +55,13 @@ from telegram_share_bot.downloader import (
     TimeRange,
     VideoQualityPolicy,
     VideoUnavailableError,
-    cleanup_media,
-    download_media,
-    ensure_full_media_duration,
+)
+from telegram_share_bot.media.requests import (
+    MAX_CLIP_SECONDS,
     extract_media_request,
     format_time_range,
-    get_direct_stream,
-    is_allowed_media_host,
-    is_https_url,
-    resolve_caption,
-    sanitize_caption,
 )
+from telegram_share_bot.media.security import is_allowed_media_host, is_https_url
 from telegram_share_bot.platforms import icons as platform_icons
 from telegram_share_bot.platforms import previews as platform_previews
 from telegram_share_bot.platforms.urls import safe_url_for_log

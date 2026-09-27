@@ -9,11 +9,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from telegram_share_bot.downloader import (
-    DownloadError,
-    _download_sync,
-    download_media,
-)
+from telegram_share_bot.downloader import _download_sync, download_media
+from telegram_share_bot.media.models import DownloadError
 
 
 class TestDownloadTimeout(unittest.IsolatedAsyncioTestCase):
