@@ -8,8 +8,7 @@ import os
 import re
 from pathlib import Path
 from typing import Any
-
-from telegram_share_bot.normalizer import safe_url_for_log
+from urllib.parse import urlsplit, urlunsplit
 
 # httpx logs: HTTP Request: POST https://api.telegram.org/bot<TOKEN>/<method> "..."
 # request.url is an httpx.URL object, not a str — redact via str(value).
@@ -17,7 +16,7 @@ _TELEGRAM_BOT_URL_RE = re.compile(
     r"https://api\.telegram\.org/bot[^/\s]+/([A-Za-z0-9_]+)"
 )
 _TELEGRAM_BOT_TOKEN_RE = re.compile(r"\b\d{6,}:[A-Za-z0-9_-]{20,}\b")
-# Any http(s) URL with a query string — scrub via safe_url_for_log.
+# Any http(s) URL with a query string — remove every query parameter.
 _HTTP_URL_WITH_QUERY_RE = re.compile(
     r"https?://[^\s<>\"']+\?[^\s<>\"']+",
     re.IGNORECASE,
@@ -25,14 +24,15 @@ _HTTP_URL_WITH_QUERY_RE = re.compile(
 
 
 def _strip_url_query(match: re.Match[str]) -> str:
-    return safe_url_for_log(match.group(0)) or match.group(0)
+    parts = urlsplit(match.group(0))
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
 
 
 def _redact_telegram_secrets(value: str) -> str:
     """Replace Bot API URLs with the method name; mask bare tokens; strip URL queries."""
-    text = _TELEGRAM_BOT_URL_RE.sub(r"\1", value)
-    text = _TELEGRAM_BOT_TOKEN_RE.sub("<redacted-bot-token>", text)
-    return _HTTP_URL_WITH_QUERY_RE.sub(_strip_url_query, text)
+    text = _HTTP_URL_WITH_QUERY_RE.sub(_strip_url_query, value)
+    text = _TELEGRAM_BOT_URL_RE.sub(r"\1", text)
+    return _TELEGRAM_BOT_TOKEN_RE.sub("<redacted-bot-token>", text)
 
 
 def _redact_value(value: Any) -> Any:
@@ -88,7 +88,9 @@ def configure_logging(
             existing.setFormatter(formatter)
             existing.addFilter(redact_filter)
 
-    logging.getLogger("httpx").addFilter(redact_filter)
+    httpx_logger = logging.getLogger("httpx")
+    httpx_logger.addFilter(redact_filter)
+    httpx_logger.setLevel(logging.WARNING)  # Polling requests are routine, not send progress.
 
     file_target = log_file or os.getenv("LOG_FILE")
     if file_target:

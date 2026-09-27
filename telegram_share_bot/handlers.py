@@ -49,6 +49,7 @@ from telegram_share_bot.downloader import (
     MediaKind,
     TimeRange,
     VideoQualityPolicy,
+    VideoUnavailableError,
     cleanup_media,
     download_media,
     ensure_full_media_duration,
@@ -68,6 +69,66 @@ from telegram_share_bot.user_settings import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(slots=True)
+class _SendTrace:
+    operation_id: str
+    route: str
+    media_format: MediaFormat
+    time_range: TimeRange | None
+    user_id: int | None
+    started_at: float = field(default_factory=time.monotonic)
+    cache_outcome: str = "miss"
+
+    def event(
+        self,
+        stage: str,
+        *,
+        stage_started_at: float | None = None,
+        failure: str = "none",
+        level: int = logging.INFO,
+        exc_info: bool = False,
+    ) -> None:
+        """Log an operation stage without its URL, caption, or Telegram token."""
+        stage_seconds = (
+            f"{time.monotonic() - stage_started_at:.1f}"
+            if stage_started_at is not None
+            else "-"
+        )
+        logger.log(
+            level,
+            "send op=%s user_id=%s route=%s format=%s scope=%s stage=%s elapsed_s=%.1f "
+            "stage_s=%s cache=%s failure=%s",
+            self.operation_id,
+            self.user_id if self.user_id is not None else "-",
+            self.route,
+            self.media_format.value,
+            "clip" if self.time_range is not None else "full",
+            stage,
+            time.monotonic() - self.started_at,
+            stage_seconds,
+            self.cache_outcome,
+            failure,
+            exc_info=exc_info,
+        )
+
+
+def _download_failure_category(exc: DownloadError) -> str:
+    """Classify expected failures without putting source text in logs."""
+    message = str(exc)
+    if isinstance(exc, VideoUnavailableError):
+        return "no_video"
+    if message == strings.AUDIO_UNAVAILABLE:
+        return "no_audio"
+    if message.startswith("Download timed out"):
+        return "timeout"
+    if message.startswith(("Media exceeds", "Clips longer")):
+        return "duration_limit"
+    if message.startswith(("File exceeds", "File is too large", "The best source quality")):
+        return "size_limit"
+    return "source_retryable" if exc.retryable else "source"
+
 
 _STALE_INLINE_QUERY_MARKERS = (
     "query is too old",
@@ -991,7 +1052,9 @@ async def _run_direct_download(
     preferences: UserSharingSettings | None = None,
     skip_cache: bool = False,
 ) -> None:
-    display_url = safe_url_for_log(url)
+    trace = _SendTrace(uuid4().hex[:12], "direct", media_format, time_range, user_id)
+    trace.cache_outcome = "bypass" if skip_cache else "miss"
+    trace.event("start")
     cache = _cache(context)
     settings = _settings(context)
     if preferences is None:
@@ -1009,7 +1072,7 @@ async def _run_direct_download(
             )
         )
         if cached is not None:
-            logger.info("Cache hit for direct URL: %s", display_url)
+            trace.cache_outcome = "hit"
             try:
                 await _edit_direct_status(status_message, strings.DIRECT_UPLOADING)
                 await _send_cached_media_to_chat(
@@ -1021,20 +1084,20 @@ async def _run_direct_download(
                     original_url=url,
                 )
                 await _remove_completed_direct_status(status_message)
+                trace.event("complete")
                 return
-            except BadRequest as exc:
-                logger.warning(
-                    "Cached file_id invalid for %s, evicting and falling back: %s",
-                    display_url,
-                    exc.message,
-                )
+            except BadRequest:
+                trace.event("cache_fallback", failure="invalid_file_id", level=logging.WARNING)
+                trace.cache_outcome = "evicted"
                 await cache.evict_entry(cached)
             except Exception:
-                logger.exception("Failed sending cached media for %s, falling back", display_url)
+                trace.event("cache_fallback", failure="cache_send", level=logging.WARNING)
+                trace.cache_outcome = "evicted"
                 await cache.evict_entry(cached)
 
     denial = await _try_acquire_user_download_slot(context, user_id)
     if denial is not None:
+        trace.event("denied", failure="rate_limit")
         await _edit_direct_status(status_message, denial)
         return
 
@@ -1085,12 +1148,16 @@ async def _run_direct_download(
                         original_url=url,
                     )
                     await _remove_completed_direct_status(status_message)
+                    trace.cache_outcome = "direct_url"
+                    trace.event("complete")
                     return
+                trace.event("direct_url_fallback", failure="telegram_fetch")
 
         await _edit_direct_status(status_message, strings.DIRECT_DOWNLOADING)
         loop = asyncio.get_running_loop()
 
         def show_optimization_status() -> None:
+            trace.event("optimization")
             future = asyncio.run_coroutine_threadsafe(
                 _edit_direct_status(status_message, strings.OPTIMIZING_FOR_TELEGRAM), loop
             )
@@ -1098,6 +1165,7 @@ async def _run_direct_download(
                 future.result(timeout=5)
 
         async with _download_slot(context):
+            download_started_at = time.monotonic()
             media = await download_media(
                 url=url,
                 download_dir=settings.download_dir,
@@ -1115,7 +1183,9 @@ async def _run_direct_download(
                 max_media_duration_seconds=settings.max_media_duration_seconds,
                 on_optimizing=show_optimization_status,
             )
+            trace.event("download", stage_started_at=download_started_at)
             await _edit_direct_status(status_message, strings.DIRECT_UPLOADING)
+            upload_started_at = time.monotonic()
             sent_msg = await _send_media_to_chat(
                 context,
                 chat_id,
@@ -1125,6 +1195,7 @@ async def _run_direct_download(
                 preferences=preferences,
                 original_url=url,
             )
+            trace.event("upload", stage_started_at=upload_started_at)
         file_id, result_kind = _file_id_and_kind_from_message(sent_msg)
         await cache.set(
             url=url,
@@ -1138,14 +1209,15 @@ async def _run_direct_download(
             video_height=_message_video_height(sent_msg),
         )
         await _remove_completed_direct_status(status_message)
+        trace.event("complete")
     except DownloadError as exc:
-        logger.warning("Direct download failed for %s: %s", display_url, exc)
+        trace.event("failed", failure=_download_failure_category(exc), level=logging.WARNING)
         await _edit_direct_status(status_message, str(exc) or strings.DIRECT_DOWNLOAD_FAILED)
-    except (NetworkError, TimedOut) as exc:
-        logger.warning("Direct upload failed for %s: %s", display_url, exc)
+    except (NetworkError, TimedOut):
+        trace.event("failed", failure="upload_network", level=logging.WARNING)
         await _edit_direct_status(status_message, strings.DIRECT_UPLOAD_FAILED)
     except Exception:
-        logger.exception("Failed to handle direct URL message")
+        trace.event("failed", failure="unexpected", level=logging.ERROR, exc_info=True)
         await _edit_direct_status(status_message, strings.DIRECT_SEND_FAILED)
     finally:
         await _release_user_download_slot(context, user_id)
@@ -1390,9 +1462,11 @@ async def chosen_inline_result(update: Update, context: ContextTypes.DEFAULT_TYP
         )
         return
 
-    display_url = safe_url_for_log(url)
     denial = await _try_acquire_user_download_slot(context, user_id)
     if denial is not None:
+        _SendTrace(uuid4().hex[:12], "inline", media_format, time_range, user_id).event(
+            "denied", failure="rate_limit"
+        )
         await _edit_inline_text(
             context,
             inline_message_id,
@@ -1400,7 +1474,6 @@ async def chosen_inline_result(update: Update, context: ContextTypes.DEFAULT_TYP
         )
         return
 
-    logger.info("Chosen inline result; preparing media for %s", display_url)
     tasks = _task_map(context)
     existing = tasks.get(inline_message_id)
     if existing is not None and not existing.done():
@@ -1706,7 +1779,6 @@ async def cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             strings.INLINE_CANCELLED,
             reply_markup=_EMPTY_KEYBOARD,
         )
-        logger.info("Cancelled inline prepare for message %s", inline_message_id)
 
     _pending_map(context).pop(result_id, None)
 
@@ -1732,7 +1804,8 @@ async def _prepare_inline_media(
     display_url = safe_url_for_log(url)
     media: DownloadedMedia | None = None
     keep_pending_for_retry = False
-    started_at = time.monotonic()
+    trace = _SendTrace(uuid4().hex[:12], "inline", media_format, time_range, user_id)
+    trace.event("start")
 
     try:
         # 1. Attempt instant send from cache
@@ -1746,7 +1819,7 @@ async def _prepare_inline_media(
             )
         )
         if cached is not None:
-            logger.info("Cache hit for inline media: %s", display_url)
+            trace.cache_outcome = "hit"
             try:
                 if inline_message_id in _cancelled_set(context):
                     return
@@ -1762,24 +1835,15 @@ async def _prepare_inline_media(
                     inline_message_id=inline_message_id,
                     reply_markup=_EMPTY_KEYBOARD,
                 )
-                logger.info(
-                    "Inline media sent from cache for %s (%s)",
-                    display_url,
-                    cached.kind.value,
-                )
+                trace.event("complete")
                 return
-            except BadRequest as exc:
-                logger.warning(
-                    "Cached file_id invalid in inline edit for %s, evicting and falling back: %s",
-                    display_url,
-                    exc.message,
-                )
+            except BadRequest:
+                trace.event("cache_fallback", failure="invalid_file_id", level=logging.WARNING)
+                trace.cache_outcome = "evicted"
                 await cache.evict_entry(cached)
             except Exception:
-                logger.exception(
-                    "Failed editing inline media from cache for %s, falling back",
-                    display_url,
-                )
+                trace.event("cache_fallback", failure="cache_send", level=logging.WARNING)
+                trace.cache_outcome = "evicted"
                 await cache.evict_entry(cached)
 
         # 2. Cache miss or fallback to download pipeline
@@ -1838,12 +1902,10 @@ async def _prepare_inline_media(
                         inline_message_id=inline_message_id,
                         reply_markup=_EMPTY_KEYBOARD,
                     )
-                    logger.info(
-                        "Inline media ready via direct URL for %s (%s)",
-                        display_url,
-                        kind.value,
-                    )
+                    trace.cache_outcome = "direct_url"
+                    trace.event("complete")
                     return
+                trace.event("direct_url_fallback", failure="telegram_fetch")
 
         await _edit_inline_text(
             context,
@@ -1855,6 +1917,7 @@ async def _prepare_inline_media(
         loop = asyncio.get_running_loop()
 
         def show_optimization_status() -> None:
+            trace.event("optimization")
             future = asyncio.run_coroutine_threadsafe(
                 _edit_inline_text(
                     context,
@@ -1871,11 +1934,7 @@ async def _prepare_inline_media(
             if inline_message_id in _cancelled_set(context):
                 return
             if time.monotonic() - queue_started_at >= 0.1:
-                logger.info(
-                    "Inline download waited %.1fs for a slot: %s",
-                    time.monotonic() - queue_started_at,
-                    display_url,
-                )
+                trace.event("queue", stage_started_at=queue_started_at)
             download_started_at = time.monotonic()
             media = await download_media(
                 url=url,
@@ -1894,11 +1953,7 @@ async def _prepare_inline_media(
                 max_media_duration_seconds=settings.max_media_duration_seconds,
                 on_optimizing=show_optimization_status,
             )
-            logger.info(
-                "Inline download completed in %.1fs for %s",
-                time.monotonic() - download_started_at,
-                display_url,
-            )
+            trace.event("download", stage_started_at=download_started_at)
             if inline_message_id in _cancelled_set(context):
                 return
             await _edit_inline_text(
@@ -1909,11 +1964,7 @@ async def _prepare_inline_media(
             )
             upload_started_at = time.monotonic()
             file_id, title, kind, video_height = await _upload_for_file_id(context, settings, media)
-            logger.info(
-                "Inline Telegram upload completed in %.1fs for %s",
-                time.monotonic() - upload_started_at,
-                display_url,
-            )
+            trace.event("upload", stage_started_at=upload_started_at)
         await cache.set(
             url=url,
             file_id=file_id,
@@ -1939,19 +1990,14 @@ async def _prepare_inline_media(
             inline_message_id=inline_message_id,
             reply_markup=_EMPTY_KEYBOARD,
         )
-        logger.info(
-            "Inline media ready for %s (%s) in %.1fs",
-            display_url,
-            kind.value,
-            time.monotonic() - started_at,
-        )
+        trace.event("complete")
     except asyncio.CancelledError:
-        logger.info("Inline prepare cancelled for %s", display_url)
+        trace.event("cancelled")
         raise
     except DownloadError as exc:
         if inline_message_id in _cancelled_set(context):
             return
-        logger.warning("Inline download failed for %s: %s", display_url, exc)
+        trace.event("failed", failure=_download_failure_category(exc), level=logging.WARNING)
         keep_pending_for_retry = exc.retryable
         if keep_pending_for_retry:
             _store_pending_url(
@@ -1975,10 +2021,10 @@ async def _prepare_inline_media(
                 else _EMPTY_KEYBOARD
             ),
         )
-    except (NetworkError, TimedOut) as exc:
+    except (NetworkError, TimedOut):
         if inline_message_id in _cancelled_set(context):
             return
-        logger.warning("Inline upload failed for %s: %s", display_url, exc)
+        trace.event("failed", failure="upload_network", level=logging.WARNING)
         keep_pending_for_retry = True
         _store_pending_url(
             context,
@@ -2000,7 +2046,7 @@ async def _prepare_inline_media(
     except Exception:
         if inline_message_id in _cancelled_set(context):
             return
-        logger.exception("Inline prepare failed for %s", display_url)
+        trace.event("failed", failure="unexpected", level=logging.ERROR, exc_info=True)
         await _edit_inline_text(
             context,
             inline_message_id,
@@ -2205,12 +2251,11 @@ async def _edit_inline_text(
             inline_message_id=inline_message_id,
             reply_markup=reply_markup if reply_markup is not None else _EMPTY_KEYBOARD,
         )
-    except TelegramError as exc:
-        logger.warning(
-            "Could not edit inline message %s: %s",
-            inline_message_id,
-            exc,
-        )
+    except BadRequest as exc:
+        if "message is not modified" not in str(exc).lower():
+            logger.warning("Could not edit inline status category=bad_request")
+    except TelegramError:
+        logger.warning("Could not edit inline status category=telegram_error")
 
 
 def _input_media(
@@ -2290,12 +2335,7 @@ async def _upload_direct_url_for_file_id(
             except TelegramError:
                 logger.debug("Could not delete storage message %s", sent_msg.message_id)
         return file_id, stream.title, result_kind
-    except TelegramError as exc:
-        logger.info(
-            "Telegram direct URL fetch not supported or failed for %s: %s",
-            safe_url_for_log(stream.direct_url),
-            exc,
-        )
+    except TelegramError:
         return None
 
 
@@ -2401,11 +2441,10 @@ async def _send_media_to_chat(
             if attempt >= _UPLOAD_MAX_ATTEMPTS:
                 break
             delay = _UPLOAD_RETRY_BASE_DELAY_SECONDS * attempt
-            logger.warning(
-                "Telegram upload attempt %s/%s failed (%s); retrying in %.1fs",
+            logger.info(
+                "Telegram upload retry attempt=%s/%s delay_s=%.1f category=network",
                 attempt,
                 _UPLOAD_MAX_ATTEMPTS,
-                exc,
                 delay,
             )
             await asyncio.sleep(delay)
