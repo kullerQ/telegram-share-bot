@@ -1018,6 +1018,41 @@ class TestVideoIntegrity(unittest.TestCase):
 
 
 class TestVideoOptimization(unittest.TestCase):
+    def test_normalizes_full_range_h264_before_telegram_delivery(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "slideshow.mp4"
+            source.write_bytes(b"source")
+            commands: list[list[str]] = []
+
+            def encode(argv: list[str], output: Path, **kwargs: object) -> None:
+                commands.append(argv)
+                output.write_bytes(b"normalized")
+
+            with (
+                patch("telegram_share_bot.media.transcode.shutil.which", return_value="ffmpeg"),
+                patch(
+                    "telegram_share_bot.media.transcode._probe_video_file",
+                    side_effect=[
+                        _VideoProbe(10, "h264", "yuvj420p", "aac", 1080, 1920),
+                        _VideoProbe(10, "h264", "yuv420p", "aac", 1080, 1920),
+                    ],
+                ),
+                patch(
+                    "telegram_share_bot.media.transcode._run_bounded_clip_ffmpeg",
+                    side_effect=encode,
+                ),
+            ):
+                result = _optimize_video_file(
+                    source,
+                    max_file_bytes=1024 * 1024,
+                    deadline=9999999999,
+                    abort_event=None,
+                    on_optimizing=None,
+                )
+            self.assertTrue(result.exists())
+            self.assertEqual(commands[0][commands[0].index("-c:v") + 1], "libx264")
+            self.assertIn("out_range=tv", commands[0][commands[0].index("-vf") + 1])
+
     def test_small_incompatible_sources_are_normalized_without_needless_video_encoding(
         self,
     ) -> None:

@@ -192,6 +192,7 @@ def extract_slideshow(
     *,
     max_images: int = DEFAULT_SLIDESHOW_MAX_IMAGES,
     https_only: bool = False,
+    socket_timeout: float = 30,
 ) -> SlideshowSource:
     """Extract image URLs and music from a TikTok photo post.
 
@@ -202,7 +203,7 @@ def extract_slideshow(
         ydl_opts: dict[str, Any] = {
             "quiet": True,
             "no_warnings": True,
-            "socket_timeout": 30,
+            "socket_timeout": socket_timeout,
         }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:  # type: ignore[arg-type]
             ie = ydl.get_info_extractor("TikTok")

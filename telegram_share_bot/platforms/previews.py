@@ -13,12 +13,15 @@ from urllib.parse import urlencode, urljoin, urlsplit, urlunsplit
 
 import httpx
 
+from telegram_share_bot.media.models import DownloadError
 from telegram_share_bot.platforms.icons import video_thumbnail_url
 from telegram_share_bot.platforms.urls import normalize_url, safe_url_for_log
+from telegram_share_bot.tiktok.source import TikTokPhotoRef, extract_slideshow
 
 logger = logging.getLogger(__name__)
 
 _LOOKUP_TIMEOUT_SECONDS = 1.5
+_TIKTOK_LOOKUP_TIMEOUT_SECONDS = 3.5
 _MAX_HTML_BYTES = 96 * 1024
 _MAX_JSON_BYTES = 256 * 1024
 _CACHE_TTL_SECONDS = 300
@@ -124,9 +127,25 @@ async def _lookup_tiktok_media(url: str, client: httpx.AsyncClient) -> Preview |
         if match is None:
             return None
         url = urlunsplit(("https", "www.tiktok.com", resolved.path, "", ""))
+        parsed = urlsplit(url)
     if match is not None and match.group(1) == "photo":
-        # Signed TikTok slideshow covers can render as blank inline thumbnails.
-        return None
+        ref = TikTokPhotoRef(
+            user=parsed.path.split("/")[1],
+            video_id=match.group(2),
+            canonical_url=urlunsplit(("https", "www.tiktok.com", parsed.path, "", "")),
+        )
+        try:
+            source = await asyncio.to_thread(
+                extract_slideshow,
+                ref,
+                max_images=1,
+                https_only=True,
+                socket_timeout=3,
+            )
+        except DownloadError:
+            return None
+        image_url = _trusted_image_url(next(iter(source.image_urls), None), "tiktok")
+        return Preview(image_url) if image_url else None
     return await _lookup_tiktok(url, client)
 
 
@@ -199,7 +218,7 @@ async def _lookup_reddit(url: str, client: httpx.AsyncClient) -> Preview | None:
 
 
 async def resolve_preview(url: str) -> Preview | None:
-    """Find a video thumbnail within a short time limit; return None for logo fallback."""
+    """Find a media thumbnail within a short time limit; return None for logo fallback."""
     youtube = video_thumbnail_url(url)
     if youtube is not None:
         return Preview(youtube, 320, 180)
@@ -227,10 +246,13 @@ async def resolve_preview(url: str) -> Preview | None:
         target = url
     started = time.monotonic()
     preview: Preview | None = None
+    lookup_timeout = (
+        _TIKTOK_LOOKUP_TIMEOUT_SECONDS if platform == "tiktok" else _LOOKUP_TIMEOUT_SECONDS
+    )
     try:
-        async with asyncio.timeout(_LOOKUP_TIMEOUT_SECONDS):
+        async with asyncio.timeout(lookup_timeout):
             async with httpx.AsyncClient(
-                timeout=_LOOKUP_TIMEOUT_SECONDS,
+                timeout=lookup_timeout,
                 follow_redirects=False,
                 headers={"User-Agent": "Mozilla/5.0 (compatible; TelegramShareBot/1.0)"},
             ) as client:
