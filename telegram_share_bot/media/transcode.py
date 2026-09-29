@@ -338,7 +338,7 @@ def _optimize_video_file(
             if copy_video
             else [
                 "-vf",
-                "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+                "scale=trunc(iw/2)*2:trunc(ih/2)*2:out_range=tv,format=yuv420p",
                 "-c:v",
                 "libx264",
                 "-preset",

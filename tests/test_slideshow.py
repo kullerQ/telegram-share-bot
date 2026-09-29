@@ -311,6 +311,7 @@ class TestBuildFfmpegArgv(unittest.TestCase):
         # 3 slides + 3 nav overlays
         self.assertEqual(argv.count("-i"), 6)
         fc = argv[argv.index("-filter_complex") + 1]
+        self.assertIn("in_range=pc:out_range=tv", fc)
         self.assertIn("overlay=", fc)
         self.assertIn("shortest=1", fc)
         # Active nav index cycles with slot index

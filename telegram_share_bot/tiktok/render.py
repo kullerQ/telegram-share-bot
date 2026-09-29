@@ -70,7 +70,8 @@ def _build_ffmpeg_argv(
         argv.extend(["-i", str(audio_path)])
 
     scale = (
-        f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+        f"scale={width}:{height}:force_original_aspect_ratio=decrease:"
+        "in_range=pc:out_range=tv,"
         f"pad={width}:{height}:-1:-1:color=black,setsar=1,fps=30"
     )
     # TikTok places page dots just above the bottom UI chrome.
