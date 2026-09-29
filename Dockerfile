@@ -21,7 +21,7 @@ RUN pip install --no-cache-dir -r requirements.txt \
     && pip uninstall -y pip setuptools wheel \
     && find /opt/venv -type d \( -name "__pycache__" -o -name "tests" -o -name "test" \) -prune -exec rm -rf {} + \
     && find /opt/venv -type f \( -name "*.pyc" -o -name "*.pyo" \) -delete \
-    && find /opt/venv -type f -name "*.so" -exec strip --strip-unneeded {} + || true
+    && find /opt/venv -type f -name "*.so" -exec sh -c 'for file do strip --strip-unneeded "$file" 2>/dev/null || true; done' sh {} +
 
 # ---------------------------------------------------------------------------
 # Compress static ffmpeg with UPX (~4x smaller; same codecs).
