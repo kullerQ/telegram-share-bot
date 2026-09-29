@@ -136,7 +136,7 @@ jobs:
           error_file="$(mktemp)"
           if docker buildx imagetools inspect "${image_name}:${VERSION}" >/dev/null 2>"${error_file}"; then
             echo "present=true" >> "$GITHUB_OUTPUT"
-          elif grep -Eiq 'manifest unknown|no such manifest|MANIFEST_UNKNOWN|404 Not Found' "${error_file}"; then
+          elif grep -Eiq 'manifest unknown|no such manifest|MANIFEST_UNKNOWN|404 Not Found|: not found$' "${error_file}"; then
             echo "present=false" >> "$GITHUB_OUTPUT"
           else
             cat "${error_file}" >&2

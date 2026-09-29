@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
+from io import StringIO
+from unittest.mock import patch
 
-from scripts.check_release_version import is_next_version, parse_version, validate
+from scripts.check_release_version import is_next_version, main, parse_version, validate
 
 
 class TestReleaseVersion(unittest.TestCase):
@@ -25,6 +28,38 @@ class TestReleaseVersion(unittest.TestCase):
         self.assertTrue(is_next_version((1, 2, 3), (1, 2, 4)))
         self.assertTrue(is_next_version((1, 2, 3), (1, 3, 0)))
         self.assertTrue(is_next_version((1, 2, 3), (2, 0, 0)))
+
+    def test_allows_retrying_an_unpublished_version_only_when_explicit(self) -> None:
+        with self.assertRaises(ValueError):
+            validate("1.2.3", "1.2.3")
+        self.assertEqual(
+            validate("1.2.3", "1.2.3", allow_unreleased_retry=True),
+            "1.2.3",
+        )
+
+    def test_command_allows_same_version_when_its_release_tag_is_absent(self) -> None:
+        with (
+            patch("scripts.check_release_version.Path.read_text", return_value="1.2.3"),
+            patch("scripts.check_release_version._version_at_ref", return_value="1.2.3"),
+            patch(
+                "scripts.check_release_version._release_tag_exists",
+                return_value=False,
+            ) as has_tag,
+            redirect_stdout(StringIO()),
+        ):
+            self.assertEqual(main(["--base-ref", "origin/main"]), 0)
+        has_tag.assert_called_once_with("1.2.3")
+
+    def test_command_rejects_same_version_when_its_release_tag_exists(self) -> None:
+        error_output = StringIO()
+        with (
+            patch("scripts.check_release_version.Path.read_text", return_value="1.2.3"),
+            patch("scripts.check_release_version._version_at_ref", return_value="1.2.3"),
+            patch("scripts.check_release_version._release_tag_exists", return_value=True),
+            redirect_stderr(error_output),
+        ):
+            self.assertEqual(main(["--base-ref", "origin/main"]), 1)
+        self.assertIn("VERSION must bump exactly one SemVer component", error_output.getvalue())
 
     def test_rejects_skipped_or_mixed_steps(self) -> None:
         for current in ((1, 2, 5), (1, 4, 0), (2, 1, 0), (1, 2, 3)):
