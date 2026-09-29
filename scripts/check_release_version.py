@@ -47,9 +47,31 @@ def _version_at_ref(ref: str) -> str | None:
     return result.stdout.strip()
 
 
-def validate(current_value: str, previous_value: str | None) -> str:
+def _release_tag_exists(version: str) -> bool:
+    git_command = shutil.which("git") or shutil.which("git.exe")
+    if git_command is None:
+        raise RuntimeError("Git is required to check release tags")
+    result = subprocess.run(
+        [git_command, "show-ref", "--verify", "--quiet", f"refs/tags/v{version}"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode not in (0, 1):
+        raise RuntimeError(f"Could not check whether release tag v{version} exists")
+    return result.returncode == 0
+
+
+def validate(
+    current_value: str,
+    previous_value: str | None,
+    *,
+    allow_unreleased_retry: bool = False,
+) -> str:
     current = parse_version(current_value)
     previous = parse_version(previous_value) if previous_value is not None else None
+    if allow_unreleased_retry and previous is not None and current == previous:
+        return ".".join(str(part) for part in current)
     if not is_next_version(previous, current):
         if previous is None:
             raise ValueError("The first release must be 1.0.0")
@@ -68,7 +90,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     current_value = Path("VERSION").read_text(encoding="utf-8").strip()
     previous_value = _version_at_ref(args.base_ref)
     try:
-        version = validate(current_value, previous_value)
+        allow_unreleased_retry = (
+            previous_value is not None
+            and parse_version(current_value) == parse_version(previous_value)
+            and not _release_tag_exists(current_value)
+        )
+        version = validate(
+            current_value,
+            previous_value,
+            allow_unreleased_retry=allow_unreleased_retry,
+        )
     except ValueError as exc:
         print(f"Release version check failed: {exc}", file=sys.stderr)
         return 1
