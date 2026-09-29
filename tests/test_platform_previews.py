@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, patch
 
 import httpx
 
+from telegram_share_bot.media.models import DownloadError
 from telegram_share_bot.platforms.previews import (
     _PREVIEW_CACHE,
     Preview,
@@ -18,6 +19,7 @@ from telegram_share_bot.platforms.previews import (
     _trusted_image_url,
     resolve_preview,
 )
+from telegram_share_bot.tiktok.source import SlideshowSource
 
 
 class TestPlatformPreviews(unittest.IsolatedAsyncioTestCase):
@@ -53,8 +55,26 @@ class TestPlatformPreviews(unittest.IsolatedAsyncioTestCase):
             Preview("https://p16-common-sign.tiktokcdn-eu.com/cover.jpg", 576, 1024),
         )
 
-    async def test_tiktok_short_photo_link_uses_logo_fallback(self) -> None:
+    async def test_tiktok_photo_uses_first_slideshow_image(self) -> None:
+        url = "https://www.tiktok.com/@user/photo/123456789"
+        image = "https://p16-common-sign.tiktokcdn-eu.com/first.jpeg"
+        source = SlideshowSource((image,), None, "post", url)
+        with patch(
+            "telegram_share_bot.platforms.previews.extract_slideshow", return_value=source
+        ) as extract:
+            async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: None)) as client:
+                preview = await _lookup_tiktok_media(url, client)
+        self.assertEqual(preview, Preview(image))
+        self.assertEqual(extract.call_args.args[0].canonical_url, url)
+        self.assertEqual(
+            extract.call_args.kwargs,
+            {"max_images": 1, "https_only": True, "socket_timeout": 3},
+        )
+
+    async def test_tiktok_short_photo_link_uses_first_slideshow_image(self) -> None:
         photo_id = "7687699407227079966"
+        canonical = f"https://www.tiktok.com/@rem0ri/photo/{photo_id}"
+        image = "https://p16-common-sign.tiktokcdn-eu.com/first.jpeg"
         requests: list[str] = []
 
         def response(request: httpx.Request) -> httpx.Response:
@@ -67,10 +87,31 @@ class TestPlatformPreviews(unittest.IsolatedAsyncioTestCase):
                 },
             )
 
-        async with httpx.AsyncClient(transport=httpx.MockTransport(response)) as client:
-            preview = await _lookup_tiktok_media("https://vt.tiktok.com/ZSqwHG2TG", client)
-        self.assertIsNone(preview)
+        source = SlideshowSource((image,), None, "post", canonical)
+        with patch(
+            "telegram_share_bot.platforms.previews.extract_slideshow", return_value=source
+        ) as extract:
+            async with httpx.AsyncClient(transport=httpx.MockTransport(response)) as client:
+                preview = await _lookup_tiktok_media("https://vt.tiktok.com/ZSqwHG2TG", client)
+        self.assertEqual(preview, Preview(image))
         self.assertEqual(requests, ["https://vt.tiktok.com/ZSqwHG2TG"])
+        self.assertEqual(extract.call_args.args[0].canonical_url, canonical)
+
+    async def test_tiktok_photo_uses_logo_when_first_image_is_unavailable(self) -> None:
+        url = "https://www.tiktok.com/@user/photo/123456789"
+        for result in (
+            SlideshowSource(("https://untrusted.example/first.jpeg",), None, "post", url),
+            DownloadError("no images"),
+        ):
+            with self.subTest(result=result), patch(
+                "telegram_share_bot.platforms.previews.extract_slideshow",
+                side_effect=result if isinstance(result, Exception) else None,
+                return_value=None if isinstance(result, Exception) else result,
+            ):
+                async with httpx.AsyncClient(
+                    transport=httpx.MockTransport(lambda _: None)
+                ) as client:
+                    self.assertIsNone(await _lookup_tiktok_media(url, client))
 
     async def test_x_page_image_and_untrusted_image_fallback(self) -> None:
         def response(request: httpx.Request) -> httpx.Response:
