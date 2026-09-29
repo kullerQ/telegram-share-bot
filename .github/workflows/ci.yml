@@ -50,6 +50,30 @@ jobs:
       - name: Tests
         run: python -m unittest discover -s tests -v
 
+  image-smoke:
+    needs: test
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build candidate image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          push: false
+          tags: telegram-share-bot:pr-${{ github.sha }}
+          provenance: false
+          sbom: false
+
+      - name: Smoke-test the image
+        run: sh scripts/smoke_docker_image.sh "telegram-share-bot:pr-${GITHUB_SHA}"
+
   build-and-push:
     needs: test
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -64,6 +88,15 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Read version
         id: version
@@ -83,15 +116,6 @@ jobs:
             fi
           fi
 
-      - uses: docker/setup-buildx-action@v3
-
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Extract metadata (tags)
         id: meta
         uses: docker/metadata-action@v5
@@ -102,18 +126,111 @@ jobs:
             type=raw,value=latest,priority=100
             type=sha,prefix=sha-
 
-      - name: Build and push
+      - name: Check for an existing version image
+        id: existing
+        env:
+          VERSION: ${{ steps.version.outputs.value }}
+          IMAGE_NAME: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+        run: |
+          image_name="${IMAGE_NAME,,}"
+          error_file="$(mktemp)"
+          if docker buildx imagetools inspect "${image_name}:${VERSION}" >/dev/null 2>"${error_file}"; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          elif grep -Eiq 'manifest unknown|no such manifest|MANIFEST_UNKNOWN|404 Not Found' "${error_file}"; then
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          else
+            cat "${error_file}" >&2
+            rm -f "${error_file}"
+            exit 1
+          fi
+          rm -f "${error_file}"
+
+      - name: Prepare a unique candidate reference
+        id: candidate-ref
+        env:
+          IMAGE_NAME: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+        run: |
+          image_name="${IMAGE_NAME,,}"
+          candidate_ref="${image_name}:candidate-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          echo "image_ref=${candidate_ref}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push an unpromoted candidate
+        id: candidate
+        if: steps.existing.outputs.present != 'true'
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
+          tags: ${{ steps.candidate-ref.outputs.image_ref }}
           labels: ${{ steps.meta.outputs.labels }}
-          # Avoid extra untagged attestation manifests in GHCR.
           provenance: false
           sbom: false
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Select the candidate to verify
+        id: target
+        env:
+          VERSION: ${{ steps.version.outputs.value }}
+          IMAGE_NAME: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          EXISTING_IMAGE: ${{ steps.existing.outputs.present }}
+          CANDIDATE_DIGEST: ${{ steps.candidate.outputs.digest }}
+        run: |
+          image_name="${IMAGE_NAME,,}"
+          if [ "$EXISTING_IMAGE" = true ]; then
+            image_ref="${image_name}:${VERSION}"
+            digest=""
+          else
+            image_ref="${image_name}@${CANDIDATE_DIGEST}"
+            digest="$CANDIDATE_DIGEST"
+          fi
+          echo "image_ref=${image_ref}" >> "$GITHUB_OUTPUT"
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+
+      - name: Pull and verify the exact candidate
+        id: verify
+        env:
+          IMAGE_REF: ${{ steps.target.outputs.image_ref }}
+          EXPECTED_DIGEST: ${{ steps.target.outputs.digest }}
+          EXPECTED_REVISION: ${{ github.sha }}
+        run: |
+          docker pull "$IMAGE_REF"
+          revision="$(docker image inspect "$IMAGE_REF" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')"
+          if [ "$revision" != "$EXPECTED_REVISION" ]; then
+            echo "Candidate revision ${revision:-<missing>} does not match ${EXPECTED_REVISION}" >&2
+            exit 1
+          fi
+          sh scripts/smoke_docker_image.sh "$IMAGE_REF"
+          if [ -n "$EXPECTED_DIGEST" ]; then
+            digest="$EXPECTED_DIGEST"
+          else
+            repo_digest="$(docker image inspect "$IMAGE_REF" --format '{{ index .RepoDigests 0 }}')"
+            digest="${repo_digest##*@}"
+          fi
+          if [ -z "$digest" ]; then
+            echo "Could not determine the verified image digest" >&2
+            exit 1
+          fi
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+
+      - name: Promote the verified candidate
+        env:
+          IMAGE_REF: ${{ steps.target.outputs.image_ref }}
+          EXPECTED_DIGEST: ${{ steps.verify.outputs.digest }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          while IFS= read -r tag; do
+            [ -n "$tag" ] || continue
+            [ "$tag" = "$IMAGE_REF" ] && continue
+            metadata_file="$(mktemp)"
+            docker buildx imagetools create --prefer-index=false --metadata-file "$metadata_file" --tag "$tag" "$IMAGE_REF"
+            actual_digest="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["containerimage.descriptor"]["digest"])' "$metadata_file")"
+            rm -f "$metadata_file"
+            if [ "$actual_digest" != "$EXPECTED_DIGEST" ]; then
+              echo "Promoted image $tag has digest $actual_digest, expected $EXPECTED_DIGEST" >&2
+              exit 1
+            fi
+          done <<< "$TAGS"
 
       - name: Configure release tag identity
         run: |

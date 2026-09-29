@@ -30,7 +30,9 @@ poplink/
 
 # Local runtime data & secrets
 downloads/
+data/
 logs/
+.dev/
 .env
 .env.*
 !.env.example
