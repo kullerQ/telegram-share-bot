@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import re
 import time
 from dataclasses import dataclass
@@ -12,6 +13,7 @@ from html.parser import HTMLParser
 from urllib.parse import urlencode, urljoin, urlsplit, urlunsplit
 
 import httpx
+from yt_dlp.jsinterp import js_number_to_string
 
 from telegram_share_bot.media.models import DownloadError
 from telegram_share_bot.media.network import GuardedAsyncHTTPTransport
@@ -33,6 +35,7 @@ _MAX_ACTIVE_LOOKUPS = 4
 _TIKTOK_PHOTO_WORKERS = 2
 _REDDIT_POST_RE = re.compile(r"^/r/[^/]+/comments/([a-zA-Z0-9]+)(?:/|$)")
 _X_STATUS_RE = re.compile(r"^/([^/]+)/status/(\d+)(?:/|$)")
+_X_SYNDICATION_URL = "https://cdn.syndication.twimg.com/tweet-result"
 _TIKTOK_MEDIA_RE = re.compile(r"^/@[^/]+/(video|photo)/(\d+)(?:/|$)")
 
 
@@ -200,6 +203,80 @@ async def _lookup_page_image(url: str, platform: str, client: httpx.AsyncClient)
     return Preview(image_url) if image_url else None
 
 
+def _x_syndication_token(status_id: str) -> str:
+    """Generate the short token used by X's public embedded-post endpoint."""
+    value = (int(status_id) / 1e15) * math.pi
+    return js_number_to_string(value, 36).translate(str.maketrans(dict.fromkeys("0.")))
+
+
+def _x_preview_from_payload(data: object) -> Preview | None:
+    if not isinstance(data, dict):
+        return None
+    posts = [data]
+    quoted = data.get("quoted_tweet")
+    if isinstance(quoted, dict):
+        posts.append(quoted)
+
+    for post in posts:
+        media = post.get("mediaDetails")
+        candidates = media if isinstance(media, list) else []
+        photos = post.get("photos")
+        if isinstance(photos, list):
+            candidates = [*candidates, *photos]
+        for item in candidates:
+            if not isinstance(item, dict):
+                continue
+            image_url = _trusted_image_url(
+                item.get("media_url_https") or item.get("media_url") or item.get("url"),
+                "x",
+            )
+            if image_url is None:
+                continue
+            parts = urlsplit(image_url)
+            if parts.hostname == "pbs.twimg.com":
+                image_url = urlunsplit(
+                    (
+                        parts.scheme,
+                        parts.netloc,
+                        parts.path,
+                        urlencode({"format": "jpg", "name": "small"}),
+                        "",
+                    )
+                )
+            sizes = item.get("sizes")
+            medium = sizes.get("medium") if isinstance(sizes, dict) else None
+            width = medium.get("w") if isinstance(medium, dict) else None
+            height = medium.get("h") if isinstance(medium, dict) else None
+            return Preview(
+                image_url,
+                width if isinstance(width, int) and width > 0 else None,
+                height if isinstance(height, int) and height > 0 else None,
+            )
+    return None
+
+
+async def _lookup_x_syndication(url: str, client: httpx.AsyncClient) -> Preview | None:
+    status = _X_STATUS_RE.match(urlsplit(url).path)
+    if status is None:
+        return None
+    status_id = status.group(2)
+    body = bytearray()
+    try:
+        async with client.stream(
+            "GET",
+            _X_SYNDICATION_URL,
+            params={"id": status_id, "token": _x_syndication_token(status_id)},
+        ) as response:
+            response.raise_for_status()
+            async for chunk in response.aiter_bytes():
+                if len(body) + len(chunk) > _MAX_JSON_BYTES:
+                    return None
+                body.extend(chunk)
+        return _x_preview_from_payload(json.loads(body))
+    except (httpx.HTTPError, ValueError, TypeError, OverflowError):
+        return None
+
+
 async def _lookup_reddit(url: str, client: httpx.AsyncClient) -> Preview | None:
     parsed = urlsplit(url)
     match = _REDDIT_POST_RE.match(parsed.path)
@@ -358,6 +435,10 @@ class PreviewResolver:
                     preview = await _lookup_tiktok_media(target, client, self._photo_work)
                 elif platform == "reddit":
                     preview = await _lookup_reddit(target, client)
+                elif platform == "x":
+                    preview = await _lookup_x_syndication(target, client)
+                    if preview is None:
+                        preview = await _lookup_page_image(target, platform, client)
                 else:
                     preview = await _lookup_page_image(target, platform, client)
         except (

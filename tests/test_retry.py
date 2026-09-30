@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from telegram.error import NetworkError
 
+from telegram_share_bot import strings
 from telegram_share_bot.config import Settings
 from telegram_share_bot.handlers import (
     PendingInline,
@@ -120,6 +121,43 @@ class TestInlineRetry(unittest.IsolatedAsyncioTestCase):
         markup = self.context.bot.edit_message_text.await_args.kwargs["reply_markup"]
         self.assertEqual(markup.inline_keyboard[0][0].callback_data, "retry:network-result")
         self.assertIn("network-result", self.context.application.bot_data["pending_inline"])
+
+    async def test_retryable_audio_source_failure_shows_guidance_and_retry(self) -> None:
+        with (
+            patch(
+                "telegram_share_bot.handlers.prepare.get_direct_stream",
+                new=AsyncMock(return_value=None),
+            ),
+            patch(
+                "telegram_share_bot.handlers.prepare.download_media",
+                new=AsyncMock(
+                    side_effect=DownloadError(
+                        strings.DOWNLOAD_FAILED_RETRYABLE,
+                        retryable=True,
+                    )
+                ),
+            ),
+        ):
+            await _prepare_inline_media(
+                self.context,
+                inline_message_id="inline-audio-source",
+                url="https://youtube.com/watch?v=example",
+                result_id="audio-source-result",
+                user_id=42,
+                media_format=MediaFormat.AUDIO,
+            )
+
+        edit = self.context.bot.edit_message_text.await_args
+        self.assertEqual(edit.kwargs["text"], strings.DOWNLOAD_FAILED_RETRYABLE)
+        markup = edit.kwargs["reply_markup"]
+        self.assertEqual(markup.inline_keyboard[0][0].text, strings.INLINE_RETRY_BUTTON)
+        self.assertEqual(
+            markup.inline_keyboard[0][0].callback_data,
+            "retry:audio-source-result",
+        )
+        self.assertIn(
+            "audio-source-result", self.context.application.bot_data["pending_inline"]
+        )
 
     async def test_permanent_download_failure_clears_cancel_button(self) -> None:
         with (

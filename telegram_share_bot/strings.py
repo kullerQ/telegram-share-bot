@@ -194,6 +194,7 @@ DOWNLOAD_TOO_LARGE = (
 )
 DOWNLOAD_EXCEEDS_LIMIT = "File exceeds the {max_mb} MB limit."
 DOWNLOAD_FAILED_GENERIC = "Download failed."
+DOWNLOAD_FAILED_RETRYABLE = "Download failed. Please try again later."
 DOWNLOAD_SLOW_SOURCE = "This video source is too slow. Try Balanced quality."
 DOWNLOAD_TIMED_OUT = "Download timed out after {timeout_seconds} seconds."
 DOWNLOAD_BUSY = "The bot is handling many media requests right now. Please try again shortly."

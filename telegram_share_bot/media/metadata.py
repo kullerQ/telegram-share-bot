@@ -6,6 +6,7 @@ import copy
 import threading
 import time
 from typing import TYPE_CHECKING, Any, cast
+from urllib.parse import urlsplit
 
 import yt_dlp
 
@@ -201,3 +202,44 @@ def source_title_and_duration(
         else None
     )
     return str(info.get("title") or "Media")[:64], duration
+
+
+def is_twitter_animation(info: dict[str, Any]) -> bool:
+    """Identify X animated GIFs, which yt-dlp downloads as silent MP4 files."""
+    extractor = info.get("extractor_key") or info.get("extractor")
+    is_twitter = isinstance(extractor, str) and extractor.casefold().startswith("twitter")
+    media_type = info.get("media_type") or info.get("type")
+    if is_twitter and isinstance(media_type, str) and media_type.casefold() in {
+        "gif",
+        "animated_gif",
+    }:
+        return True
+
+    thumbnails = info.get("thumbnails")
+    if isinstance(thumbnails, list):
+        candidates = list(thumbnails)
+    elif isinstance(thumbnails, dict):
+        candidates = [thumbnails]
+    else:
+        candidates = []
+    thumbnail = info.get("thumbnail")
+    if isinstance(thumbnail, str):
+        candidates.append({"url": thumbnail})
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        thumbnail_url = candidate.get("url")
+        if not isinstance(thumbnail_url, str):
+            continue
+        try:
+            parsed = urlsplit(thumbnail_url)
+        except ValueError:
+            continue
+        if (
+            is_twitter
+            and parsed.scheme == "https"
+            and parsed.hostname == "pbs.twimg.com"
+            and "/tweet_video_thumb/" in parsed.path.lower()
+        ):
+            return True
+    return False

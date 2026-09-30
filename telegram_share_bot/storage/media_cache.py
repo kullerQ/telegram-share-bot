@@ -30,10 +30,27 @@ _REQUIRED_CACHE_COLUMNS = {
     "title",
     "duration",
     "video_height",
+    "animation_state",
     "last_used_at",
 }
 _CACHE_MAX_ENTRIES = 10_000
 _CACHE_MAINTENANCE_BATCH_SIZE = 500
+
+
+def _is_video_cache_entry(entry: CachedMedia | None) -> bool:
+    return entry is not None and entry.kind in (MediaKind.VIDEO, MediaKind.ANIMATION)
+
+
+def _is_x_status_cache_key(key: str) -> bool:
+    parsed = urlsplit(key)
+    host = (parsed.hostname or "").lower()
+    path_parts = parsed.path.strip("/").split("/")
+    return (
+        host in {"x.com", "twitter.com"}
+        and len(path_parts) >= 3
+        and path_parts[-2] == "status"
+        and path_parts[-1].isdigit()
+    )
 
 
 class _CacheUnavailable(RuntimeError):
@@ -206,6 +223,7 @@ class MediaCache:
                         title TEXT NOT NULL,
                         duration INTEGER,
                         video_height INTEGER,
+                        animation_state INTEGER NOT NULL DEFAULT 0,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         last_used_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     );
@@ -215,6 +233,12 @@ class MediaCache:
                 if "video_height" not in columns:
                     conn.execute("ALTER TABLE media_cache ADD COLUMN video_height INTEGER")
                     columns.add("video_height")
+                if "animation_state" not in columns:
+                    conn.execute(
+                        "ALTER TABLE media_cache "
+                        "ADD COLUMN animation_state INTEGER NOT NULL DEFAULT 0"
+                    )
+                    columns.add("animation_state")
                 missing_columns = _REQUIRED_CACHE_COLUMNS - columns
                 if missing_columns:
                     raise _CacheSchemaError("media cache table is missing required columns")
@@ -257,7 +281,7 @@ class MediaCache:
             cursor = conn.cursor()
             cursor.execute(
                 """
-                SELECT file_id, media_kind, title, duration, video_height
+                SELECT file_id, media_kind, title, duration, video_height, animation_state
                 FROM media_cache
                 WHERE url = ?
                 """,
@@ -266,6 +290,16 @@ class MediaCache:
             row = cursor.fetchone()
             if row is None:
                 return None
+
+            kind = MediaKind(row[1])
+            animation_state = row[5]
+            if kind is MediaKind.VIDEO:
+                if animation_state == 2:
+                    kind = MediaKind.ANIMATION
+                elif animation_state == 0 and _is_x_status_cache_key(norm_url):
+                    # Old X cache entries may be GIFs; re-extract once to learn
+                    # whether they should be sent as an animation or a video.
+                    kind = MediaKind.LEGACY_VIDEO
 
             # Update last_used_at timestamp on access
             conn.execute(
@@ -279,7 +313,7 @@ class MediaCache:
             return CachedMedia(
                 url=norm_url,
                 file_id=row[0],
-                kind=MediaKind(row[1]),
+                kind=kind,
                 title=row[2],
                 duration=row[3],
                 video_height=row[4],
@@ -294,22 +328,34 @@ class MediaCache:
         duration: int | None,
         video_height: int | None = None,
     ) -> None:
+        stored_kind = MediaKind.VIDEO if kind is MediaKind.ANIMATION else kind
+        animation_state = 2 if kind is MediaKind.ANIMATION else 1
         with self._connection() as conn:
             conn.execute(
                 """
                 INSERT INTO media_cache (
-                    url, file_id, media_kind, title, duration, video_height, last_used_at
+                    url, file_id, media_kind, title, duration, video_height,
+                    animation_state, last_used_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, strftime('%Y-%m-%d %H:%M:%f', 'now'))
+                VALUES (?, ?, ?, ?, ?, ?, ?, strftime('%Y-%m-%d %H:%M:%f', 'now'))
                 ON CONFLICT(url) DO UPDATE SET
                     file_id = excluded.file_id,
                     media_kind = excluded.media_kind,
                     title = excluded.title,
                     duration = excluded.duration,
                     video_height = excluded.video_height,
+                    animation_state = excluded.animation_state,
                     last_used_at = strftime('%Y-%m-%d %H:%M:%f', 'now')
                 """,
-                (norm_url, file_id, kind.value, title, duration, video_height),
+                (
+                    norm_url,
+                    file_id,
+                    stored_kind.value,
+                    title,
+                    duration,
+                    video_height,
+                    animation_state,
+                ),
             )
 
     def _evict_sync(self, norm_url: str) -> bool:
@@ -391,14 +437,17 @@ class MediaCache:
         cross-policy reuse requires Telegram's measured output height.
         """
         if quality_policy == "source-best":
-            return await self.get(url, time_range=time_range, quality_policy=quality_policy)
+            best = await self.get(url, time_range=time_range, quality_policy=quality_policy)
+            return best if _is_video_cache_entry(best) else None
         if quality_policy == "auto-best":
             best = await self.get(url, time_range=time_range, quality_policy="source-best")
             auto = await self.get(url, time_range=time_range, quality_policy=quality_policy)
-            if best is None or best.kind is not MediaKind.VIDEO:
-                return auto
-            if auto is None or auto.kind is not MediaKind.VIDEO:
+            if not _is_video_cache_entry(best):
+                return auto if _is_video_cache_entry(auto) else None
+            if not _is_video_cache_entry(auto):
+                assert best is not None
                 return best
+            assert best is not None and auto is not None
             if best.video_height is None:
                 return auto if auto.video_height is not None else best
             if auto.video_height is not None and auto.video_height > best.video_height:
@@ -413,8 +462,8 @@ class MediaCache:
             known_quality = [
                 candidate
                 for candidate in balanced_candidates
-                if candidate is not None
-                and candidate.kind is MediaKind.VIDEO
+                if _is_video_cache_entry(candidate)
+                and candidate is not None
                 and candidate.video_height is not None
             ]
             if known_quality:
@@ -422,7 +471,7 @@ class MediaCache:
             # An exact-policy cache entry remains usable even when Telegram did
             # not report dimensions; cross-policy quality cannot be inferred.
             exact = balanced_candidates[2]
-            return exact if exact is not None and exact.kind is MediaKind.VIDEO else None
+            return exact if _is_video_cache_entry(exact) else None
 
         target_height = (
             int(quality_policy[:-1])
@@ -434,15 +483,16 @@ class MediaCache:
             for policy in ("source-best", "auto-best", quality_policy):
                 candidate = await self.get(url, time_range=time_range, quality_policy=policy)
                 if (
-                    candidate is not None
-                    and candidate.kind is MediaKind.VIDEO
+                    _is_video_cache_entry(candidate)
+                    and candidate is not None
                     and candidate.video_height is not None
                     and candidate.video_height >= target_height
                 ):
                     qualified_candidates.append(candidate)
             if qualified_candidates:
                 return max(qualified_candidates, key=lambda item: item.video_height or 0)
-        return await self.get(url, time_range=time_range, quality_policy=quality_policy)
+        candidate = await self.get(url, time_range=time_range, quality_policy=quality_policy)
+        return candidate if _is_video_cache_entry(candidate) else None
 
     async def evict_entry(self, cached: CachedMedia) -> bool:
         """Remove the observed entry without erasing a concurrent replacement."""

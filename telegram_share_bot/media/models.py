@@ -11,8 +11,11 @@ from telegram_share_bot import strings
 
 class MediaKind(str, Enum):
     VIDEO = "video"
+    ANIMATION = "animation"
     AUDIO = "audio"
     DOCUMENT = "document"
+    # Old X video cache entries did not distinguish animated GIFs from videos.
+    LEGACY_VIDEO = "legacy_video"
 
 
 class MediaFormat(str, Enum):
@@ -82,6 +85,10 @@ class MediaRequest:
 def _is_transient_download_error(message: str) -> bool:
     """Recognize network failures that may succeed when the user retries."""
     message = message.lower()
+    # Media CDN URLs are signed and can briefly return 403 while source metadata
+    # is being refreshed. Keep unrelated permission-denied responses permanent.
+    if "http error 403" in message and "unable to download video data" in message:
+        return True
     markers = (
         "timed out",
         "timeout",
