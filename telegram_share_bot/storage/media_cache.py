@@ -7,9 +7,11 @@ import contextlib
 import logging
 import sqlite3
 import threading
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TypeVar
+from urllib.parse import urlsplit
 
 from telegram_share_bot.media.models import MediaFormat, MediaKind, TimeRange
 from telegram_share_bot.platforms.urls import (
@@ -20,11 +22,62 @@ from telegram_share_bot.platforms.urls import (
 
 logger = logging.getLogger(__name__)
 
-# Errors that typically mean the DB file/schema vanished or is unusable.
-_RECOVERABLE_DB_ERRORS = (
-    sqlite3.OperationalError,
-    sqlite3.DatabaseError,
-)
+_T = TypeVar("_T")
+_REQUIRED_CACHE_COLUMNS = {
+    "url",
+    "file_id",
+    "media_kind",
+    "title",
+    "duration",
+    "video_height",
+    "last_used_at",
+}
+_CACHE_MAX_ENTRIES = 10_000
+_CACHE_MAINTENANCE_BATCH_SIZE = 500
+
+
+class _CacheUnavailable(RuntimeError):
+    """An optional cache operation could not safely complete."""
+
+
+class _CacheSchemaError(RuntimeError):
+    """The cache database has a schema that cannot be migrated safely."""
+
+
+def _sqlite_error_category(error: BaseException) -> str:
+    """Classify SQLite failures without including SQL values or filesystem paths."""
+    code = getattr(error, "sqlite_errorname", "")
+    if code.startswith(("SQLITE_BUSY", "SQLITE_LOCKED")):
+        return "busy"
+    if code in {"SQLITE_PERM", "SQLITE_CANTOPEN", "SQLITE_READONLY"}:
+        return "access"
+    if code.startswith(("SQLITE_CORRUPT", "SQLITE_NOTADB", "SQLITE_FORMAT")):
+        return "corrupt"
+
+    message = str(error).casefold()
+    if "database is locked" in message or "database is busy" in message:
+        return "busy"
+    if "permission denied" in message or "readonly database" in message:
+        return "access"
+    if "unable to open database file" in message or "disk i/o error" in message:
+        return "storage"
+    if "file is not a database" in message or "database disk image is malformed" in message:
+        return "corrupt"
+    if "no such table: media_cache" in message:
+        return "missing_schema"
+    if isinstance(error, _CacheSchemaError):
+        return "incompatible_schema"
+    return "database"
+
+
+def _cache_key_has_userinfo(key: str) -> bool:
+    """Detect credentials in a historical normalized URL without exposing them."""
+    source_url = key.split("#format=", 1)[0]
+    try:
+        parsed = urlsplit(source_url)
+    except ValueError:
+        return False
+    return parsed.username is not None or parsed.password is not None
 
 
 def _legacy_cache_key(url: str, time_range: TimeRange | None = None) -> str | None:
@@ -76,13 +129,54 @@ class MediaCache:
     def __init__(self, db_path: Path) -> None:
         self.db_path = db_path
         self._init_lock = threading.Lock()
-        self._init_db()
+        self._state_lock = threading.Lock()
+        self._maintenance_lock = threading.Lock()
+        self._busy_timeout_seconds = 5.0
+        self._available = True
+        self._reported_issues: set[str] = set()
+        self._credential_scan_after_rowid = 0
+        try:
+            self._init_db()
+        except (OSError, sqlite3.Error, _CacheSchemaError) as exc:
+            self._report_db_issue(_sqlite_error_category(exc), disable=True)
+
+    @property
+    def available(self) -> bool:
+        """Whether cache operations can currently use the backing database."""
+        with self._state_lock:
+            return self._available
+
+    def _report_db_issue(self, category: str, *, disable: bool) -> None:
+        with self._state_lock:
+            if disable:
+                self._available = False
+            should_log = category not in self._reported_issues
+            self._reported_issues.add(category)
+        if should_log:
+            if category == "busy" and not disable:
+                logger.warning(
+                    "Media cache temporarily skipped an operation after SQLite contention; "
+                    "the cache remains enabled."
+                )
+            else:
+                logger.warning(
+                    "Media cache disabled after SQLite %s issue; sharing will continue "
+                    "without cache. Stop the bot and follow the cache repair instructions "
+                    "in docs/README.md.",
+                    category,
+                )
+
+    def _handle_db_error(self, error: BaseException) -> _CacheUnavailable:
+        category = _sqlite_error_category(error)
+        self._report_db_issue(category, disable=category != "busy")
+        return _CacheUnavailable(category)
 
     @contextlib.contextmanager
     def _connection(self) -> Generator[sqlite3.Connection, None, None]:
-        conn = sqlite3.connect(self.db_path, timeout=10.0)
-        conn.execute("PRAGMA busy_timeout = 5000;")
+        busy_timeout_ms = int(self._busy_timeout_seconds * 1000)
+        conn = sqlite3.connect(self.db_path, timeout=self._busy_timeout_seconds)
         try:
+            conn.execute(f"PRAGMA busy_timeout = {busy_timeout_ms};")
             with conn:
                 yield conn
         finally:
@@ -90,11 +184,18 @@ class MediaCache:
 
     def _init_db(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(self.db_path, timeout=10.0)
+        main_database_missing_or_empty = (
+            not self.db_path.exists() or self.db_path.stat().st_size == 0
+        )
+        if main_database_missing_or_empty and any(
+            Path(f"{self.db_path}{suffix}").exists() for suffix in ("-wal", "-shm", "-journal")
+        ):
+            raise _CacheSchemaError("main database is missing while SQLite sidecars remain")
+        conn = sqlite3.connect(self.db_path, timeout=self._busy_timeout_seconds)
         try:
             conn.execute("PRAGMA journal_mode = WAL;")
             conn.execute("PRAGMA synchronous = NORMAL;")
-            conn.execute("PRAGMA busy_timeout = 5000;")
+            conn.execute(f"PRAGMA busy_timeout = {int(self._busy_timeout_seconds * 1000)};")
             with conn:
                 conn.execute(
                     """
@@ -113,6 +214,10 @@ class MediaCache:
                 columns = {row[1] for row in conn.execute("PRAGMA table_info(media_cache)")}
                 if "video_height" not in columns:
                     conn.execute("ALTER TABLE media_cache ADD COLUMN video_height INTEGER")
+                    columns.add("video_height")
+                missing_columns = _REQUIRED_CACHE_COLUMNS - columns
+                if missing_columns:
+                    raise _CacheSchemaError("media cache table is missing required columns")
                 conn.execute(
                     """
                     CREATE INDEX IF NOT EXISTS idx_media_cache_last_used
@@ -122,32 +227,30 @@ class MediaCache:
         finally:
             conn.close()
 
-    def _recover_db(self, exc: BaseException) -> bool:
-        """Recreate the DB schema after the file was deleted or became unusable.
+    def _run_with_recovery(self, operation: Callable[[], _T]) -> _T:
+        """Retry only a missing cache schema; never reset a live or corrupt database."""
+        if not self.available:
+            raise _CacheUnavailable("cache is disabled")
+        try:
+            return operation()
+        except (OSError, sqlite3.Error) as exc:
+            if _sqlite_error_category(exc) != "missing_schema":
+                raise self._handle_db_error(exc) from exc
 
-        Returns True if re-init succeeded. Concurrent recoveries are serialized.
-        """
-        logger.warning(
-            "Media cache DB unusable at %s (%s); recreating",
-            self.db_path,
-            exc,
-        )
-        with self._init_lock:
-            try:
-                # Drop leftover WAL/SHM/journal sidecars that can confuse a fresh file.
-                for suffix in ("-wal", "-shm", "-journal"):
-                    sidecar = Path(f"{self.db_path}{suffix}")
-                    with contextlib.suppress(OSError):
-                        sidecar.unlink(missing_ok=True)
+        try:
+            with self._init_lock:
+                if not self.available:
+                    raise _CacheUnavailable("cache is disabled")
                 self._init_db()
-                return True
-            except Exception as recover_exc:
-                logger.error(
-                    "Failed to recreate media cache DB at %s: %s",
-                    self.db_path,
-                    recover_exc,
-                )
-                return False
+        except _CacheUnavailable:
+            raise
+        except (OSError, sqlite3.Error, _CacheSchemaError) as exc:
+            raise self._handle_db_error(exc) from exc
+
+        try:
+            return operation()
+        except (OSError, sqlite3.Error) as exc:
+            raise self._handle_db_error(exc) from exc
 
     def _get_sync(self, norm_url: str) -> CachedMedia | None:
         with self._connection() as conn:
@@ -168,7 +271,7 @@ class MediaCache:
             conn.execute(
                 """
                 UPDATE media_cache
-                SET last_used_at = CURRENT_TIMESTAMP
+                SET last_used_at = strftime('%Y-%m-%d %H:%M:%f', 'now')
                 WHERE url = ?
                 """,
                 (norm_url,),
@@ -197,14 +300,14 @@ class MediaCache:
                 INSERT INTO media_cache (
                     url, file_id, media_kind, title, duration, video_height, last_used_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                VALUES (?, ?, ?, ?, ?, ?, strftime('%Y-%m-%d %H:%M:%f', 'now'))
                 ON CONFLICT(url) DO UPDATE SET
                     file_id = excluded.file_id,
                     media_kind = excluded.media_kind,
                     title = excluded.title,
                     duration = excluded.duration,
                     video_height = excluded.video_height,
-                    last_used_at = CURRENT_TIMESTAMP
+                    last_used_at = strftime('%Y-%m-%d %H:%M:%f', 'now')
                 """,
                 (norm_url, file_id, kind.value, title, duration, video_height),
             )
@@ -224,12 +327,7 @@ class MediaCache:
             return cursor.rowcount > 0
 
     def _get_with_recovery(self, norm_url: str) -> CachedMedia | None:
-        try:
-            return self._get_sync(norm_url)
-        except _RECOVERABLE_DB_ERRORS as exc:
-            if not self._recover_db(exc):
-                raise
-            return self._get_sync(norm_url)
+        return self._run_with_recovery(lambda: self._get_sync(norm_url))
 
     def _set_with_recovery(
         self,
@@ -240,28 +338,15 @@ class MediaCache:
         duration: int | None,
         video_height: int | None = None,
     ) -> None:
-        try:
-            self._set_sync(norm_url, file_id, kind, title, duration, video_height)
-        except _RECOVERABLE_DB_ERRORS as exc:
-            if not self._recover_db(exc):
-                raise
-            self._set_sync(norm_url, file_id, kind, title, duration, video_height)
+        self._run_with_recovery(
+            lambda: self._set_sync(norm_url, file_id, kind, title, duration, video_height)
+        )
 
     def _evict_with_recovery(self, norm_url: str) -> bool:
-        try:
-            return self._evict_sync(norm_url)
-        except _RECOVERABLE_DB_ERRORS as exc:
-            if not self._recover_db(exc):
-                raise
-            return self._evict_sync(norm_url)
+        return self._run_with_recovery(lambda: self._evict_sync(norm_url))
 
     def _evict_entry_with_recovery(self, cached: CachedMedia) -> bool:
-        try:
-            return self._evict_entry_sync(cached)
-        except _RECOVERABLE_DB_ERRORS as exc:
-            if not self._recover_db(exc):
-                raise
-            return self._evict_entry_sync(cached)
+        return self._run_with_recovery(lambda: self._evict_entry_sync(cached))
 
     async def get(
         self,
@@ -290,7 +375,7 @@ class MediaCache:
             if cached is not None:
                 return cached
             return None
-        except _RECOVERABLE_DB_ERRORS:
+        except _CacheUnavailable:
             return None
 
     async def get_preferred_video(
@@ -363,8 +448,98 @@ class MediaCache:
         """Remove the observed entry without erasing a concurrent replacement."""
         try:
             return await asyncio.to_thread(self._evict_entry_with_recovery, cached)
-        except _RECOVERABLE_DB_ERRORS:
+        except _CacheUnavailable:
             return False
+
+    def _maintain_sync(self, max_entries: int, batch_size: int) -> tuple[int, int]:
+        """Remove a bounded batch of credential keys and least-recently-used rows."""
+        with self._maintenance_lock:
+            next_scan_rowid = self._credential_scan_after_rowid
+
+            def maintain() -> tuple[int, int, int]:
+                nonlocal next_scan_rowid
+                credential_rows_removed = 0
+                rows_pruned = 0
+                with self._connection() as conn:
+                    candidates = conn.execute(
+                        """
+                        SELECT rowid, url FROM media_cache
+                        WHERE rowid > ? AND instr(url, '@') > 0
+                        ORDER BY rowid LIMIT ?
+                        """,
+                        (self._credential_scan_after_rowid, batch_size),
+                    ).fetchall()
+                    if not candidates and self._credential_scan_after_rowid:
+                        candidates = conn.execute(
+                            """
+                            SELECT rowid, url FROM media_cache
+                            WHERE instr(url, '@') > 0
+                            ORDER BY rowid LIMIT ?
+                            """,
+                            (batch_size,),
+                        ).fetchall()
+
+                    if candidates:
+                        next_scan_rowid = int(candidates[-1][0])
+                        credential_keys = [
+                            str(row[1])
+                            for row in candidates
+                            if _cache_key_has_userinfo(str(row[1]))
+                        ]
+                        if credential_keys:
+                            placeholders = ",".join("?" for _ in credential_keys)
+                            cursor = conn.execute(
+                                f"DELETE FROM media_cache WHERE url IN ({placeholders})",
+                                credential_keys,
+                            )
+                            credential_rows_removed = max(cursor.rowcount, 0)
+                    else:
+                        next_scan_rowid = 0
+
+                    count_row = conn.execute(
+                        "SELECT COUNT(*) FROM media_cache"
+                    ).fetchone()
+                    current_count = int(count_row[0]) if count_row is not None else 0
+                    excess = max(0, current_count - max_entries)
+                    prune_limit = min(excess, batch_size)
+                    if prune_limit:
+                        cursor = conn.execute(
+                            """
+                            DELETE FROM media_cache
+                            WHERE rowid IN (
+                                SELECT rowid FROM media_cache
+                                ORDER BY last_used_at ASC, rowid ASC
+                                LIMIT ?
+                            )
+                            """,
+                            (prune_limit,),
+                        )
+                        rows_pruned = max(cursor.rowcount, 0)
+
+                return credential_rows_removed, rows_pruned, next_scan_rowid
+
+            try:
+                credential_rows_removed, rows_pruned, committed_scan_rowid = (
+                    self._run_with_recovery(maintain)
+                )
+            except _CacheUnavailable:
+                return 0, 0
+            self._credential_scan_after_rowid = committed_scan_rowid
+            return rows_pruned, credential_rows_removed
+
+    async def maintain(
+        self,
+        *,
+        max_entries: int = _CACHE_MAX_ENTRIES,
+        batch_size: int = _CACHE_MAINTENANCE_BATCH_SIZE,
+    ) -> tuple[int, int]:
+        """Prune old metadata and historical credential keys in bounded batches.
+
+        Returns (least-recently-used rows removed, credential-bearing rows removed).
+        """
+        bounded_max = max(0, max_entries)
+        bounded_batch = max(1, min(batch_size, _CACHE_MAINTENANCE_BATCH_SIZE))
+        return await asyncio.to_thread(self._maintain_sync, bounded_max, bounded_batch)
 
     async def set(
         self,
@@ -382,7 +557,7 @@ class MediaCache:
         """Cache media file_id under the normalized URL.
 
         If the DB file was deleted mid-run, recreates it and retries once.
-        Failures after recovery are logged and swallowed so downloads still succeed.
+        Database failures are isolated so delivery can continue without the cache.
         """
         if not is_public_cacheable_url(url):
             logger.debug("Skipping cache for non-public URL: %s", safe_url_for_log(url))
@@ -400,12 +575,8 @@ class MediaCache:
                 self._set_with_recovery, key, file_id, kind, title, duration, video_height
             )
             logger.debug("Cached file_id for %s (%s)", key, kind.value)
-        except _RECOVERABLE_DB_ERRORS as exc:
-            logger.warning(
-                "Could not write media cache for %s: %s",
-                safe_url_for_log(key),
-                exc,
-            )
+        except _CacheUnavailable:
+            return
 
     async def evict(
         self,
@@ -435,7 +606,7 @@ class MediaCache:
                     removed = (
                         await asyncio.to_thread(self._evict_with_recovery, legacy_key)
                     ) or removed
-        except _RECOVERABLE_DB_ERRORS:
+        except _CacheUnavailable:
             return
         if removed:
             logger.info("Evicted %s from media cache", safe_url_for_log(key))
