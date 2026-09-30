@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from pathlib import Path
 
@@ -46,6 +47,7 @@ from telegram_share_bot.handlers import (
 )
 from telegram_share_bot.logging_filters import configure_logging
 from telegram_share_bot.media.jobs import cleanup_stale_downloads
+from telegram_share_bot.media.work import MediaWorkSupervisor
 from telegram_share_bot.storage.media_cache import MediaCache
 from telegram_share_bot.storage.user_settings import UserSettingsStore
 
@@ -57,6 +59,10 @@ App = Application[
     dict[str, object],
     JobQueue[ContextTypes.DEFAULT_TYPE],
 ]
+
+_MEDIA_MAINTENANCE_TASK = "media_maintenance_task"
+_MEDIA_MAINTENANCE_STOP = "media_maintenance_stop"
+_MEDIA_MAINTENANCE_INTERVAL_SECONDS = 300
 
 
 async def _validate_storage_chat(application: App, settings: Settings) -> None:
@@ -72,12 +78,40 @@ async def _validate_storage_chat(application: App, settings: Settings) -> None:
         raise RuntimeError(strings.CONFIG_STORAGE_CHAT_NOT_PRIVATE)
 
 
+async def _maintain_downloads(download_dir: Path, stop_event: asyncio.Event) -> None:
+    """Periodically remove abandoned work directories without blocking updates."""
+    while not stop_event.is_set():
+        try:
+            await asyncio.wait_for(
+                stop_event.wait(), timeout=_MEDIA_MAINTENANCE_INTERVAL_SECONDS
+            )
+        except TimeoutError:
+            try:
+                removed = await asyncio.to_thread(cleanup_stale_downloads, download_dir)
+                if removed:
+                    logging.getLogger(__name__).info(
+                        "Removed %s stale download director%s",
+                        removed,
+                        "y" if removed == 1 else "ies",
+                    )
+            except Exception:
+                logging.getLogger(__name__).warning(
+                    "Periodic download cleanup failed", exc_info=True
+                )
+
+
 async def _post_init(application: App) -> None:
     """Run startup housekeeping and fetch bot identity if needed."""
     settings = application.bot_data.get("settings")
     download_dir = getattr(settings, "download_dir", None)
     if isinstance(download_dir, Path):
-        removed = await asyncio.to_thread(cleanup_stale_downloads, download_dir)
+        try:
+            removed = await asyncio.to_thread(cleanup_stale_downloads, download_dir)
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "Startup download cleanup failed", exc_info=True
+            )
+            removed = 0
         if removed:
             logging.getLogger(__name__).info(
                 "Removed %s stale download director%s on startup",
@@ -97,6 +131,23 @@ async def _post_init(application: App) -> None:
 
     if isinstance(settings, Settings):
         await _validate_storage_chat(application, settings)
+    if isinstance(download_dir, Path):
+        stop_event = asyncio.Event()
+        application.bot_data[_MEDIA_MAINTENANCE_STOP] = stop_event
+        application.bot_data[_MEDIA_MAINTENANCE_TASK] = asyncio.create_task(
+            _maintain_downloads(download_dir, stop_event),
+            name="media-download-maintenance",
+        )
+
+
+async def _post_shutdown(application: App) -> None:
+    stop_event = application.bot_data.get(_MEDIA_MAINTENANCE_STOP)
+    task = application.bot_data.get(_MEDIA_MAINTENANCE_TASK)
+    if isinstance(stop_event, asyncio.Event):
+        stop_event.set()
+    if isinstance(task, asyncio.Task):
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
 
 
 def build_application() -> App:
@@ -121,6 +172,7 @@ def build_application() -> App:
         .get_updates_write_timeout(20.0)
         .get_updates_pool_timeout(5.0)
         .post_init(_post_init)
+        .post_shutdown(_post_shutdown)
         .build()
     )
     application.bot_data["settings"] = settings
@@ -135,9 +187,10 @@ def build_application() -> App:
         concurrency = int(raw_concurrency)
     except (TypeError, ValueError):
         concurrency = DEFAULT_MAX_CONCURRENT_DOWNLOADS
-    # 0 disables the global download semaphore (unlimited parallel downloads).
-    application.bot_data["download_semaphore"] = (
-        None if concurrency <= 0 else asyncio.Semaphore(concurrency)
+    # 0 preserves the documented unlimited-parallelism opt-out.
+    application.bot_data["media_work_supervisor"] = MediaWorkSupervisor(
+        concurrency,
+        max_waiters=4 * concurrency if concurrency > 0 else 0,
     )
 
     application.add_handler(CommandHandler("start", start_command))

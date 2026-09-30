@@ -29,6 +29,7 @@ from telegram_share_bot.handlers import (
 from telegram_share_bot.media.models import (
     DirectMediaStream,
     DownloadedMedia,
+    DownloadError,
     MediaFormat,
     MediaKind,
     TimeRange,
@@ -608,6 +609,37 @@ class TestCacheFallback(unittest.IsolatedAsyncioTestCase):
             self.assertIsNotNone(cached)
             assert cached is not None
             self.assertEqual(cached.file_id, "DIRECT_FILE_ID_789")
+
+    async def test_timed_out_audio_discovery_does_not_start_a_second_extractor(self) -> None:
+        context = MagicMock()
+        context.application.bot_data = {
+            "settings": self.settings,
+            "media_cache": self.cache,
+        }
+        context.bot.edit_message_text = AsyncMock()
+        timed_out = DownloadError("Direct discovery timed out.", retryable=True)
+
+        with (
+            patch(
+                "telegram_share_bot.handlers.prepare.get_direct_stream",
+                AsyncMock(side_effect=timed_out),
+            ),
+            patch("telegram_share_bot.handlers.prepare.download_media") as download,
+        ):
+            await _prepare_inline_media(
+                context,
+                inline_message_id="audio-discovery-timeout",
+                url="https://x.com/example/status/timeout",
+                result_id="audio-discovery-timeout-result",
+                user_id=42,
+                media_format=MediaFormat.AUDIO,
+            )
+
+        download.assert_not_called()
+        self.assertIn(
+            "audio-discovery-timeout-result",
+            context.application.bot_data["pending_inline"],
+        )
 
     async def test_direct_audio_stream_fallback_to_download_when_telegram_fails(self) -> None:
         url = "https://x.com/example/status/67890"

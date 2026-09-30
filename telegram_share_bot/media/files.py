@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import contextlib
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +10,8 @@ import yt_dlp
 
 from telegram_share_bot import strings
 from telegram_share_bot.media.models import DownloadError, MediaKind
+
+logger = logging.getLogger(__name__)
 
 VIDEO_EXTENSIONS = {".mp4", ".webm", ".mkv", ".mov", ".m4v"}
 AUDIO_EXTENSIONS = {".mp3", ".m4a", ".opus", ".ogg", ".wav", ".flac", ".aac"}
@@ -65,14 +67,29 @@ def _resolve_downloaded_path(info: Any, work_dir: Path, ydl: yt_dlp.YoutubeDL) -
 
 
 def _cleanup_dir(directory: Path) -> None:
-    if not directory.exists():
+    if directory.is_symlink() or not directory.exists():
         return
-    for child in directory.glob("**/*"):
-        if child.is_file():
-            child.unlink(missing_ok=True)
-    for child in sorted(directory.glob("**/*"), reverse=True):
-        if child.is_dir():
-            with contextlib.suppress(OSError):
+    try:
+        children = list(directory.glob("**/*"))
+    except OSError:
+        logger.warning("Could not enumerate media cleanup directory")
+        return
+    failed = False
+    for child in children:
+        if child.is_symlink() or child.is_file():
+            try:
+                child.unlink(missing_ok=True)
+            except OSError:
+                failed = True
+    for child in sorted(children, reverse=True):
+        if child.is_dir() and not child.is_symlink():
+            try:
                 child.rmdir()
-    with contextlib.suppress(OSError):
+            except OSError:
+                failed = True
+    try:
         directory.rmdir()
+    except OSError:
+        failed = True
+    if failed:
+        logger.warning("Media cleanup left one or more locked or inaccessible files")

@@ -7,7 +7,6 @@ import contextlib
 import logging
 import time
 from collections import deque
-from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any, cast
 from uuid import uuid4
@@ -24,12 +23,9 @@ from telegram.ext import ContextTypes
 
 from telegram_share_bot import strings
 from telegram_share_bot.config import Settings
-from telegram_share_bot.media.models import (
-    MediaFormat,
-    TimeRange,
-    VideoQualityPolicy,
-)
+from telegram_share_bot.media.models import MediaFormat, TimeRange, VideoQualityPolicy
 from telegram_share_bot.media.requests import format_time_range
+from telegram_share_bot.media.work import MediaWorkLease, MediaWorkSupervisor
 from telegram_share_bot.storage.media_cache import MediaCache
 from telegram_share_bot.storage.user_settings import UserSharingSettings
 
@@ -78,19 +74,52 @@ _DOWNLOAD_REQUEST_WINDOW_SECONDS = 60.0
 _FINALIZER_TASKS: set[asyncio.Task[None]] = set()
 
 
+def _consume_task_exception(task: asyncio.Task[Any]) -> None:
+    if not task.cancelled():
+        with contextlib.suppress(BaseException):
+            task.exception()
+
+
 @dataclass(slots=True)
 class UserDownloadLease:
     """Idempotent ownership of one per-user in-flight slot."""
 
     user_id: int
     _release_task: asyncio.Task[None] | None = field(default=None, repr=False)
+    _worker_count: int = field(default=0, repr=False)
+    _release_requested: bool = field(default=False, repr=False)
+
+    def track_worker(
+        self,
+        context: ContextTypes.DEFAULT_TYPE,
+        worker: asyncio.Task[Any],
+    ) -> None:
+        if self._release_requested or self._release_task is not None:
+            raise RuntimeError("Cannot attach media work after releasing a user lease")
+        self._worker_count += 1
+
+        def on_done(_worker: asyncio.Task[Any]) -> None:
+            self._worker_count = max(0, self._worker_count - 1)
+            if self._release_requested and self._worker_count == 0:
+                self._schedule_release(context)
+
+        worker.add_done_callback(on_done)
+
+    def _schedule_release(self, context: ContextTypes.DEFAULT_TYPE) -> asyncio.Task[None]:
+        if self._release_task is None:
+            task = asyncio.create_task(
+                _release_user_download_slot(context, self.user_id),
+                name=f"release-user-download-{self.user_id}",
+            )
+            task.add_done_callback(_consume_task_exception)
+            self._release_task = task
+        return self._release_task
 
     async def release(self, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if self._release_task is None:
-            self._release_task = asyncio.create_task(
-                _release_user_download_slot(context, self.user_id)
-            )
-        await asyncio.shield(self._release_task)
+        self._release_requested = True
+        if self._worker_count > 0:
+            return
+        await asyncio.shield(self._schedule_release(context))
 
 
 @dataclass(slots=True)
@@ -161,19 +190,20 @@ def _cache_quality_policy(media_format: MediaFormat, quality_policy: VideoQualit
     return quality_policy.value if media_format is MediaFormat.VIDEO else "best-fit"
 
 
-@contextlib.asynccontextmanager
-async def _unlimited_download_slot() -> AsyncIterator[None]:
-    yield
-
-
-def _download_slot(
+async def _acquire_download_slot(
     context: ContextTypes.DEFAULT_TYPE,
-) -> asyncio.Semaphore | contextlib.AbstractAsyncContextManager[None]:
-    """Global download limiter; unlimited when semaphore is unset/disabled."""
-    sem = context.application.bot_data.get("download_semaphore")
-    if isinstance(sem, asyncio.Semaphore):
-        return sem
-    return _unlimited_download_slot()
+    timeout_seconds: float,
+) -> MediaWorkLease:
+    """Acquire bounded global media capacity before any expensive preparation."""
+    supervisor = context.application.bot_data.get("media_work_supervisor")
+    if not isinstance(supervisor, MediaWorkSupervisor):
+        semaphore = context.application.bot_data.get("download_semaphore")
+        supervisor = MediaWorkSupervisor(
+            0,
+            max_waiters=32,
+            semaphore=semaphore if isinstance(semaphore, asyncio.Semaphore) else None,
+        )
+    return await supervisor.acquire(timeout_seconds)
 
 
 def _user_download_lock(context: ContextTypes.DEFAULT_TYPE) -> asyncio.Lock:

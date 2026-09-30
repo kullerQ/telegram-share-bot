@@ -67,6 +67,7 @@ from telegram_share_bot.media.requests import (
 )
 from telegram_share_bot.media.security import (
     _safe_dns_resolution,
+    is_allowed_media_host,
     is_https_url,
     is_safe_media_url,
 )
@@ -96,10 +97,13 @@ def _download_sync(
     max_estimated_download_seconds: int = DEFAULT_MAX_ESTIMATED_DOWNLOAD_SECONDS,
     max_media_duration_seconds: int = DEFAULT_MAX_MEDIA_DURATION_SECONDS,
     on_optimizing: Callable[[], None] | None = None,
+    active_directory_callback: Callable[[Path, bool], None] | None = None,
 ) -> DownloadedMedia:
     started_at = time.monotonic()
     deadline = started_at + timeout_seconds
     source_limit = max_file_bytes * _SOURCE_SIZE_MULTIPLIER
+    if not is_allowed_media_host(url, allowed_hosts):
+        raise DownloadError(strings.DOWNLOAD_HOST_NOT_ALLOWED)
     if https_only and not is_https_url(url):
         raise DownloadError(strings.DOWNLOAD_HTTPS_REQUIRED)
     if not is_safe_media_url(url, https_only=https_only):
@@ -112,27 +116,42 @@ def _download_sync(
 
     work_dir = download_dir / uuid.uuid4().hex
     work_dir.mkdir(parents=True, exist_ok=True)
+    if active_directory_callback is not None:
+        active_directory_callback(work_dir, True)
+
+    def cleanup_work_dir() -> None:
+        try:
+            _cleanup_dir(work_dir)
+        except OSError:
+            logger.debug("Could not clean failed download directory", exc_info=True)
+        finally:
+            if active_directory_callback is not None:
+                active_directory_callback(work_dir, False)
     if work_dir_holder is not None:
         work_dir_holder.append(work_dir)
 
     # Clip ranges only apply to YouTube; try a TikTok slideshow for full sends.
     if time_range is None:
-        slideshow = try_tiktok_slideshow(
-            url,
-            work_dir,
-            source_limit=source_limit,
-            max_file_bytes=max_file_bytes,
-            deadline=deadline,
-            slide_ms=slideshow_slide_ms,
-            max_images=slideshow_max_images,
-            images_loop=slideshow_images_loop,
-            abort_event=abort_event,
-            https_only=https_only,
-            allowed_hosts=allowed_hosts,
-            media_format=media_format,
-            max_media_duration_seconds=max_media_duration_seconds,
-            on_optimizing=on_optimizing,
-        )
+        try:
+            slideshow = try_tiktok_slideshow(
+                url,
+                work_dir,
+                source_limit=source_limit,
+                max_file_bytes=max_file_bytes,
+                deadline=deadline,
+                slide_ms=slideshow_slide_ms,
+                max_images=slideshow_max_images,
+                images_loop=slideshow_images_loop,
+                abort_event=abort_event,
+                https_only=https_only,
+                allowed_hosts=allowed_hosts,
+                media_format=media_format,
+                max_media_duration_seconds=max_media_duration_seconds,
+                on_optimizing=on_optimizing,
+            )
+        except BaseException:
+            cleanup_work_dir()
+            raise
         if slideshow is not None:
             return slideshow
 
@@ -471,10 +490,10 @@ def _download_sync(
                     ) from last_error
                 raise DownloadError(strings.DOWNLOAD_NO_FILE)
     except DownloadError:
-        _cleanup_dir(work_dir)
+        cleanup_work_dir()
         raise
     except yt_dlp.utils.DownloadError as exc:
-        _cleanup_dir(work_dir)
+        cleanup_work_dir()
         message = str(exc).split("\n")[-1].strip() or strings.DOWNLOAD_FAILED_GENERIC
         if media_format is MediaFormat.AUDIO and _is_audio_unavailable_error(message):
             logger.info("No compatible audio stream available for %s", safe_url_for_log(url))
@@ -489,7 +508,7 @@ def _download_sync(
             retryable=_is_transient_download_error(message),
         ) from exc
     except Exception as exc:
-        _cleanup_dir(work_dir)
+        cleanup_work_dir()
         message = str(exc).split("\n")[-1].strip() or strings.DOWNLOAD_FAILED_GENERIC
         if media_format is MediaFormat.AUDIO and _is_audio_unavailable_error(message):
             logger.info("No compatible audio stream available for %s", safe_url_for_log(url))

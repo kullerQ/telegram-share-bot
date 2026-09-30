@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -22,6 +23,7 @@ from telegram_share_bot.handlers import (
     direct_format_callback,
     url_message,
 )
+from telegram_share_bot.handlers.state import UserDownloadLease, _user_download_counts
 from telegram_share_bot.media.models import DownloadedMedia, MediaKind
 
 
@@ -107,6 +109,48 @@ class TestConcurrencyLimiter(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(await _try_acquire_user_download_slot(context, 43))
         await _release_user_download_slot(context, 42)
         self.assertIsNone(await _try_acquire_user_download_slot(context, 42))
+
+    async def test_user_slot_stays_owned_until_timed_out_worker_finishes(self) -> None:
+        settings = Settings(
+            bot_token="test:token",
+            storage_chat_id=42,
+            max_file_bytes=1024,
+            download_timeout_seconds=10,
+            download_dir=Path("."),
+            cache_db_path=Path("cache.db"),
+            delete_storage_messages=False,
+            max_downloads_per_user=1,
+            download_cooldown_seconds=0,
+        )
+        context = MagicMock()
+        context.application.bot_data = {"settings": settings}
+        self.assertIsNone(await _try_acquire_user_download_slot(context, 42))
+
+        started = threading.Event()
+        finish = threading.Event()
+
+        def blocking_work() -> None:
+            started.set()
+            finish.wait(2)
+
+        worker = asyncio.create_task(asyncio.to_thread(blocking_work))
+        self.assertTrue(await asyncio.to_thread(started.wait, 1))
+        lease = UserDownloadLease(42)
+        lease.track_worker(context, worker)
+        await lease.release(context)
+
+        self.assertEqual(_user_download_counts(context).get(42), 1)
+        self.assertEqual(
+            await _try_acquire_user_download_slot(context, 42),
+            strings.RATE_LIMITED,
+        )
+
+        finish.set()
+        await worker
+        await asyncio.sleep(0)
+        self.assertNotIn(42, _user_download_counts(context))
+        self.assertIsNone(await _try_acquire_user_download_slot(context, 42))
+        await _release_user_download_slot(context, 42)
 
     async def test_per_user_download_request_rate_uses_rolling_minute(self) -> None:
         settings = Settings(
