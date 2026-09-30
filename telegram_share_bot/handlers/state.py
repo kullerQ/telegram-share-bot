@@ -10,6 +10,7 @@ from collections import deque
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any, cast
+from uuid import uuid4
 
 from telegram import (
     InlineKeyboardButton,
@@ -58,6 +59,8 @@ _FULL_BALANCED_CALLBACK_PREFIX = "full-balanced:"
 _PENDING_KEY = "pending_inline"
 _PENDING_CLIP_KEY = "pending_clip_choice"
 _TASKS_KEY = "inline_prepare_tasks"
+_ACTIVE_KEY = "active_inline_requests"
+_INLINE_RESERVATION_LOCK_KEY = "inline_reservation_lock"
 _CANCELLED_KEY = "cancelled_inline"
 _USER_DOWNLOADS_KEY = "user_download_counts"
 _USER_DOWNLOADS_LOCK_KEY = "user_download_lock"
@@ -72,6 +75,34 @@ _MAX_CANCELLED_INLINE = 500
 _UPLOAD_MAX_ATTEMPTS = 3
 _UPLOAD_RETRY_BASE_DELAY_SECONDS = 1.5
 _DOWNLOAD_REQUEST_WINDOW_SECONDS = 60.0
+_FINALIZER_TASKS: set[asyncio.Task[None]] = set()
+
+
+@dataclass(slots=True)
+class UserDownloadLease:
+    """Idempotent ownership of one per-user in-flight slot."""
+
+    user_id: int
+    _release_task: asyncio.Task[None] | None = field(default=None, repr=False)
+
+    async def release(self, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if self._release_task is None:
+            self._release_task = asyncio.create_task(
+                _release_user_download_slot(context, self.user_id)
+            )
+        await asyncio.shield(self._release_task)
+
+
+@dataclass(slots=True)
+class ActiveInlineRequest:
+    """One generation currently owning an inline message and user lease."""
+
+    owner_user_id: int
+    generation: str
+    result_id: str
+    lease: UserDownloadLease
+    task: asyncio.Task[Any] | None = None
+    cancelled: bool = False
 
 def _preference_quality_label(policy: VideoQualityPolicy) -> str:
     return {
@@ -186,18 +217,25 @@ async def _try_acquire_user_download_slot(
     cooldown = settings.download_cooldown_seconds
     now = time.monotonic()
     async with _user_download_lock(context):
-        if max_per_minute > 0:
-            request_times = _user_request_times(context)
-            last_cleanup = context.application.bot_data.get(_USER_REQUEST_CLEANUP_KEY, now)
-            if now - last_cleanup >= _DOWNLOAD_REQUEST_WINDOW_SECONDS:
-                cutoff = now - _DOWNLOAD_REQUEST_WINDOW_SECONDS
-                for tracked_user_id, tracked_timestamps in tuple(request_times.items()):
-                    while tracked_timestamps and tracked_timestamps[0] <= cutoff:
-                        tracked_timestamps.popleft()
-                    if not tracked_timestamps:
-                        request_times.pop(tracked_user_id, None)
-                context.application.bot_data[_USER_REQUEST_CLEANUP_KEY] = now
+        request_times = _user_request_times(context)
+        last_cleanup = context.application.bot_data.get(_USER_REQUEST_CLEANUP_KEY)
+        if not isinstance(last_cleanup, (int, float)) or (
+            now - last_cleanup >= _DOWNLOAD_REQUEST_WINDOW_SECONDS
+        ):
+            cutoff = now - _DOWNLOAD_REQUEST_WINDOW_SECONDS
+            for tracked_user_id, tracked_timestamps in tuple(request_times.items()):
+                while tracked_timestamps and tracked_timestamps[0] <= cutoff:
+                    tracked_timestamps.popleft()
+                if not tracked_timestamps:
+                    request_times.pop(tracked_user_id, None)
+            cooldowns = _user_cooldowns(context)
+            cooldown_expiry = now - max(_DOWNLOAD_REQUEST_WINDOW_SECONDS, cooldown)
+            for tracked_user_id, last_started_at in tuple(cooldowns.items()):
+                if last_started_at <= cooldown_expiry:
+                    cooldowns.pop(tracked_user_id, None)
+            context.application.bot_data[_USER_REQUEST_CLEANUP_KEY] = now
 
+        if max_per_minute > 0:
             timestamps = request_times.get(user_id)
             if timestamps is None:
                 timestamps = deque()
@@ -400,6 +438,117 @@ def _clip_choice_keyboard(
 def _task_map(context: ContextTypes.DEFAULT_TYPE) -> dict[str, asyncio.Task[Any]]:
     raw = context.application.bot_data.setdefault(_TASKS_KEY, {})
     return cast(dict[str, asyncio.Task[Any]], raw)
+
+
+def _active_inline_map(
+    context: ContextTypes.DEFAULT_TYPE,
+) -> dict[str, ActiveInlineRequest]:
+    raw = context.application.bot_data.setdefault(_ACTIVE_KEY, {})
+    return cast(dict[str, ActiveInlineRequest], raw)
+
+
+def _inline_reservation_lock(context: ContextTypes.DEFAULT_TYPE) -> asyncio.Lock:
+    lock = context.application.bot_data.get(_INLINE_RESERVATION_LOCK_KEY)
+    if not isinstance(lock, asyncio.Lock):
+        lock = asyncio.Lock()
+        context.application.bot_data[_INLINE_RESERVATION_LOCK_KEY] = lock
+    return lock
+
+
+async def _reserve_inline_request(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    inline_message_id: str,
+    result_id: str,
+    user_id: int | None,
+) -> tuple[ActiveInlineRequest | None, str | None]:
+    """Atomically reserve message ownership and a user's in-flight lease."""
+    async with _inline_reservation_lock(context):
+        active = _active_inline_map(context).get(inline_message_id)
+        if active is not None:
+            if active.task is None or not active.task.done():
+                denial = await _try_acquire_user_download_slot(context, user_id)
+                if denial is not None:
+                    return None, denial
+                await _release_user_download_slot(context, user_id)
+                return None, strings.INLINE_ALREADY_PREPARING
+            _active_inline_map(context).pop(inline_message_id, None)
+            if _task_map(context).get(inline_message_id) is active.task:
+                _task_map(context).pop(inline_message_id, None)
+            _cancelled_set(context).discard(inline_message_id)
+            await active.lease.release(context)
+
+        denial = await _try_acquire_user_download_slot(context, user_id)
+        if denial is not None:
+            return None, denial
+        assert user_id is not None
+        active = ActiveInlineRequest(
+            owner_user_id=user_id,
+            generation=uuid4().hex,
+            result_id=result_id,
+            lease=UserDownloadLease(user_id),
+        )
+        _active_inline_map(context)[inline_message_id] = active
+        return active, None
+
+
+def _attach_inline_task(
+    context: ContextTypes.DEFAULT_TYPE,
+    inline_message_id: str,
+    active: ActiveInlineRequest,
+    task: asyncio.Task[Any],
+) -> bool:
+    """Attach a task to its reservation and finalize even before coroutine entry."""
+    attached = _active_inline_map(context).get(inline_message_id) is active and not active.cancelled
+    if not attached:
+        task.cancel()
+    else:
+        active.task = task
+        _task_map(context)[inline_message_id] = task
+
+    def on_done(done_task: asyncio.Task[Any]) -> None:
+        if not done_task.cancelled():
+            with contextlib.suppress(BaseException):
+                done_task.exception()
+        finalizer = asyncio.create_task(
+            _finalize_inline_request(context, inline_message_id, active),
+            name=f"finalize-inline-{active.generation}",
+        )
+        _FINALIZER_TASKS.add(finalizer)
+
+        def forget_finalizer(completed: asyncio.Task[None]) -> None:
+            _FINALIZER_TASKS.discard(completed)
+            if completed.cancelled():
+                return
+            with contextlib.suppress(BaseException):
+                error = completed.exception()
+                if error is not None:
+                    logger.error(
+                        "Inline request finalizer failed category=%s",
+                        type(error).__name__,
+                    )
+
+        finalizer.add_done_callback(forget_finalizer)
+
+    task.add_done_callback(on_done)
+    return attached
+
+
+async def _finalize_inline_request(
+    context: ContextTypes.DEFAULT_TYPE,
+    inline_message_id: str,
+    active: ActiveInlineRequest,
+) -> None:
+    """Release one generation once and never remove a newer replacement."""
+    async with _inline_reservation_lock(context):
+        active_map = _active_inline_map(context)
+        if active_map.get(inline_message_id) is active:
+            active_map.pop(inline_message_id, None)
+            tasks = _task_map(context)
+            if tasks.get(inline_message_id) is active.task:
+                tasks.pop(inline_message_id, None)
+        _cancelled_set(context).discard(inline_message_id)
+    await active.lease.release(context)
 
 
 def _cancelled_set(context: ContextTypes.DEFAULT_TYPE) -> set[str]:

@@ -38,10 +38,12 @@ from .delivery import (
 from .preferences import _resolve_user_caption, _user_preferences
 from .state import (
     _EMPTY_KEYBOARD,
+    ActiveInlineRequest,
     _cache,
     _cache_quality_policy,
     _cancelled_set,
     _download_slot,
+    _finalize_inline_request,
     _pending_map,
     _release_user_download_slot,
     _settings,
@@ -65,6 +67,7 @@ async def _prepare_inline_media(
     media_format: MediaFormat = MediaFormat.VIDEO,
     quality_policy: VideoQualityPolicy = VideoQualityPolicy.AUTO,
     preferences: UserSharingSettings | None = None,
+    active_request: ActiveInlineRequest | None = None,
 ) -> None:
     settings = _settings(context)
     if preferences is None:
@@ -324,10 +327,16 @@ async def _prepare_inline_media(
             reply_markup=_EMPTY_KEYBOARD,
         )
     finally:
-        _task_map(context).pop(inline_message_id, None)
-        _cancelled_set(context).discard(inline_message_id)
         if not keep_pending_for_retry:
             _pending_map(context).pop(result_id, None)
         if media is not None:
-            cleanup_media(media)
-        await _release_user_download_slot(context, user_id)
+            try:
+                cleanup_media(media)
+            except Exception:
+                logger.warning("Inline media cleanup failed category=filesystem")
+        if active_request is not None:
+            await _finalize_inline_request(context, inline_message_id, active_request)
+        else:
+            _task_map(context).pop(inline_message_id, None)
+            _cancelled_set(context).discard(inline_message_id)
+            await _release_user_download_slot(context, user_id)
