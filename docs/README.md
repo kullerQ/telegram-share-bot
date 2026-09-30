@@ -149,6 +149,8 @@ Tap a Video or Audio result (or a clip / full-length choice). A placeholder appe
 3. When you tap the result, Telegram sends `chosen_inline_result` (needs `/setinlinefeedback`).
 4. The bot downloads via `yt-dlp`, uploads to `STORAGE_CHAT_ID` for a `file_id`, deletes that storage message, then edits the inline message to the media. Auto video selection tries the highest feasible source first and steps down on a slow transfer or oversized output. Best stays on the top source format; Balanced prefers its target when available and may try the best alternative. Both can use at most two bounded `ffmpeg` optimization attempts to meet Telegram's size limit. Audio selection downloads an audio-only stream and prepares native Telegram audio; YouTube clips and TikTok slideshow soundtracks are supported when the source provides audio. Telegram direct URL imports are used for eligible audio streams and fall back to local delivery if Telegram rejects the URL.
 
+Inline requests and their Cancel/Retry ownership are held in memory. A bot restart drops in-progress work and its old buttons cannot resume it; send the link again to start a new request.
+
 ## Limits
 
 - Video outputs are checked with bundled `ffmpeg` before sending. Compatible files that fit are kept intact. When encoding is needed, the bot preserves the source dimensions and targets the available size budget, with at most two attempts from the original source. Best can fail if its source exceeds the download bound; it never silently substitutes a lower source. Local installations need `ffmpeg`; Docker includes it.
