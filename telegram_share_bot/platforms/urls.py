@@ -80,6 +80,23 @@ _YOUTUBE_HOSTS = frozenset(
 )
 
 
+def has_url_credentials(raw_url: str) -> bool:
+    """Return True when a URL contains userinfo or cannot be parsed safely.
+
+    Treat parser failures as unsafe: callers use this at trust boundaries, and
+    malformed authority text must not be allowed to flow to cache keys or logs.
+    """
+    try:
+        parsed = urlsplit(raw_url.strip())
+        # Accessing these properties performs additional authority validation
+        # (for example, malformed brackets and non-numeric ports).
+        _ = parsed.hostname
+        _ = parsed.port
+        return parsed.username is not None or parsed.password is not None
+    except (AttributeError, TypeError, ValueError):
+        return True
+
+
 def is_youtube_url(raw_url: str) -> bool:
     """Return True if the URL host is YouTube (including youtu.be / nocookie)."""
     clean = raw_url.strip()
@@ -102,7 +119,10 @@ def looks_signed_url(raw_url: str) -> bool:
     """Return True if the URL appears to carry auth / signed query parameters."""
     if not raw_url.strip():
         return False
-    parsed = urlsplit(raw_url.strip())
+    try:
+        parsed = urlsplit(raw_url.strip())
+    except (AttributeError, TypeError, ValueError):
+        return True
     for key, _value in parse_qsl(parsed.query, keep_blank_values=False):
         if key.lower() in _SIGNED_QUERY_KEYS:
             return True
@@ -111,9 +131,12 @@ def looks_signed_url(raw_url: str) -> bool:
 
 def is_public_cacheable_url(raw_url: str) -> bool:
     """Whether a URL is safe to share across users in the file_id cache."""
-    if looks_signed_url(raw_url):
+    if not raw_url.strip() or has_url_credentials(raw_url) or looks_signed_url(raw_url):
         return False
-    parsed = urlsplit(raw_url.strip())
+    try:
+        parsed = urlsplit(raw_url.strip())
+    except (AttributeError, TypeError, ValueError):
+        return False
     host = (
         parsed.netloc.lower()
         .removeprefix("www.")
@@ -134,17 +157,31 @@ def safe_url_for_log(raw_url: str) -> str:
     Known public platforms keep their canonical form (e.g. YouTube ``?v=``).
     Signed / credentialed URLs and other query strings are stripped to path only.
     """
-    clean = raw_url.strip()
+    try:
+        clean = raw_url.strip()
+    except (AttributeError, TypeError):
+        return "<invalid-url>"
     if not clean:
         return ""
-    if looks_signed_url(clean):
+    try:
         parsed = urlsplit(clean)
-        if not parsed.scheme and not parsed.netloc:
-            return clean[:120]
-        return urlunsplit((parsed.scheme, parsed.netloc, parsed.path or "", "", ""))
+        # Strip userinfo before normalization. Never return raw malformed text
+        # on an exception path, where it may contain credentials.
+        if parsed.username is not None or parsed.password is not None:
+            authority = parsed.netloc.rsplit("@", maxsplit=1)[-1]
+            clean = urlunsplit((parsed.scheme, authority, parsed.path, parsed.query, ""))
+            parsed = urlsplit(clean)
+        if looks_signed_url(clean):
+            if not parsed.scheme and not parsed.netloc:
+                return "<redacted-url>"
+            return urlunsplit((parsed.scheme, parsed.netloc, parsed.path or "", "", ""))
 
-    normalized = normalize_url(clean) or clean
-    parsed = urlsplit(normalized)
+        normalized = normalize_url(clean)
+        if not normalized:
+            return "<invalid-url>"
+        parsed = urlsplit(normalized)
+    except (AttributeError, TypeError, ValueError):
+        return "<invalid-url>"
     host = (
         parsed.netloc.lower()
         .removeprefix("www.")
@@ -165,11 +202,20 @@ def normalize_url(raw_url: str) -> str:
     - Removes common analytics/tracking query parameters (e.g. `si`, `utm_*`).
     - Strips URL fragments and sorts remaining query parameters.
     """
-    clean_url = raw_url.strip()
+    try:
+        clean_url = raw_url.strip()
+    except (AttributeError, TypeError):
+        return ""
     if not clean_url:
         return ""
 
-    parsed = urlsplit(clean_url)
+    if has_url_credentials(clean_url):
+        return ""
+
+    try:
+        parsed = urlsplit(clean_url)
+    except ValueError:
+        return ""
     if not parsed.netloc and not parsed.path:
         return clean_url
 

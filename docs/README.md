@@ -172,4 +172,4 @@ Tap a Video or Audio result (or a clip / full-length choice). A placeholder appe
 - Users should `/start` the bot once before relying on inline mode.
 - Respect platform Terms of Service for downloaded content; this project is for personal/lightweight use.
 - Previously uploaded videos are reused when their recorded output quality is compatible with the requested policy. Auto prefers a cached Best upload when it is at least as good as the cached Auto upload. Clip ranges and full videos remain separate cache entries; captions are applied when sent.
-- Signed / credentialed URLs are not stored in the shared media cache.
+- Source links containing a username or password are rejected before previews or downloads. The bot does not echo those credentials in messages or logs; signed media URLs produced internally by extractors remain usable and are not stored in the shared media cache.

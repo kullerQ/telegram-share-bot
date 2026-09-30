@@ -11,7 +11,7 @@ from collections.abc import Generator, Sequence
 from typing import Any
 from urllib.parse import urlsplit
 
-from telegram_share_bot.platforms.urls import safe_url_for_log
+from telegram_share_bot.platforms.urls import has_url_credentials, safe_url_for_log
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +52,8 @@ def _is_safe_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
 def is_safe_media_url(url: str, *, https_only: bool = False) -> bool:
     """Validate an HTTP(S) URL is not internal/private/loopback/cloud-metadata."""
     try:
+        if has_url_credentials(url):
+            return False
         parsed = urlsplit(url)
         scheme = parsed.scheme.lower()
         if https_only:

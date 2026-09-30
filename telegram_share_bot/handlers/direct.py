@@ -27,6 +27,7 @@ from telegram_share_bot.media.models import (
 )
 from telegram_share_bot.media.requests import extract_media_request, format_time_range
 from telegram_share_bot.media.security import is_allowed_media_host, is_https_url
+from telegram_share_bot.platforms.urls import has_url_credentials
 from telegram_share_bot.storage.media_cache import CachedMedia
 from telegram_share_bot.storage.user_settings import CaptionPreference, UserSharingSettings
 
@@ -196,6 +197,10 @@ async def url_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         ))
         return
 
+    if has_url_credentials(url):
+        await message.reply_text(strings.DOWNLOAD_UNSAFE_URL)
+        return
+
     settings = _settings(context)
 
     if not is_allowed_media_host(url, settings.allowed_media_hosts):
@@ -314,6 +319,9 @@ async def _explicit_format_command(
             else strings.DIRECT_VIDEO_USAGE
         )
         await message.reply_text(usage)
+        return
+    if has_url_credentials(request.url):
+        await message.reply_text(strings.DOWNLOAD_UNSAFE_URL)
         return
     settings = _settings(context)
     if not is_allowed_media_host(request.url, settings.allowed_media_hosts):

@@ -62,6 +62,18 @@ class TestMediaCache(unittest.IsolatedAsyncioTestCase):
         assert cached is not None
         self.assertEqual(cached.file_id, "cached_file_id_123")
 
+    async def test_credential_bearing_urls_are_never_cached(self) -> None:
+        url = "https://alice:secret@youtube.com/watch?v=dQw4w9WgXcQ"
+        await self.cache.set(
+            url,
+            "private-file-id",
+            MediaKind.VIDEO,
+            "Private",
+            30,
+        )
+
+        self.assertIsNone(await self.cache.get(url))
+
     async def test_evict(self) -> None:
         url = "https://x.com/user/status/12345"
         await self.cache.set(

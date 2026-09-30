@@ -21,16 +21,33 @@ _HTTP_URL_WITH_QUERY_RE = re.compile(
     r"https?://[^\s<>\"']+\?[^\s<>\"']+",
     re.IGNORECASE,
 )
+_HTTP_URL_WITH_USERINFO_RE = re.compile(
+    r"https?://[^/\s<>\"']*@[^/\s<>\"']+",
+    re.IGNORECASE,
+)
 
 
 def _strip_url_query(match: re.Match[str]) -> str:
-    parts = urlsplit(match.group(0))
-    return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
+    try:
+        parts = urlsplit(match.group(0))
+        return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
+    except ValueError:
+        # A malformed URL may still contain credentials or signed values.
+        return "<redacted-url>"
+
+
+def _strip_url_userinfo(match: re.Match[str]) -> str:
+    value = match.group(0)
+    scheme_end = value.find("://") + 3
+    authority = value[scheme_end:].split("/", maxsplit=1)[0]
+    host = authority.rsplit("@", maxsplit=1)[-1]
+    return value[:scheme_end] + host
 
 
 def _redact_telegram_secrets(value: str) -> str:
     """Replace Bot API URLs with the method name; mask bare tokens; strip URL queries."""
-    text = _HTTP_URL_WITH_QUERY_RE.sub(_strip_url_query, value)
+    text = _HTTP_URL_WITH_USERINFO_RE.sub(_strip_url_userinfo, value)
+    text = _HTTP_URL_WITH_QUERY_RE.sub(_strip_url_query, text)
     text = _TELEGRAM_BOT_URL_RE.sub(r"\1", text)
     return _TELEGRAM_BOT_TOKEN_RE.sub("<redacted-bot-token>", text)
 

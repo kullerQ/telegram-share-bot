@@ -70,6 +70,19 @@ class TestSsrfProtection(unittest.IsolatedAsyncioTestCase):
             )
         )
 
+    def test_source_credentials_and_malformed_authority_are_rejected_before_dns(self) -> None:
+        unsafe_urls = (
+            "https://user:secret@example.com/video",
+            "https://@example.com/video",
+            "https://example.com:invalid/video",
+            "https://[broken/video",
+        )
+        with patch(_RESOLVER) as resolver:
+            for url in unsafe_urls:
+                with self.subTest(url=url):
+                    self.assertFalse(is_safe_media_url(url))
+            resolver.assert_not_called()
+
     def test_dns_guard_blocks_rebinding_to_private_ip(self) -> None:
         private_result = [
             (

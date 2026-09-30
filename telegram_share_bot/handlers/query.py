@@ -20,8 +20,12 @@ from telegram_share_bot.media.models import (
 from telegram_share_bot.media.requests import (
     extract_media_request,
 )
-from telegram_share_bot.media.security import is_allowed_media_host, is_https_url
+from telegram_share_bot.media.security import (
+    is_allowed_media_host,
+    is_https_url,
+)
 from telegram_share_bot.platforms import previews as platform_previews
+from telegram_share_bot.platforms.urls import has_url_credentials
 
 from .delivery import _error_article, _pending_media_article
 from .preferences import _user_preferences
@@ -84,6 +88,19 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     strings.INLINE_NO_URL_TITLE,
                     strings.INLINE_NO_URL_DESCRIPTION,
                 )
+            ],
+            cache_time=1,
+            is_personal=True,
+        )
+        return
+
+    # Reject credentials and malformed authorities before preview lookup or
+    # storing the query in process-local pending state.
+    if has_url_credentials(url):
+        await _answer_inline_query(
+            query,
+            results=[
+                _error_article(strings.INLINE_NO_URL_TITLE, strings.DOWNLOAD_UNSAFE_URL)
             ],
             cache_time=1,
             is_personal=True,
