@@ -8,6 +8,7 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from telegram_share_bot.media.models import MediaFormat, MediaKind
 from telegram_share_bot.storage.media_cache import MediaCache
@@ -43,6 +44,187 @@ class TestMediaCache(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cached.kind, MediaKind.VIDEO)
         self.assertEqual(cached.title, title)
         self.assertEqual(cached.duration, duration)
+
+    async def test_locked_database_skips_cache_without_removing_wal(self) -> None:
+        url = "https://example.com/locked-cache"
+        await self.cache.set(url, "file-before-lock", MediaKind.VIDEO, "Title", 10)
+
+        reader = sqlite3.connect(self.db_path)
+        reader.execute("BEGIN")
+        reader.execute("SELECT COUNT(*) FROM media_cache").fetchone()
+        await self.cache.set(url, "file-after-reader", MediaKind.VIDEO, "Title", 10)
+
+        wal_path = Path(f"{self.db_path}-wal")
+        self.assertTrue(wal_path.exists())
+        wal_before = wal_path.read_bytes()
+        writer = sqlite3.connect(self.db_path, timeout=0.1)
+        writer.execute("PRAGMA busy_timeout = 100")
+        writer.execute("BEGIN IMMEDIATE")
+        self.cache._busy_timeout_seconds = 0.02
+
+        try:
+            with self.assertLogs("telegram_share_bot.storage.media_cache", level="WARNING"):
+                self.assertIsNone(await self.cache.get(url))
+
+            self.assertTrue(self.cache.available)
+            self.assertEqual(wal_path.read_bytes(), wal_before)
+        finally:
+            writer.rollback()
+            writer.close()
+            reader.rollback()
+            reader.close()
+        cached = await self.cache.get(url)
+        self.assertIsNotNone(cached)
+        assert cached is not None
+        self.assertEqual(cached.file_id, "file-after-reader")
+
+    async def test_readonly_error_disables_cache_without_recreating_database(self) -> None:
+        url = "https://example.com/readonly-cache"
+        await self.cache.set(url, "file-id", MediaKind.VIDEO, "Title", 10)
+        database_before = self.db_path.read_bytes()
+        with patch.object(
+            self.cache, "_connection", side_effect=sqlite3.OperationalError("readonly database")
+        ):
+            with self.assertLogs("telegram_share_bot.storage.media_cache", level="WARNING"):
+                self.assertIsNone(await self.cache.get(url))
+        self.assertFalse(self.cache.available)
+        self.assertEqual(self.db_path.read_bytes(), database_before)
+        await self.cache.set(url, "replacement", MediaKind.VIDEO, "Title", 10)
+        self.assertEqual(self.db_path.read_bytes(), database_before)
+
+    async def test_corrupt_database_and_sidecars_are_left_untouched(self) -> None:
+        self.temp_dir.cleanup()
+        corrupt_path = Path(self.temp_dir.name) / "corrupt.db"
+        corrupt_path.parent.mkdir(parents=True)
+        corrupt_path.write_bytes(b"not a sqlite database")
+        database_before = corrupt_path.read_bytes()
+
+        with self.assertLogs("telegram_share_bot.storage.media_cache", level="WARNING"):
+            corrupt_cache = MediaCache(corrupt_path)
+
+        self.assertFalse(corrupt_cache.available)
+        self.assertIsNone(await corrupt_cache.get("https://example.com/video"))
+        self.assertEqual(corrupt_path.read_bytes(), database_before)
+
+    async def test_missing_main_database_with_sidecars_is_not_recreated(self) -> None:
+        self.temp_dir.cleanup()
+        missing_path = Path(self.temp_dir.name) / "missing.db"
+        missing_path.parent.mkdir(parents=True)
+        sidecar_data = {"-wal": b"keep wal", "-shm": b"keep shm", "-journal": b"keep journal"}
+        for suffix, content in sidecar_data.items():
+            Path(f"{missing_path}{suffix}").write_bytes(content)
+
+        with self.assertLogs("telegram_share_bot.storage.media_cache", level="WARNING"):
+            cache = MediaCache(missing_path)
+
+        self.assertFalse(cache.available)
+        self.assertFalse(missing_path.exists())
+        for suffix, content in sidecar_data.items():
+            self.assertEqual(Path(f"{missing_path}{suffix}").read_bytes(), content)
+
+    async def test_missing_table_is_initialized_without_sidecar_deletion(self) -> None:
+        url = "https://example.com/missing-cache-schema"
+        reader = sqlite3.connect(self.db_path)
+        reader.execute("BEGIN")
+        reader.execute("SELECT COUNT(*) FROM media_cache").fetchone()
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn, conn:
+            conn.execute("DROP TABLE media_cache")
+        wal_path = Path(f"{self.db_path}-wal")
+        self.assertTrue(wal_path.exists())
+
+        try:
+            # A live main database may safely initialize the missing disposable cache table.
+            self.assertIsNone(await self.cache.get(url))
+            self.assertTrue(self.cache.available)
+            self.assertTrue(wal_path.exists())
+            await self.cache.set(url, "recovered", MediaKind.VIDEO, "Title", 10)
+            self.assertIsNotNone(await self.cache.get(url))
+        finally:
+            reader.close()
+
+    async def test_maintenance_prunes_oldest_rows_in_bounded_batches(self) -> None:
+        urls = [f"https://example.com/retention/{index}" for index in range(12)]
+        for index, url in enumerate(urls):
+            await self.cache.set(url, f"file-{index}", MediaKind.VIDEO, "Title", 10)
+
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn, conn:
+            conn.execute(
+                "UPDATE media_cache SET last_used_at = '2000-01-01 00:00:00' "
+                "|| substr('00' || rowid, -2)"
+            )
+
+        removed, credentials = await self.cache.maintain(max_entries=8, batch_size=3)
+        self.assertEqual((removed, credentials), (3, 0))
+        self.assertEqual(await self._cache_row_count(), 9)
+        removed, credentials = await self.cache.maintain(max_entries=8, batch_size=3)
+        self.assertEqual((removed, credentials), (1, 0))
+        self.assertEqual(await self._cache_row_count(), 8)
+        oldest = await self.cache.get(urls[0])
+        newest = await self.cache.get(urls[-1])
+        self.assertIsNone(oldest)
+        self.assertIsNotNone(newest)
+
+    async def test_maintenance_removes_legacy_userinfo_keys_without_logging_them(self) -> None:
+        credential_url = (
+            "https://account-name:secret-value@example.com/video"
+            "#format=video&quality=auto-best&delivery=2"
+        )
+        path_at_url = "https://example.com/user@mention#format=video&quality=auto-best"
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn, conn:
+            for key, file_id in ((credential_url, "credential-file"), (path_at_url, "safe-file")):
+                conn.execute(
+                    "INSERT INTO media_cache (url, file_id, media_kind, title, duration) "
+                    "VALUES (?, ?, 'video', 'Title', 10)",
+                    (key, file_id),
+                )
+
+        removed, credentials = await self.cache.maintain(max_entries=10, batch_size=10)
+        self.assertEqual((removed, credentials), (0, 1))
+        self.assertIsNone(self.cache._get_sync(credential_url))
+        retained = self.cache._get_sync(path_at_url)
+        self.assertIsNotNone(retained)
+        assert retained is not None
+        self.assertEqual(retained.file_id, "safe-file")
+
+    async def test_concurrent_cache_replacement_survives_retention(self) -> None:
+        urls = [f"https://example.com/concurrent-retention/{index}" for index in range(6)]
+        for index, url in enumerate(urls):
+            await self.cache.set(url, f"file-{index}", MediaKind.VIDEO, "Title", 10)
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn, conn:
+            conn.execute("UPDATE media_cache SET last_used_at = '2000-01-01 00:00:00'")
+
+        await asyncio.gather(
+            self.cache.set(urls[0], "replacement-file", MediaKind.VIDEO, "Title", 10),
+            self.cache.maintain(max_entries=4, batch_size=2),
+        )
+
+        cached = await self.cache.get(urls[0])
+        self.assertIsNotNone(cached)
+        assert cached is not None
+        self.assertEqual(cached.file_id, "replacement-file")
+        self.assertEqual(await self._cache_row_count(), 4)
+
+    async def test_sqlite_backup_api_copies_a_consistent_cache_snapshot(self) -> None:
+        await self.cache.set(
+            "https://example.com/backup", "backup-file", MediaKind.VIDEO, "Title", 10
+        )
+        backup_path = Path(self.temp_dir.name) / "backup.db"
+        with (
+            contextlib.closing(sqlite3.connect(self.db_path)) as source,
+            contextlib.closing(sqlite3.connect(backup_path)) as destination,
+        ):
+            source.backup(destination)
+        with contextlib.closing(sqlite3.connect(backup_path)) as backup:
+            row = backup.execute(
+                "SELECT file_id FROM media_cache WHERE file_id = ?", ("backup-file",)
+            ).fetchone()
+        self.assertEqual(row, ("backup-file",))
+
+    async def _cache_row_count(self) -> int:
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            row = conn.execute("SELECT COUNT(*) FROM media_cache").fetchone()
+        assert row is not None
+        return int(row[0])
 
     async def test_normalization_lookup(self) -> None:
         # Saved with youtu.be shortlink

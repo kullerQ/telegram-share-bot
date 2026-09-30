@@ -80,8 +80,12 @@ async def _validate_storage_chat(application: App, settings: Settings) -> None:
         raise RuntimeError(strings.CONFIG_STORAGE_CHAT_NOT_PRIVATE)
 
 
-async def _maintain_downloads(download_dir: Path, stop_event: asyncio.Event) -> None:
-    """Periodically remove abandoned work directories without blocking updates."""
+async def _maintain_downloads(
+    download_dir: Path,
+    stop_event: asyncio.Event,
+    media_cache: MediaCache | None = None,
+) -> None:
+    """Periodically maintain download work and the optional media cache."""
     while not stop_event.is_set():
         try:
             await asyncio.wait_for(
@@ -96,10 +100,30 @@ async def _maintain_downloads(download_dir: Path, stop_event: asyncio.Event) -> 
                         removed,
                         "y" if removed == 1 else "ies",
                     )
+                if media_cache is not None:
+                    await _maintain_media_cache(media_cache)
             except Exception:
                 logging.getLogger(__name__).warning(
                     "Periodic download cleanup failed", exc_info=True
                 )
+
+
+async def _maintain_media_cache(cache: MediaCache) -> None:
+    """Keep optional cache metadata bounded and remove legacy credential keys."""
+    try:
+        rows_pruned, credential_rows_removed = await cache.maintain()
+    except Exception:
+        logging.getLogger(__name__).warning(
+            "Periodic media-cache maintenance failed", exc_info=True
+        )
+        return
+    if rows_pruned or credential_rows_removed:
+        logging.getLogger(__name__).info(
+            "Media-cache maintenance removed %s least-recently-used rows and "
+            "%s credential-bearing rows",
+            rows_pruned,
+            credential_rows_removed,
+        )
 
 
 async def _post_init(application: App) -> None:
@@ -133,6 +157,9 @@ async def _post_init(application: App) -> None:
 
     if isinstance(settings, Settings):
         await _validate_storage_chat(application, settings)
+    media_cache = application.bot_data.get("media_cache")
+    if isinstance(media_cache, MediaCache):
+        await _maintain_media_cache(media_cache)
     preview_resolver = application.bot_data.get(_PREVIEW_RESOLVER)
     if isinstance(preview_resolver, PreviewResolver):
         await preview_resolver.start()
@@ -140,7 +167,11 @@ async def _post_init(application: App) -> None:
         stop_event = asyncio.Event()
         application.bot_data[_MEDIA_MAINTENANCE_STOP] = stop_event
         application.bot_data[_MEDIA_MAINTENANCE_TASK] = asyncio.create_task(
-            _maintain_downloads(download_dir, stop_event),
+            _maintain_downloads(
+                download_dir,
+                stop_event,
+                media_cache if isinstance(media_cache, MediaCache) else None,
+            ),
             name="media-download-maintenance",
         )
 

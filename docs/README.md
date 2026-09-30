@@ -166,6 +166,7 @@ Inline requests and their Cancel/Retry ownership are held in memory. A bot resta
 - `HTTPS_ONLY` defaults to true (set `false` to allow plain `http://` media URLs).
 - Captions: `CAPTION_MODE=media` (default, linked media title for user sends), `custom` (only text after the URL), or `off` (no captions) sets the behavior for users who have not chosen a caption preference or have reset their settings. Custom captions are plain text, max 1024 characters, not stored in the media cache, and not sent to `STORAGE_CHAT_ID`.
 - Per-user settings: `/settings` saves preferences in `./data/user_settings.db`, separate from temporary downloads. Back up `./data` to retain them; the directory is mounted at `/app/data` in Docker and ignored by Git.
+- Media cache: Telegram file IDs are stored in `./downloads/media_cache.db` by default (or `CACHE_DB_PATH`). It is disposable and is pruned to about 10,000 least-recently-used entries over periodic maintenance. Losing it may cause media to download again; it does not erase user preferences.
 - YouTube clips: optional `start-end` after the link, or `?t=` / `start=` on the URL plus a duration in seconds, or `?t=` alone (from start to end). Max clip length 10 minutes. Requires `ffmpeg` (already in the Docker image). When suitable HLS streams are available, video and audio are fetched separately and combined locally to avoid slow section transfers.
 - Unsupported or oversize URLs replace the placeholder with an error message.
 
@@ -175,3 +176,11 @@ Inline requests and their Cancel/Retry ownership are held in memory. A bot resta
 - Respect platform Terms of Service for downloaded content; this project is for personal/lightweight use.
 - Previously uploaded videos are reused when their recorded output quality is compatible with the requested policy. Auto prefers a cached Best upload when it is at least as good as the cached Auto upload. Clip ranges and full videos remain separate cache entries; captions are applied when sent.
 - Source links containing a username or password are rejected before previews or downloads. The bot does not echo those credentials in messages or logs; signed media URLs produced internally by extractors remain usable and are not stored in the shared media cache.
+
+## Persistent data, backups, and cache repair
+
+`./data/user_settings.db` contains users' saved preferences and should be backed up. `./downloads/media_cache.db` contains reusable Telegram file IDs and can be rebuilt if needed. Keep the two databases separate when backing up or repairing them.
+
+For a stopped-bot backup, stop the bot cleanly and copy each database along with any matching `-wal`, `-shm`, or `-journal` sidecar files that remain. For a live backup, use SQLite's online backup API for each database; copying only a live `.db` file may omit committed changes still in its WAL. Do not remove or rename SQLite sidecars while the bot is running.
+
+The media cache is optional. If SQLite reports that it is corrupt or inaccessible, the bot disables cache use and continues serving new requests. Stop the bot before repair, keep a backup of `./data` and the cache files, then move only `media_cache.db` and its matching sidecars aside as one set before restarting. The bot will create an empty media cache. Never remove `./data/user_settings.db` as part of cache repair. If the error reports a lock, first check that only one bot process is using the database; a lock does not mean the database should be reset.

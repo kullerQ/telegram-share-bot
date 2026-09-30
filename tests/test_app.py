@@ -16,14 +16,18 @@ from telegram_share_bot.app import (
     _MEDIA_MAINTENANCE_STOP,
     _MEDIA_MAINTENANCE_TASK,
     _maintain_downloads,
+    _maintain_media_cache,
     _post_init,
     _post_shutdown,
     _validate_storage_chat,
     build_application,
 )
 from telegram_share_bot.config import Settings
+from telegram_share_bot.media.models import VideoQualityPolicy
 from telegram_share_bot.media.work import MediaWorkSupervisor
 from telegram_share_bot.platforms.previews import PreviewResolver
+from telegram_share_bot.storage.media_cache import MediaCache
+from telegram_share_bot.storage.user_settings import UserSettingsStore
 
 
 class TestAppInitialization(unittest.TestCase):
@@ -45,6 +49,32 @@ class TestAppInitialization(unittest.TestCase):
                 )
                 self.assertIsInstance(app.bot_data["preview_resolver"], PreviewResolver)
                 self.assertEqual(app.bot.request._media_write_timeout, 180.0)
+
+    def test_corrupt_optional_cache_does_not_reset_user_settings(self) -> None:
+        async def _run() -> None:
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                root = Path(tmp_dir)
+                settings_path = root / "data" / "user_settings.db"
+                expected_store = UserSettingsStore(settings_path)
+                expected = await expected_store.set_quality(42, VideoQualityPolicy.BEST)
+                cache_path = root / "downloads" / "media_cache.db"
+                cache_path.parent.mkdir(parents=True)
+                cache_path.write_bytes(b"corrupt optional cache")
+                settings = MagicMock(
+                    bot_token="123456789:ABCdefGHIjklMNOpqrsTUVwxyz",
+                    cache_db_path=cache_path,
+                    user_settings_db_path=settings_path,
+                    upload_timeout_seconds=180,
+                )
+
+                with patch("telegram_share_bot.app.load_settings", return_value=settings):
+                    app = build_application()
+
+                self.assertFalse(app.bot_data["media_cache"].available)
+                self.assertEqual(await app.bot_data["user_settings"].get(42), expected)
+                await _post_shutdown(app)
+
+        asyncio.run(_run())
 
     def test_shutdown_closes_owned_preview_client(self) -> None:
         async def _run() -> None:
@@ -70,6 +100,33 @@ class TestAppInitialization(unittest.TestCase):
             await _post_init(app)
             self.assertIsNotNone(resolver._client)
             await _post_shutdown(app)
+
+        asyncio.run(_run())
+
+    def test_startup_runs_cache_maintenance(self) -> None:
+        async def _run() -> None:
+            cache = MagicMock(spec=MediaCache)
+            cache.maintain = AsyncMock(return_value=(0, 0))
+            app = MagicMock()
+            app.bot._bot_user = MagicMock()
+            app.bot_data = {"media_cache": cache}
+
+            await _post_init(app)
+
+            cache.maintain.assert_awaited_once_with()
+            await _post_shutdown(app)
+
+        asyncio.run(_run())
+
+    def test_cache_maintenance_logs_counts_without_database_keys(self) -> None:
+        async def _run() -> None:
+            cache = MagicMock(spec=MediaCache)
+            cache.maintain = AsyncMock(return_value=(3, 2))
+            with self.assertLogs("telegram_share_bot.app", level="INFO") as captured:
+                await _maintain_media_cache(cache)
+            self.assertIn("3 least-recently-used rows", captured.output[0])
+            self.assertIn("2 credential-bearing rows", captured.output[0])
+            self.assertNotIn("secret-value", captured.output[0])
 
         asyncio.run(_run())
 
