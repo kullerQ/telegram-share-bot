@@ -26,6 +26,7 @@ if TYPE_CHECKING:
 # because process_ie_result mutates the info dict.
 _EXTRACT_INFO_TTL_SECONDS = 120
 _EXTRACT_INFO_CACHE_MAX = 64
+_MAX_WRAPPED_INFO_ENTRIES = 32
 _extract_info_cache: dict[str, tuple[float, _InfoDict]] = {}
 _extract_info_cache_lock = threading.Lock()
 
@@ -104,23 +105,73 @@ def _extract_info_cached(
 
 
 def _pick_info(info: Any) -> dict[str, Any]:
-    """Select the first playable entry and reject unsupported live sources."""
+    """Select a single media result from yt-dlp metadata and reject playlists."""
     if not isinstance(info, dict):
         raise DownloadError(strings.DOWNLOAD_EXTRACT_FAILED)
     if "entries" not in info:
+        result_type = info.get("_type")
+        if isinstance(result_type, str) and result_type in {"playlist", "multi_video"}:
+            raise DownloadError(strings.DOWNLOAD_PLAYLIST_UNSUPPORTED)
         picked = cast(dict[str, Any], info)
     else:
         raw_entries = info.get("entries")
-        if raw_entries is None:
+        if raw_entries is None or isinstance(raw_entries, (str, bytes, dict)):
             raise DownloadError(strings.DOWNLOAD_PLAYLIST_UNSUPPORTED)
-        entries = [entry for entry in list(raw_entries) if isinstance(entry, dict)]
-        if not entries:
-            raise DownloadError(strings.DOWNLOAD_PLAYLIST_UNSUPPORTED)
-        picked = cast(dict[str, Any], entries[0])
+
+        try:
+            entries = iter(raw_entries)
+        except TypeError as exc:
+            raise DownloadError(strings.DOWNLOAD_PLAYLIST_UNSUPPORTED) from exc
+
+        picked = None
+        raw_count = 0
+        for _ in range(_MAX_WRAPPED_INFO_ENTRIES):
+            try:
+                entry = next(entries)
+            except StopIteration:
+                break
+            except Exception as exc:
+                raise DownloadError(strings.DOWNLOAD_PLAYLIST_UNSUPPORTED) from exc
+            raw_count += 1
+            candidate = _usable_wrapped_entry(entry)
+            if candidate is not None:
+                if picked is not None:
+                    raise DownloadError(strings.DOWNLOAD_PLAYLIST_UNSUPPORTED)
+                picked = candidate
+
+        if raw_count == _MAX_WRAPPED_INFO_ENTRIES:
+            try:
+                next(entries)
+            except StopIteration:
+                pass
+            except Exception as exc:
+                raise DownloadError(strings.DOWNLOAD_PLAYLIST_UNSUPPORTED) from exc
+            else:
+                raise DownloadError(strings.DOWNLOAD_PLAYLIST_UNSUPPORTED)
+
+    if picked is None:
+        raise DownloadError(strings.DOWNLOAD_PLAYLIST_UNSUPPORTED)
 
     if picked.get("is_live") or picked.get("live_status") in ("is_live", "is_upcoming"):
         raise DownloadError(strings.DOWNLOAD_LIVE_UNSUPPORTED)
     return picked
+
+
+def _usable_wrapped_entry(entry: Any) -> dict[str, Any] | None:
+    """Return a structurally useful video entry, skipping empty placeholders."""
+    if not isinstance(entry, dict) or not entry:
+        return None
+    entry_type = entry.get("_type")
+    if "entries" in entry or (
+        isinstance(entry_type, str) and entry_type in {"playlist", "multi_video"}
+    ):
+        return None
+    has_identity = isinstance(entry.get("id"), (str, int)) and bool(entry.get("id"))
+    has_url = isinstance(entry.get("url"), str) and bool(entry.get("url"))
+    has_formats = isinstance(entry.get("formats"), list) and bool(entry.get("formats"))
+    if not (has_identity or has_url or has_formats):
+        return None
+    return cast(dict[str, Any], entry)
 
 
 def ensure_video_available(info: dict[str, Any], media_format: MediaFormat) -> None:
