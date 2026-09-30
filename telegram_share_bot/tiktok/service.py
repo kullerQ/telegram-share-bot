@@ -8,8 +8,6 @@ import threading
 from pathlib import Path
 from typing import Any
 
-import yt_dlp
-
 from telegram_share_bot import strings
 from telegram_share_bot.config import (
     DEFAULT_MAX_MEDIA_DURATION_SECONDS,
@@ -19,6 +17,7 @@ from telegram_share_bot.config import (
 )
 from telegram_share_bot.media.duration import ensure_full_media_duration
 from telegram_share_bot.media.models import DownloadedMedia, DownloadError, MediaFormat, MediaKind
+from telegram_share_bot.media.network import create_youtube_dl
 from telegram_share_bot.media.security import _safe_dns_resolution
 from telegram_share_bot.platforms.urls import safe_url_for_log
 from telegram_share_bot.tiktok.assets import _download_bytes, _guess_ext, _probe_media_duration
@@ -76,7 +75,7 @@ def download_tiktok_slideshow(
         }
         try:
             with _safe_dns_resolution():
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:  # type: ignore[arg-type]
+                with create_youtube_dl(ydl_opts) as ydl:
                     _download_bytes(
                         ydl,
                         source.audio_url,

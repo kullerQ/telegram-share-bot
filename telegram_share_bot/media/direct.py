@@ -6,11 +6,10 @@ import asyncio
 import logging
 from typing import Any
 
-import yt_dlp
-
 from telegram_share_bot.media.files import _classify_ext
 from telegram_share_bot.media.metadata import _extract_info_cached, _pick_info
 from telegram_share_bot.media.models import DirectMediaStream, MediaFormat, MediaKind
+from telegram_share_bot.media.network import create_youtube_dl
 from telegram_share_bot.media.security import (
     _safe_dns_resolution,
     is_allowed_media_host,
@@ -49,7 +48,7 @@ def _extract_direct_stream_sync(
     }
     try:
         with _safe_dns_resolution():
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:  # type: ignore[arg-type]
+            with create_youtube_dl(ydl_opts) as ydl:
                 extracted, _from_cache = _extract_info_cached(ydl, url)
                 info = _pick_info(extracted)
 

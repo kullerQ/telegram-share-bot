@@ -72,14 +72,14 @@ class TestDetectTikTokPhotoPost(unittest.TestCase):
         fake_ydl.__enter__ = MagicMock(return_value=fake_ydl)
         fake_ydl.__exit__ = MagicMock(return_value=False)
 
-        with patch("telegram_share_bot.tiktok.source.yt_dlp.YoutubeDL", return_value=fake_ydl):
+        with patch("telegram_share_bot.tiktok.source.create_youtube_dl", return_value=fake_ydl):
             ref = detect_tiktok_photo_post("https://vt.tiktok.com/ZSqcbj3bf/")
         self.assertIsNotNone(ref)
         assert ref is not None
         self.assertEqual(ref.video_id, "7687274479570980128")
 
         # Second call should hit the memo cache (no extra urlopen).
-        with patch("telegram_share_bot.tiktok.source.yt_dlp.YoutubeDL") as ydl_cls:
+        with patch("telegram_share_bot.tiktok.source.create_youtube_dl") as ydl_cls:
             ref2 = detect_tiktok_photo_post("https://vt.tiktok.com/ZSqcbj3bf/")
         ydl_cls.assert_not_called()
         self.assertEqual(ref2, ref)
@@ -120,7 +120,7 @@ class TestExtractSlideshow(unittest.TestCase):
             canonical_url="https://www.tiktok.com/@u/photo/1",
         )
         with (
-            patch("telegram_share_bot.tiktok.source.yt_dlp.YoutubeDL", return_value=fake_ydl),
+            patch("telegram_share_bot.tiktok.source.create_youtube_dl", return_value=fake_ydl),
             patch(
                 "telegram_share_bot.tiktok.source.is_safe_media_url",
                 return_value=True,
@@ -149,7 +149,7 @@ class TestExtractSlideshow(unittest.TestCase):
             canonical_url="https://www.tiktok.com/@u/photo/1",
         )
         with patch(
-            "telegram_share_bot.tiktok.source.yt_dlp.YoutubeDL", return_value=fake_ydl
+            "telegram_share_bot.tiktok.source.create_youtube_dl", return_value=fake_ydl
         ):
             with self.assertRaises(DownloadError) as ctx:
                 extract_slideshow(ref)
@@ -421,7 +421,7 @@ class TestBuildSlideshowVideo(unittest.TestCase):
                     return_value="ffmpeg",
                 ),
                 patch(
-                    "telegram_share_bot.tiktok.source.yt_dlp.YoutubeDL",
+                    "telegram_share_bot.tiktok.render.create_youtube_dl",
                     return_value=fake_ydl,
                 ),
                 patch(
@@ -508,7 +508,7 @@ class TestBuildSlideshowVideo(unittest.TestCase):
                     return_value="ffmpeg",
                 ),
                 patch(
-                    "telegram_share_bot.tiktok.source.yt_dlp.YoutubeDL",
+                    "telegram_share_bot.tiktok.render.create_youtube_dl",
                     return_value=fake_ydl,
                 ),
                 patch(
@@ -598,7 +598,7 @@ class TestBuildSlideshowVideo(unittest.TestCase):
                     return_value="ffmpeg",
                 ),
                 patch(
-                    "telegram_share_bot.tiktok.source.yt_dlp.YoutubeDL",
+                    "telegram_share_bot.tiktok.render.create_youtube_dl",
                     return_value=fake_ydl,
                 ),
                 patch(
@@ -746,7 +746,7 @@ class TestSlideshowTransferRoute(unittest.TestCase):
                     "telegram_share_bot.media.transfer.try_tiktok_slideshow",
                     return_value=result,
                 ) as slideshow,
-                patch("telegram_share_bot.media.transfer.yt_dlp.YoutubeDL") as ydl,
+                patch("telegram_share_bot.media.transfer.create_youtube_dl") as ydl,
             ):
                 actual = _download_sync(
                     "https://www.tiktok.com/@u/photo/1",

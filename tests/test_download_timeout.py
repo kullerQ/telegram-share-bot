@@ -107,7 +107,7 @@ class TestDownloadTimeout(unittest.IsolatedAsyncioTestCase):
                 "is_live": True,
             }
 
-            with patch("yt_dlp.YoutubeDL") as mock_ydl_cls:
+            with patch("telegram_share_bot.media.transfer.create_youtube_dl") as mock_ydl_cls:
                 mock_ydl_cls.return_value.__enter__.return_value = mock_ydl
                 with self.assertRaises(DownloadError) as ctx:
                     _download_sync(

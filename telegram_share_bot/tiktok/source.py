@@ -10,7 +10,6 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlsplit
 
-import yt_dlp
 from yt_dlp.networking import Request
 from yt_dlp.networking.exceptions import RequestError
 from yt_dlp.networking.impersonate import ImpersonateTarget
@@ -18,7 +17,8 @@ from yt_dlp.networking.impersonate import ImpersonateTarget
 from telegram_share_bot import strings
 from telegram_share_bot.config import DEFAULT_SLIDESHOW_MAX_IMAGES
 from telegram_share_bot.media.models import DownloadError
-from telegram_share_bot.media.security import is_safe_media_url
+from telegram_share_bot.media.network import create_youtube_dl
+from telegram_share_bot.media.security import _safe_dns_resolution, is_safe_media_url
 from telegram_share_bot.platforms.urls import safe_url_for_log
 
 logger = logging.getLogger(__name__)
@@ -104,27 +104,28 @@ def _resolve_short_link(url: str) -> TikTokPhotoRef | None:
             "no_warnings": True,
             "socket_timeout": 15,
         }
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:  # type: ignore[arg-type]
-            # Prefer HEAD; fall back to GET if the CDN rejects HEAD.
-            final_url: str | None = None
-            for method in ("HEAD", "GET"):
-                try:
-                    request = Request(
-                        url,
-                        method=method,
-                        extensions={"impersonate": ImpersonateTarget("chrome")},
-                    )
-                    response = ydl.urlopen(request)  # type: ignore[arg-type]
-                    final_url = getattr(response, "url", None) or url
-                    # Drain/close to free the connection.
-                    with response:
-                        if method == "GET":
-                            _ = response.read(64)
-                    break
-                except RequestError:
-                    continue
-            if final_url:
-                resolved = _photo_ref_from_url(final_url)
+        with _safe_dns_resolution():
+            with create_youtube_dl(ydl_opts) as ydl:
+                # Prefer HEAD; fall back to GET if the CDN rejects HEAD.
+                final_url: str | None = None
+                for method in ("HEAD", "GET"):
+                    try:
+                        request = Request(
+                            url,
+                            method=method,
+                            extensions={"impersonate": ImpersonateTarget("chrome")},
+                        )
+                        response = ydl.urlopen(request)  # type: ignore[arg-type]
+                        final_url = getattr(response, "url", None) or url
+                        # Drain/close to free the connection.
+                        with response:
+                            if method == "GET":
+                                _ = response.read(64)
+                        break
+                    except RequestError:
+                        continue
+                if final_url:
+                    resolved = _photo_ref_from_url(final_url)
     except Exception as exc:
         logger.debug(
             "TikTok short-link resolve failed for %s: %s",
@@ -205,16 +206,17 @@ def extract_slideshow(
             "no_warnings": True,
             "socket_timeout": socket_timeout,
         }
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:  # type: ignore[arg-type]
-            ie = ydl.get_info_extractor("TikTok")
-            ie.initialize()
-            # TikTokIE internals: public extract discards imagePost slides.
-            web_url = ie._create_url(  # type: ignore[attr-defined]
-                ref.user.lstrip("@"), ref.video_id
-            )
-            item, status = ie._extract_web_data_and_status(  # type: ignore[attr-defined]
-                web_url, ref.video_id, fatal=False
-            )
+        with _safe_dns_resolution():
+            with create_youtube_dl(ydl_opts) as ydl:
+                ie = ydl.get_info_extractor("TikTok")
+                ie.initialize()
+                # TikTokIE internals: public extract discards imagePost slides.
+                web_url = ie._create_url(  # type: ignore[attr-defined]
+                    ref.user.lstrip("@"), ref.video_id
+                )
+                item, status = ie._extract_web_data_and_status(  # type: ignore[attr-defined]
+                    web_url, ref.video_id, fatal=False
+                )
     except DownloadError:
         raise
     except Exception as exc:

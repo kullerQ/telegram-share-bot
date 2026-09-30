@@ -551,7 +551,7 @@ class TestAudioFormatSelection(unittest.TestCase):
                 patch(
                     "telegram_share_bot.media.transfer._safe_dns_resolution", contextlib.nullcontext
                 ),
-                patch("telegram_share_bot.media.transfer.yt_dlp.YoutubeDL", FakeYdl),
+                patch("telegram_share_bot.media.transfer.create_youtube_dl", FakeYdl),
                 patch(
                     "telegram_share_bot.media.transfer._extract_info_cached",
                     return_value=(
@@ -610,7 +610,7 @@ class TestAudioFormatSelection(unittest.TestCase):
                         "telegram_share_bot.media.transfer._safe_dns_resolution",
                         contextlib.nullcontext,
                     ),
-                    patch("telegram_share_bot.media.transfer.yt_dlp.YoutubeDL", FakeYdl),
+                    patch("telegram_share_bot.media.transfer.create_youtube_dl", FakeYdl),
                     patch(
                         "telegram_share_bot.media.transfer._extract_info_cached",
                         return_value=(
@@ -769,7 +769,7 @@ class TestMeasuredFallback(unittest.TestCase):
                 patch(
                     "telegram_share_bot.media.transfer._safe_dns_resolution", contextlib.nullcontext
                 ),
-                patch("telegram_share_bot.media.transfer.yt_dlp.YoutubeDL", FakeYdl),
+                patch("telegram_share_bot.media.transfer.create_youtube_dl", FakeYdl),
                 patch(
                     "telegram_share_bot.media.transfer._extract_info_cached",
                     return_value=(
@@ -862,7 +862,7 @@ class TestMeasuredFallback(unittest.TestCase):
                 patch(
                     "telegram_share_bot.media.transfer._safe_dns_resolution", contextlib.nullcontext
                 ),
-                patch("telegram_share_bot.media.transfer.yt_dlp.YoutubeDL", FakeYdl),
+                patch("telegram_share_bot.media.transfer.create_youtube_dl", FakeYdl),
                 patch(
                     "telegram_share_bot.media.transfer._extract_info_cached",
                     return_value=(
@@ -894,7 +894,7 @@ class TestMediaDurationLimit(unittest.TestCase):
                 patch(
                     "telegram_share_bot.media.transfer._safe_dns_resolution", contextlib.nullcontext
                 ),
-                patch("telegram_share_bot.media.transfer.yt_dlp.YoutubeDL") as ydl_class,
+                patch("telegram_share_bot.media.transfer.create_youtube_dl") as ydl_class,
                 patch(
                     "telegram_share_bot.media.transfer._extract_info_cached",
                     return_value=(
@@ -947,7 +947,7 @@ class TestVideoIntegrity(unittest.TestCase):
                     ],
                 }
                 with (
-                    patch("telegram_share_bot.media.transfer.yt_dlp.YoutubeDL", return_value=ydl),
+                    patch("telegram_share_bot.media.transfer.create_youtube_dl", return_value=ydl),
                     patch("telegram_share_bot.media.transfer.is_safe_media_url", return_value=True),
                     patch(
                         "telegram_share_bot.media.transfer._safe_dns_resolution",
@@ -993,7 +993,7 @@ class TestVideoIntegrity(unittest.TestCase):
                 ydl.params = {}
                 ydl.__enter__.return_value = ydl
                 with (
-                    patch("telegram_share_bot.media.transfer.yt_dlp.YoutubeDL", return_value=ydl),
+                    patch("telegram_share_bot.media.transfer.create_youtube_dl", return_value=ydl),
                     patch("telegram_share_bot.media.transfer.is_safe_media_url", return_value=True),
                     patch(
                         "telegram_share_bot.media.transfer._safe_dns_resolution",

@@ -49,6 +49,43 @@ def _is_safe_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     return True
 
 
+def resolve_safe_addresses(
+    hostname: str,
+) -> tuple[ipaddress.IPv4Address | ipaddress.IPv6Address, ...]:
+    """Resolve a host and reject the whole answer if any address is unsafe.
+
+    Callers that open a connection must use one of the returned addresses
+    directly. Resolving once for validation and resolving the hostname again
+    in the HTTP library leaves a DNS-rebinding window.
+    """
+    host = hostname.strip().lower().rstrip(".")
+    if not host:
+        raise ValueError("Media URL has no host")
+    try:
+        literal = ipaddress.ip_address(host)
+    except ValueError:
+        literal = None
+    if literal is not None:
+        if not _is_safe_ip(literal):
+            raise ValueError("Media URL resolved to an unsafe address")
+        return (literal,)
+
+    results = _REAL_GETADDRINFO(host, None, type=socket.SOCK_STREAM, proto=socket.IPPROTO_TCP)
+    addresses: list[ipaddress.IPv4Address | ipaddress.IPv6Address] = []
+    for result in results:
+        sockaddr = result[4]
+        if not isinstance(sockaddr, Sequence) or not sockaddr:
+            continue
+        address = ipaddress.ip_address(sockaddr[0])
+        if not _is_safe_ip(address):
+            raise ValueError("Media URL resolved to an unsafe address")
+        if address not in addresses:
+            addresses.append(address)
+    if not addresses:
+        raise ValueError("Media URL has no usable addresses")
+    return tuple(addresses)
+
+
 def is_safe_media_url(url: str, *, https_only: bool = False) -> bool:
     """Validate an HTTP(S) URL is not internal/private/loopback/cloud-metadata."""
     try:
@@ -75,23 +112,7 @@ def is_safe_media_url(url: str, *, https_only: bool = False) -> bool:
         ):
             return False
 
-        try:
-            ip = ipaddress.ip_address(hostname_clean)
-            return _is_safe_ip(ip)
-        except ValueError:
-            pass
-
-        addr_info = socket.getaddrinfo(hostname_clean, None, proto=socket.IPPROTO_TCP)
-        if not addr_info:
-            return False
-
-        for res in addr_info:
-            sockaddr = res[4]
-            ip_str = sockaddr[0]
-            ip = ipaddress.ip_address(ip_str)
-            if not _is_safe_ip(ip):
-                return False
-
+        resolve_safe_addresses(hostname_clean)
         return True
     except Exception as exc:
         logger.warning("URL security check rejected %s: %s", safe_url_for_log(url), exc)

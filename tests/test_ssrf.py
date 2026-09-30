@@ -102,6 +102,14 @@ class TestSsrfProtection(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(OSError):
                     socket.getaddrinfo("evil.example", 80)
 
+    def test_safe_resolution_rejects_mixed_public_and_private_answers(self) -> None:
+        mixed_answers = [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", 0)),
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.1", 0)),
+        ]
+        with patch(_RESOLVER, return_value=mixed_answers):
+            self.assertFalse(is_safe_media_url("https://mixed.example/video"))
+
     def test_dns_guard_pins_first_safe_ip(self) -> None:
         calls = {"n": 0}
         first = [

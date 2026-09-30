@@ -14,6 +14,7 @@ from urllib.parse import urlencode, urljoin, urlsplit, urlunsplit
 import httpx
 
 from telegram_share_bot.media.models import DownloadError
+from telegram_share_bot.media.network import GuardedAsyncHTTPTransport
 from telegram_share_bot.platforms.icons import video_thumbnail_url
 from telegram_share_bot.platforms.urls import normalize_url, safe_url_for_log
 from telegram_share_bot.tiktok.source import TikTokPhotoRef, extract_slideshow
@@ -254,6 +255,8 @@ async def resolve_preview(url: str) -> Preview | None:
             async with httpx.AsyncClient(
                 timeout=lookup_timeout,
                 follow_redirects=False,
+                transport=GuardedAsyncHTTPTransport(),
+                trust_env=False,
                 headers={"User-Agent": "Mozilla/5.0 (compatible; TelegramShareBot/1.0)"},
             ) as client:
                 if platform == "tiktok":

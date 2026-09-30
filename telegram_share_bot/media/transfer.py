@@ -60,6 +60,7 @@ from telegram_share_bot.media.models import (
     VideoUnavailableError,
     _is_transient_download_error,
 )
+from telegram_share_bot.media.network import create_youtube_dl
 from telegram_share_bot.media.progress import TransferMonitor
 from telegram_share_bot.media.requests import (
     format_time_range,
@@ -169,7 +170,7 @@ def _download_sync(
 
     try:
         with _safe_dns_resolution():
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:  # type: ignore[arg-type]
+            with create_youtube_dl(ydl_opts) as ydl:
                 if abort_event is not None and abort_event.is_set():
                     raise DownloadError(
                         strings.DOWNLOAD_TIMED_OUT.format(timeout_seconds=timeout_seconds)
