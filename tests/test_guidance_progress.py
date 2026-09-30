@@ -432,6 +432,25 @@ class TestMediaProgress(unittest.IsolatedAsyncioTestCase):
             "https://i.ytimg.com/vi/dQw4w9WgXcQ/mqdefault.jpg",
         )
 
+    async def test_inline_query_rejects_credentials_before_preview_lookup(self) -> None:
+        query = MagicMock()
+        query.from_user = MagicMock(id=42)
+        query.query = "https://alice:secret@example.com/media"
+        query.answer = AsyncMock()
+        update = MagicMock()
+        update.inline_query = query
+
+        with patch(
+            "telegram_share_bot.handlers.query.platform_previews.resolve_preview",
+            new=AsyncMock(),
+        ) as preview:
+            await inline_query(update, self.context)
+
+        preview.assert_not_awaited()
+        result = query.answer.await_args.kwargs["results"][0]
+        self.assertEqual(result.description, strings.DOWNLOAD_UNSAFE_URL)
+        self.assertNotIn("alice", result.description)
+
     async def test_inline_non_youtube_link_falls_back_to_platform_logo(self) -> None:
         query = MagicMock()
         query.from_user = MagicMock(id=42)

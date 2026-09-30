@@ -25,7 +25,7 @@ from telegram_share_bot.media.requests import (
     extract_media_request,
     format_time_range,
 )
-from telegram_share_bot.platforms.urls import safe_url_for_log
+from telegram_share_bot.platforms.urls import has_url_credentials, safe_url_for_log
 from telegram_share_bot.storage.user_settings import (
     UserSharingSettings,
 )
@@ -133,6 +133,13 @@ async def chosen_inline_result(update: Update, context: ContextTypes.DEFAULT_TYP
             context,
             inline_message_id,
             strings.INLINE_CHOSEN_NO_URL,
+        )
+        return
+    if has_url_credentials(url):
+        await _edit_inline_text(
+            context,
+            inline_message_id,
+            strings.DOWNLOAD_UNSAFE_URL,
         )
         return
 

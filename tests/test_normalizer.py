@@ -5,6 +5,7 @@ from __future__ import annotations
 import unittest
 
 from telegram_share_bot.platforms.urls import (
+    has_url_credentials,
     is_public_cacheable_url,
     looks_signed_url,
     normalize_url,
@@ -112,6 +113,29 @@ class TestNormalizeUrl(unittest.TestCase):
         self.assertFalse(
             is_public_cacheable_url("https://cdn.example.com/v.mp4?custom=1")
         )
+
+    def test_credentials_and_malformed_authorities_are_not_cacheable(self) -> None:
+        unsafe_urls = (
+            "https://user:secret@youtube.com/watch?v=dQw4w9WgXcQ",
+            "https://user%40name@youtube.com/watch?v=dQw4w9WgXcQ",
+            "https://@youtube.com/watch?v=dQw4w9WgXcQ",
+            "https://youtube.com:bad-port/watch?v=dQw4w9WgXcQ",
+            "https://[broken/watch?v=dQw4w9WgXcQ",
+        )
+        for url in unsafe_urls:
+            with self.subTest(url=url):
+                self.assertTrue(has_url_credentials(url))
+                self.assertFalse(is_public_cacheable_url(url))
+                self.assertEqual(normalize_url(url), "")
+
+    def test_log_safe_url_removes_credentials_or_hides_malformed_text(self) -> None:
+        self.assertEqual(
+            safe_url_for_log(
+                "https://user:secret@youtube.com/watch?v=dQw4w9WgXcQ"
+            ),
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        )
+        self.assertEqual(safe_url_for_log("https://user:secret@[broken/path"), "<invalid-url>")
 
     def test_safe_url_for_log_strips_query(self) -> None:
         self.assertEqual(
