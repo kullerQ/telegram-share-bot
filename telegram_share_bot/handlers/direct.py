@@ -546,6 +546,10 @@ async def _run_direct_download(
         trace.event("failed", failure="unexpected", level=logging.ERROR, exc_info=True)
         await _edit_direct_status(status_message, strings.DIRECT_SEND_FAILED)
     finally:
-        await _release_user_download_slot(context, user_id)
-        if media is not None:
-            cleanup_media(media)
+        try:
+            if media is not None:
+                cleanup_media(media)
+        except Exception:
+            logger.warning("Direct media cleanup failed category=filesystem")
+        finally:
+            await _release_user_download_slot(context, user_id)

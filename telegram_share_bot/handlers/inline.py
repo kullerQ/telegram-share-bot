@@ -52,14 +52,15 @@ from .state import (
     _VIDEO_BALANCED_CALLBACK_PREFIX,
     _VIDEO_BEST_CALLBACK_PREFIX,
     _VIDEO_CALLBACK_PREFIX,
+    _active_inline_map,
+    _attach_inline_task,
+    _finalize_inline_request,
     _is_user_allowed,
     _pending_clip_map,
     _pending_map,
     _record_cancelled_inline,
-    _release_user_download_slot,
+    _reserve_inline_request,
     _store_pending_url,
-    _task_map,
-    _try_acquire_user_download_slot,
 )
 from .trace import _SendTrace
 
@@ -143,8 +144,15 @@ async def chosen_inline_result(update: Update, context: ContextTypes.DEFAULT_TYP
         )
         return
 
-    denial = await _try_acquire_user_download_slot(context, user_id)
+    active, denial = await _reserve_inline_request(
+        context,
+        inline_message_id=inline_message_id,
+        result_id=chosen.result_id,
+        user_id=user_id,
+    )
     if denial is not None:
+        if denial == strings.INLINE_ALREADY_PREPARING:
+            return
         _SendTrace(uuid4().hex[:12], "inline", media_format, time_range, user_id).event(
             "denied", failure="rate_limit"
         )
@@ -154,29 +162,28 @@ async def chosen_inline_result(update: Update, context: ContextTypes.DEFAULT_TYP
             denial,
         )
         return
-
-    tasks = _task_map(context)
-    existing = tasks.get(inline_message_id)
-    if existing is not None and not existing.done():
-        await _release_user_download_slot(context, user_id)
-        return
-
-    task = asyncio.create_task(
-        _prepare_inline_media(
-            context,
-            inline_message_id=inline_message_id,
-            url=url,
-            result_id=chosen.result_id,
-            user_id=user_id,
-            custom_caption=custom_caption,
-            time_range=time_range,
-            media_format=media_format,
-            quality_policy=quality_policy,
-            preferences=preferences,
-        ),
-        name=f"prepare-inline-{chosen.result_id}",
-    )
-    tasks[inline_message_id] = task
+    assert active is not None
+    try:
+        task = asyncio.create_task(
+            _prepare_inline_media(
+                context,
+                inline_message_id=inline_message_id,
+                url=url,
+                result_id=chosen.result_id,
+                user_id=user_id,
+                custom_caption=custom_caption,
+                time_range=time_range,
+                media_format=media_format,
+                quality_policy=quality_policy,
+                preferences=preferences,
+                active_request=active,
+            ),
+            name=f"prepare-inline-{chosen.result_id}",
+        )
+        _attach_inline_task(context, inline_message_id, active, task)
+    except BaseException:
+        await _finalize_inline_request(context, inline_message_id, active)
+        raise
 
 
 async def retry_inline_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -202,7 +209,7 @@ async def retry_inline_callback(update: Update, context: ContextTypes.DEFAULT_TY
     if pending is None:
         await query.answer(text=strings.INLINE_RETRY_EXPIRED, show_alert=True)
         return
-    if pending.owner_user_id is not None and pending.owner_user_id != user_id:
+    if pending.owner_user_id != user_id:
         await query.answer(text=strings.SETTINGS_NOT_YOURS, show_alert=True)
         return
 
@@ -211,21 +218,22 @@ async def retry_inline_callback(update: Update, context: ContextTypes.DEFAULT_TY
         await query.answer(text=strings.INLINE_RETRY_EXPIRED, show_alert=True)
         return
 
-    tasks = _task_map(context)
-    existing = tasks.get(inline_message_id)
-    if existing is not None and not existing.done():
-        await query.answer(text=strings.INLINE_ALREADY_PREPARING)
-        return
-
-    denial = await _try_acquire_user_download_slot(context, user_id)
+    retry_result_id = f"retry-{uuid4().hex}"
+    active, denial = await _reserve_inline_request(
+        context,
+        inline_message_id=inline_message_id,
+        result_id=retry_result_id,
+        user_id=user_id,
+    )
     if denial is not None:
         await query.answer(text=denial, show_alert=True)
         return
+    assert active is not None
 
     time_range = None if using_full_video else pending.time_range
     _store_pending_url(
         context,
-        result_id,
+        retry_result_id,
         pending.url,
         custom_caption=pending.custom_caption,
         time_range=time_range,
@@ -234,38 +242,75 @@ async def retry_inline_callback(update: Update, context: ContextTypes.DEFAULT_TY
         preferences=pending.preferences,
         owner_user_id=pending.owner_user_id,
     )
-    await query.answer(text=strings.INLINE_RETRY_ANSWER)
-    display_url = safe_url_for_log(pending.url)
-    pending_message = (
-        strings.INLINE_PENDING_CLIP_MESSAGE.format(
-            range_label=format_time_range(time_range),
-            url=display_url,
+    try:
+        await query.answer(text=strings.INLINE_RETRY_ANSWER)
+        if active.cancelled:
+            _pending_map(context).pop(retry_result_id, None)
+            _pending_map(context).pop(result_id, None)
+            await _finalize_inline_request(context, inline_message_id, active)
+            return
+        display_url = safe_url_for_log(pending.url)
+        pending_message = (
+            strings.INLINE_PENDING_CLIP_MESSAGE.format(
+                range_label=format_time_range(time_range),
+                url=display_url,
+            )
+            if time_range is not None
+            else strings.INLINE_PENDING_MESSAGE.format(url=display_url)
         )
-        if time_range is not None
-        else strings.INLINE_PENDING_MESSAGE.format(url=display_url)
-    )
-    await _edit_inline_text(
-        context,
-        inline_message_id,
-        pending_message,
-        reply_markup=_cancel_keyboard(result_id),
-    )
-    task = asyncio.create_task(
-        _prepare_inline_media(
+        await _edit_inline_text(
             context,
-            inline_message_id=inline_message_id,
-            url=pending.url,
-            result_id=result_id,
-            user_id=user_id,
-            custom_caption=pending.custom_caption,
-            time_range=time_range,
-            media_format=pending.media_format,
-            quality_policy=pending.quality_policy,
-            preferences=pending.preferences,
-        ),
-        name=f"retry-inline-{result_id}",
-    )
-    tasks[inline_message_id] = task
+            inline_message_id,
+            pending_message,
+            reply_markup=_cancel_keyboard(retry_result_id),
+        )
+        if active.cancelled:
+            _pending_map(context).pop(retry_result_id, None)
+            _pending_map(context).pop(result_id, None)
+            await _edit_inline_text(
+                context,
+                inline_message_id,
+                strings.INLINE_CANCELLED,
+                reply_markup=_EMPTY_KEYBOARD,
+            )
+            await _finalize_inline_request(context, inline_message_id, active)
+            return
+        _pending_map(context).pop(result_id, None)
+        task = asyncio.create_task(
+            _prepare_inline_media(
+                context,
+                inline_message_id=inline_message_id,
+                url=pending.url,
+                result_id=retry_result_id,
+                user_id=user_id,
+                custom_caption=pending.custom_caption,
+                time_range=time_range,
+                media_format=pending.media_format,
+                quality_policy=pending.quality_policy,
+                preferences=pending.preferences,
+                active_request=active,
+            ),
+            name=f"retry-inline-{retry_result_id}",
+        )
+        _attach_inline_task(context, inline_message_id, active, task)
+    except BaseException:
+        _pending_map(context).pop(retry_result_id, None)
+        if active.cancelled:
+            _pending_map(context).pop(result_id, None)
+        else:
+            _store_pending_url(
+                context,
+                result_id,
+                pending.url,
+                custom_caption=pending.custom_caption,
+                time_range=pending.time_range,
+                media_format=pending.media_format,
+                quality_policy=pending.quality_policy,
+                preferences=pending.preferences,
+                owner_user_id=pending.owner_user_id,
+            )
+        await _finalize_inline_request(context, inline_message_id, active)
+        raise
 
 
 async def private_choice_cancel_callback(
@@ -439,20 +484,33 @@ async def cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     result_id = query.data.removeprefix(_CALLBACK_PREFIX)
     inline_message_id = query.inline_message_id
     pending = _pending_map(context).get(result_id)
-    if (
-        pending is not None
-        and pending.owner_user_id is not None
-        and pending.owner_user_id != (query.from_user.id if query.from_user else None)
-    ):
+    active = _active_inline_map(context).get(inline_message_id or "")
+    owner_user_id: int | None
+    if active is not None:
+        if active.result_id != result_id:
+            await query.answer(text=strings.INLINE_RETRY_EXPIRED, show_alert=True)
+            return
+        owner_user_id = active.owner_user_id
+    elif pending is not None:
+        owner_user_id = pending.owner_user_id
+    else:
+        await query.answer(text=strings.INLINE_RETRY_EXPIRED, show_alert=True)
+        return
+    if owner_user_id != (query.from_user.id if query.from_user else None):
         await query.answer(text=strings.SETTINGS_NOT_YOURS, show_alert=True)
         return
+
+    if inline_message_id:
+        if active is not None:
+            active.cancelled = True
+            _record_cancelled_inline(context, inline_message_id)
+        task = active.task if active is not None else None
+        if task is not None and not task.done():
+            task.cancel()
+    _pending_map(context).pop(result_id, None)
     await query.answer(text=strings.INLINE_CANCEL_ANSWER)
 
     if inline_message_id:
-        _record_cancelled_inline(context, inline_message_id)
-        task = _task_map(context).pop(inline_message_id, None)
-        if task is not None and not task.done():
-            task.cancel()
         # Bots cannot deleteMessage by inline_message_id; clear content instead.
         await _edit_inline_text(
             context,
@@ -460,5 +518,3 @@ async def cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             strings.INLINE_CANCELLED,
             reply_markup=_EMPTY_KEYBOARD,
         )
-
-    _pending_map(context).pop(result_id, None)

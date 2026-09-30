@@ -157,6 +157,7 @@ class TestInlineRetry(unittest.IsolatedAsyncioTestCase):
                 url="https://youtube.com/watch?v=example",
                 custom_caption="caption",
                 time_range=TimeRange(60, 120),
+                owner_user_id=42,
             )
         }
         update = MagicMock()
@@ -179,8 +180,10 @@ class TestInlineRetry(unittest.IsolatedAsyncioTestCase):
 
         prepare.assert_awaited_once()
         self.assertIsNone(prepare.await_args.kwargs["time_range"])
+        retry_result_id = prepare.await_args.kwargs["result_id"]
+        self.assertNotEqual(retry_result_id, result_id)
         self.assertEqual(
-            self.context.application.bot_data["pending_inline"][result_id].time_range,
+            self.context.application.bot_data["pending_inline"][retry_result_id].time_range,
             None,
         )
         query.answer.assert_awaited_once()
