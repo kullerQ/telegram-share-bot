@@ -23,6 +23,7 @@ from telegram_share_bot.app import (
 )
 from telegram_share_bot.config import Settings
 from telegram_share_bot.media.work import MediaWorkSupervisor
+from telegram_share_bot.platforms.previews import PreviewResolver
 
 
 class TestAppInitialization(unittest.TestCase):
@@ -42,7 +43,35 @@ class TestAppInitialization(unittest.TestCase):
                 self.assertIsInstance(
                     app.bot_data["media_work_supervisor"], MediaWorkSupervisor
                 )
+                self.assertIsInstance(app.bot_data["preview_resolver"], PreviewResolver)
                 self.assertEqual(app.bot.request._media_write_timeout, 180.0)
+
+    def test_shutdown_closes_owned_preview_client(self) -> None:
+        async def _run() -> None:
+            resolver = PreviewResolver()
+            await resolver.start()
+            app = MagicMock()
+            app.bot_data = {"preview_resolver": resolver}
+
+            await _post_shutdown(app)
+
+            self.assertIsNone(resolver._client)
+            self.assertTrue(resolver._closed)
+
+        asyncio.run(_run())
+
+    def test_startup_opens_owned_preview_client(self) -> None:
+        async def _run() -> None:
+            resolver = PreviewResolver()
+            app = MagicMock()
+            app.bot._bot_user = MagicMock()
+            app.bot_data = {"preview_resolver": resolver}
+
+            await _post_init(app)
+            self.assertIsNotNone(resolver._client)
+            await _post_shutdown(app)
+
+        asyncio.run(_run())
 
     def test_shutdown_stops_owned_download_maintenance_task(self) -> None:
         async def _run() -> None:

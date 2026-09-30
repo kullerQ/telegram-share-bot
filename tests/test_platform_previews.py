@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 import unittest
 from unittest.mock import AsyncMock, patch
 
 import httpx
 
 from telegram_share_bot.media.models import DownloadError
+from telegram_share_bot.media.work import MediaWorkSupervisor
 from telegram_share_bot.platforms.previews import (
-    _PREVIEW_CACHE,
     Preview,
+    PreviewResolver,
     _lookup_page_image,
     _lookup_reddit,
     _lookup_tiktok,
@@ -23,8 +25,22 @@ from telegram_share_bot.tiktok.source import SlideshowSource
 
 
 class TestPlatformPreviews(unittest.IsolatedAsyncioTestCase):
-    def setUp(self) -> None:
-        _PREVIEW_CACHE.clear()
+    async def _resolver(
+        self,
+        handler: object | None = None,
+        *,
+        max_active_lookups: int = 4,
+        photo_workers: int = 2,
+    ) -> PreviewResolver:
+        transport = httpx.MockTransport(handler or (lambda _request: httpx.Response(200)))
+        client = httpx.AsyncClient(transport=transport)  # type: ignore[arg-type]
+        resolver = PreviewResolver(
+            max_active_lookups=max_active_lookups,
+            photo_workers=photo_workers,
+        )
+        await resolver.start(client)
+        self.addAsyncCleanup(resolver.close)
+        return resolver
 
     async def test_youtube_preview_needs_no_http_request(self) -> None:
         with patch("telegram_share_bot.platforms.previews.httpx.AsyncClient") as client:
@@ -63,7 +79,7 @@ class TestPlatformPreviews(unittest.IsolatedAsyncioTestCase):
             "telegram_share_bot.platforms.previews.extract_slideshow", return_value=source
         ) as extract:
             async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: None)) as client:
-                preview = await _lookup_tiktok_media(url, client)
+                preview = await _lookup_tiktok_media(url, client, MediaWorkSupervisor(2))
         self.assertEqual(preview, Preview(image))
         self.assertEqual(extract.call_args.args[0].canonical_url, url)
         self.assertEqual(
@@ -92,7 +108,9 @@ class TestPlatformPreviews(unittest.IsolatedAsyncioTestCase):
             "telegram_share_bot.platforms.previews.extract_slideshow", return_value=source
         ) as extract:
             async with httpx.AsyncClient(transport=httpx.MockTransport(response)) as client:
-                preview = await _lookup_tiktok_media("https://vt.tiktok.com/ZSqwHG2TG", client)
+                preview = await _lookup_tiktok_media(
+                    "https://vt.tiktok.com/ZSqwHG2TG", client, MediaWorkSupervisor(2)
+                )
         self.assertEqual(preview, Preview(image))
         self.assertEqual(requests, ["https://vt.tiktok.com/ZSqwHG2TG"])
         self.assertEqual(extract.call_args.args[0].canonical_url, canonical)
@@ -111,7 +129,9 @@ class TestPlatformPreviews(unittest.IsolatedAsyncioTestCase):
                 async with httpx.AsyncClient(
                     transport=httpx.MockTransport(lambda _: None)
                 ) as client:
-                    self.assertIsNone(await _lookup_tiktok_media(url, client))
+                    self.assertIsNone(
+                        await _lookup_tiktok_media(url, client, MediaWorkSupervisor(2))
+                    )
 
     async def test_x_page_image_and_untrusted_image_fallback(self) -> None:
         def response(request: httpx.Request) -> httpx.Response:
@@ -190,12 +210,13 @@ class TestPlatformPreviews(unittest.IsolatedAsyncioTestCase):
 
     async def test_x_lookup_preserves_account_case_and_strips_tracking(self) -> None:
         expected = Preview("https://pbs.twimg.com/ext_tw_video_thumb/example.jpg")
+        resolver = await self._resolver()
         with patch(
             "telegram_share_bot.platforms.previews._lookup_page_image",
             new=AsyncMock(return_value=expected),
         ) as lookup:
             preview = await resolve_preview(
-                "https://x.com/PunchingCat/status/2103311089614340120?s=20"
+                "https://x.com/PunchingCat/status/2103311089614340120?s=20", resolver
             )
         self.assertEqual(preview, expected)
         self.assertEqual(
@@ -205,12 +226,13 @@ class TestPlatformPreviews(unittest.IsolatedAsyncioTestCase):
 
     async def test_x_video_path_uses_canonical_post_for_preview(self) -> None:
         expected = Preview("https://pbs.twimg.com/amplify_video_thumb/example.jpg")
+        resolver = await self._resolver()
         with patch(
             "telegram_share_bot.platforms.previews._lookup_page_image",
             new=AsyncMock(return_value=expected),
         ) as lookup:
             preview = await resolve_preview(
-                "https://x.com/animalsbabyy/status/2103205625752953328/video/1"
+                "https://x.com/animalsbabyy/status/2103205625752953328/video/1", resolver
             )
         self.assertEqual(preview, expected)
         self.assertEqual(
@@ -219,15 +241,20 @@ class TestPlatformPreviews(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_failed_lookup_is_cached_as_logo_fallback(self) -> None:
+        resolver = await self._resolver()
         with patch(
             "telegram_share_bot.platforms.previews._lookup_page_image",
             new=AsyncMock(return_value=None),
         ) as lookup:
             for _ in range(2):
-                self.assertIsNone(await resolve_preview("https://x.com/user/status/123"))
+                self.assertIsNone(
+                    await resolve_preview("https://x.com/user/status/123", resolver)
+                )
         lookup.assert_awaited_once()
 
     async def test_slow_lookup_returns_logo_fallback(self) -> None:
+        resolver = await self._resolver()
+
         async def slow_lookup(*args: object) -> Preview | None:
             await asyncio.sleep(1)
             return Preview("https://pbs.twimg.com/late.jpg")
@@ -236,7 +263,151 @@ class TestPlatformPreviews(unittest.IsolatedAsyncioTestCase):
             patch("telegram_share_bot.platforms.previews._LOOKUP_TIMEOUT_SECONDS", 0.01),
             patch("telegram_share_bot.platforms.previews._lookup_page_image", slow_lookup),
         ):
-            self.assertIsNone(await resolve_preview("https://x.com/user/status/456"))
+            self.assertIsNone(await resolve_preview("https://x.com/user/status/456", resolver))
+
+    async def test_tiktok_oembed_rejects_oversized_response_body(self) -> None:
+        client = httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda _request: httpx.Response(200, content=b"{" + b" " * (256 * 1024))
+            )
+        )
+        async with client:
+            preview = await _lookup_tiktok(
+                "https://www.tiktok.com/@user/video/123456789", client
+            )
+        self.assertIsNone(preview)
+
+    async def test_unique_lookups_never_exceed_request_capacity(self) -> None:
+        gate = asyncio.Event()
+        started = asyncio.Event()
+        active = 0
+        peak = 0
+        request_count = 0
+
+        async def response(_request: httpx.Request) -> httpx.Response:
+            nonlocal active, peak, request_count
+            active += 1
+            request_count += 1
+            peak = max(peak, active)
+            started.set()
+            try:
+                await gate.wait()
+                return httpx.Response(
+                    200,
+                    headers={"content-type": "text/html"},
+                    text="<head><meta property='og:image' "
+                    "content='https://pbs.twimg.com/preview.jpg'></head>",
+                )
+            finally:
+                active -= 1
+
+        resolver = await self._resolver(response, max_active_lookups=2)
+        tasks = [
+            asyncio.create_task(
+                resolve_preview(f"https://x.com/user/status/{index}", resolver)
+            )
+            for index in range(8)
+        ]
+        await asyncio.wait_for(started.wait(), timeout=1)
+        await asyncio.sleep(0)
+        self.assertEqual(request_count, 2)
+        self.assertLessEqual(peak, 2)
+        gate.set()
+        results = await asyncio.gather(*tasks)
+        self.assertEqual(sum(result is not None for result in results), 2)
+
+    async def test_identical_lookups_are_shared_and_waiter_cancel_isolated(self) -> None:
+        started = asyncio.Event()
+        gate = asyncio.Event()
+        expected = Preview("https://pbs.twimg.com/shared.jpg")
+        resolver = await self._resolver()
+
+        async def slow_lookup(*_args: object) -> Preview:
+            started.set()
+            await gate.wait()
+            return expected
+
+        with patch(
+            "telegram_share_bot.platforms.previews._lookup_page_image",
+            new=AsyncMock(side_effect=slow_lookup),
+        ) as lookup:
+            first = asyncio.create_task(
+                resolve_preview("https://x.com/user/status/789", resolver)
+            )
+            await asyncio.wait_for(started.wait(), timeout=1)
+            second = asyncio.create_task(
+                resolve_preview("https://x.com/user/status/789", resolver)
+            )
+            await asyncio.sleep(0)
+            first.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await first
+            gate.set()
+            self.assertEqual(await second, expected)
+        lookup.assert_awaited_once()
+
+    async def test_close_cancels_shared_lookup_and_closes_client(self) -> None:
+        started = asyncio.Event()
+
+        async def response(_request: httpx.Request) -> httpx.Response:
+            started.set()
+            await asyncio.Event().wait()
+            return httpx.Response(200)
+
+        resolver = await self._resolver(response)
+        assert resolver._client is not None
+        client = resolver._client
+        caller = asyncio.create_task(
+            resolve_preview("https://x.com/user/status/987", resolver)
+        )
+        await asyncio.wait_for(started.wait(), timeout=1)
+
+        await resolver.close()
+
+        with self.assertRaises(asyncio.CancelledError):
+            await caller
+        self.assertTrue(client.is_closed)
+
+    async def test_timed_out_photo_worker_keeps_its_native_slot(self) -> None:
+        resolver = await self._resolver(photo_workers=1)
+        worker_started = threading.Event()
+        worker_finish = threading.Event()
+        url = "https://www.tiktok.com/@user/photo/123456789"
+        source = SlideshowSource(
+            ("https://p16-common-sign.tiktokcdn-eu.com/first.jpeg",), None, "post", url
+        )
+
+        def blocking_extract(*_args: object, **_kwargs: object) -> SlideshowSource:
+            worker_started.set()
+            worker_finish.wait(2)
+            return source
+
+        try:
+            with (
+                patch(
+                    "telegram_share_bot.platforms.previews._TIKTOK_LOOKUP_TIMEOUT_SECONDS",
+                    0.03,
+                ),
+                patch(
+                    "telegram_share_bot.platforms.previews.extract_slideshow",
+                    side_effect=blocking_extract,
+                ),
+            ):
+                result = await resolve_preview(url, resolver)
+            self.assertIsNone(result)
+            self.assertTrue(worker_started.is_set())
+            self.assertIsNone(await resolver._photo_work.try_acquire(1))
+        finally:
+            worker_finish.set()
+
+        for _ in range(100):
+            lease = await resolver._photo_work.try_acquire(1)
+            if lease is not None:
+                await lease.release()
+                break
+            await asyncio.sleep(0.01)
+        else:
+            self.fail("native preview capacity was not restored after its worker exited")
 
 
 if __name__ == "__main__":

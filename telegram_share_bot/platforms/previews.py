@@ -15,6 +15,7 @@ import httpx
 
 from telegram_share_bot.media.models import DownloadError
 from telegram_share_bot.media.network import GuardedAsyncHTTPTransport
+from telegram_share_bot.media.work import MediaWorkSupervisor
 from telegram_share_bot.platforms.icons import video_thumbnail_url
 from telegram_share_bot.platforms.urls import normalize_url, safe_url_for_log
 from telegram_share_bot.tiktok.source import TikTokPhotoRef, extract_slideshow
@@ -28,7 +29,8 @@ _MAX_JSON_BYTES = 256 * 1024
 _CACHE_TTL_SECONDS = 300
 _NEGATIVE_CACHE_TTL_SECONDS = 60
 _CACHE_LIMIT = 128
-_PREVIEW_CACHE: dict[str, tuple[float, Preview | None]] = {}
+_MAX_ACTIVE_LOOKUPS = 4
+_TIKTOK_PHOTO_WORKERS = 2
 _REDDIT_POST_RE = re.compile(r"^/r/[^/]+/comments/([a-zA-Z0-9]+)(?:/|$)")
 _X_STATUS_RE = re.compile(r"^/([^/]+)/status/(\d+)(?:/|$)")
 _TIKTOK_MEDIA_RE = re.compile(r"^/@[^/]+/(video|photo)/(\d+)(?:/|$)")
@@ -96,9 +98,18 @@ def _trusted_image_url(url: object, platform: str) -> str | None:
 
 
 async def _lookup_tiktok(url: str, client: httpx.AsyncClient) -> Preview | None:
-    response = await client.get("https://www.tiktok.com/oembed", params={"url": url})
-    response.raise_for_status()
-    data = response.json()
+    body = bytearray()
+    async with client.stream(
+        "GET", "https://www.tiktok.com/oembed", params={"url": url}
+    ) as response:
+        response.raise_for_status()
+        async for chunk in response.aiter_bytes():
+            if len(body) + len(chunk) > _MAX_JSON_BYTES:
+                return None
+            body.extend(chunk)
+    data = json.loads(body)
+    if not isinstance(data, dict):
+        return None
     thumbnail = _trusted_image_url(data.get("thumbnail_url"), "tiktok")
     if thumbnail is None:
         return None
@@ -111,7 +122,11 @@ async def _lookup_tiktok(url: str, client: httpx.AsyncClient) -> Preview | None:
     )
 
 
-async def _lookup_tiktok_media(url: str, client: httpx.AsyncClient) -> Preview | None:
+async def _lookup_tiktok_media(
+    url: str,
+    client: httpx.AsyncClient,
+    photo_work: MediaWorkSupervisor,
+) -> Preview | None:
     parsed = urlsplit(url)
     match = _TIKTOK_MEDIA_RE.match(parsed.path)
     if match is None and parsed.hostname in {"vt.tiktok.com", "vm.tiktok.com"}:
@@ -135,16 +150,23 @@ async def _lookup_tiktok_media(url: str, client: httpx.AsyncClient) -> Preview |
             video_id=match.group(2),
             canonical_url=urlunsplit(("https", "www.tiktok.com", parsed.path, "", "")),
         )
+        lease = await photo_work.try_acquire(_TIKTOK_LOOKUP_TIMEOUT_SECONDS)
+        if lease is None:
+            logger.debug("TikTok photo preview skipped because native preview capacity is full")
+            return None
         try:
-            source = await asyncio.to_thread(
+            source = await lease.run_sync(
                 extract_slideshow,
                 ref,
                 max_images=1,
                 https_only=True,
                 socket_timeout=3,
+                wait_timeout_seconds=min(2.75, lease.remaining_seconds()),
             )
-        except DownloadError:
+        except (DownloadError, TimeoutError):
             return None
+        finally:
+            await lease.release()
         image_url = _trusted_image_url(next(iter(source.image_urls), None), "tiktok")
         return Preview(image_url) if image_url else None
     return await _lookup_tiktok(url, client)
@@ -218,78 +240,172 @@ async def _lookup_reddit(url: str, client: httpx.AsyncClient) -> Preview | None:
     )
 
 
-async def resolve_preview(url: str) -> Preview | None:
-    """Find a media thumbnail within a short time limit; return None for logo fallback."""
-    youtube = video_thumbnail_url(url)
-    if youtube is not None:
-        return Preview(youtube, 320, 180)
+class PreviewResolver:
+    """Own bounded HTTP preview lookups, cache, and native TikTok work."""
 
-    platform = _platform(url)
-    if platform is None:
-        return None
-    normalized = normalize_url(url)
-    cached = _PREVIEW_CACHE.get(normalized)
-    now = time.monotonic()
-    if cached is not None and cached[0] > now:
-        return cached[1]
+    def __init__(
+        self,
+        *,
+        max_active_lookups: int = _MAX_ACTIVE_LOOKUPS,
+        photo_workers: int = _TIKTOK_PHOTO_WORKERS,
+    ) -> None:
+        self._max_active_lookups = max(1, max_active_lookups)
+        self._active_lookups = 0
+        self._photo_work = MediaWorkSupervisor(max(1, photo_workers), max_waiters=0)
+        self._cache: dict[str, tuple[float, Preview | None]] = {}
+        self._inflight: dict[str, asyncio.Task[Preview | None]] = {}
+        self._client: httpx.AsyncClient | None = None
+        self._closed = False
 
-    # X redirects /video/1 links and can redirect lowercased account names.
-    # Request the canonical post path with the original account name casing.
-    if platform == "x":
-        path = urlsplit(url).path
-        status = _X_STATUS_RE.match(path)
-        if status is not None:
-            path = f"/{status.group(1)}/status/{status.group(2)}"
-        target = urlunsplit(("https", "x.com", path, "", ""))
-    elif platform == "instagram":
-        target = normalized
-    else:
-        target = url
-    started = time.monotonic()
-    preview: Preview | None = None
-    lookup_timeout = (
-        _TIKTOK_LOOKUP_TIMEOUT_SECONDS if platform == "tiktok" else _LOOKUP_TIMEOUT_SECONDS
-    )
-    try:
-        async with asyncio.timeout(lookup_timeout):
-            async with httpx.AsyncClient(
-                timeout=lookup_timeout,
-                follow_redirects=False,
-                transport=GuardedAsyncHTTPTransport(),
-                trust_env=False,
-                headers={"User-Agent": "Mozilla/5.0 (compatible; TelegramShareBot/1.0)"},
-            ) as client:
+    async def start(self, client: httpx.AsyncClient | None = None) -> None:
+        """Open the app-owned HTTP client, or accept a client in isolated tests."""
+        if self._closed:
+            raise RuntimeError("Preview resolver is closed")
+        if self._client is not None:
+            return
+        self._client = client or httpx.AsyncClient(
+            timeout=httpx.Timeout(_TIKTOK_LOOKUP_TIMEOUT_SECONDS),
+            limits=httpx.Limits(
+                max_connections=_MAX_ACTIVE_LOOKUPS,
+                max_keepalive_connections=_MAX_ACTIVE_LOOKUPS,
+            ),
+            follow_redirects=False,
+            transport=GuardedAsyncHTTPTransport(),
+            trust_env=False,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; TelegramShareBot/1.0)"},
+        )
+
+    async def close(self) -> None:
+        """Stop shared lookups and close the application's connection pool."""
+        if self._closed:
+            return
+        self._closed = True
+        tasks = tuple(self._inflight.values())
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        client, self._client = self._client, None
+        if client is not None:
+            await client.aclose()
+
+    async def resolve(self, url: str) -> Preview | None:
+        """Return a cached/derived preview, or quickly fall back when saturated."""
+        youtube = video_thumbnail_url(url)
+        if youtube is not None:
+            return Preview(youtube, 320, 180)
+
+        platform = _platform(url)
+        client = self._client
+        if platform is None or client is None or self._closed:
+            return None
+        normalized = normalize_url(url)
+        now = time.monotonic()
+        cached = self._cache.get(normalized)
+        if cached is not None:
+            if cached[0] > now:
+                return cached[1]
+            self._cache.pop(normalized, None)
+
+        inflight = self._inflight.get(normalized)
+        if inflight is not None:
+            return await asyncio.shield(inflight)
+
+        # The counter update and task registration happen before the first
+        # suspension, so a burst of unique URLs cannot create an unbounded queue.
+        if self._active_lookups >= self._max_active_lookups:
+            logger.debug("Inline preview capacity is full; using platform logo")
+            return None
+        self._active_lookups += 1
+        try:
+            task = asyncio.create_task(
+                self._resolve_owned(url, normalized, platform, client),
+                name="inline-platform-preview",
+            )
+        except BaseException:
+            self._active_lookups -= 1
+            raise
+        self._inflight[normalized] = task
+        return await asyncio.shield(task)
+
+    async def _resolve_owned(
+        self,
+        url: str,
+        normalized: str,
+        platform: str,
+        client: httpx.AsyncClient,
+    ) -> Preview | None:
+        started = time.monotonic()
+        preview: Preview | None = None
+        lookup_timeout = (
+            _TIKTOK_LOOKUP_TIMEOUT_SECONDS if platform == "tiktok" else _LOOKUP_TIMEOUT_SECONDS
+        )
+        # X /video/1 redirects and case-normalization can hide otherwise valid cards.
+        if platform == "x":
+            path = urlsplit(url).path
+            status = _X_STATUS_RE.match(path)
+            if status is not None:
+                path = f"/{status.group(1)}/status/{status.group(2)}"
+            target = urlunsplit(("https", "x.com", path, "", ""))
+        elif platform == "instagram":
+            target = normalized
+        else:
+            target = url
+
+        try:
+            async with asyncio.timeout(lookup_timeout):
                 if platform == "tiktok":
-                    preview = await _lookup_tiktok_media(target, client)
+                    preview = await _lookup_tiktok_media(target, client, self._photo_work)
                 elif platform == "reddit":
                     preview = await _lookup_reddit(target, client)
                 else:
                     preview = await _lookup_page_image(target, platform, client)
-    except (
-        TimeoutError,
-        httpx.HTTPError,
-        ValueError,
-        TypeError,
-        KeyError,
-        IndexError,
-        AttributeError,
-    ) as exc:
-        logger.debug(
-            "Inline preview lookup failed for %s (%s): %s",
-            safe_url_for_log(url),
-            platform,
-            type(exc).__name__,
-        )
-    elapsed = time.monotonic() - started
-    logger.info(
-        "Inline preview lookup for %s (%s): %s in %.2fs",
-        safe_url_for_log(url),
-        platform,
-        "preview" if preview else "logo",
-        elapsed,
-    )
-    ttl = _CACHE_TTL_SECONDS if preview else _NEGATIVE_CACHE_TTL_SECONDS
-    _PREVIEW_CACHE[normalized] = (now + ttl, preview)
-    while len(_PREVIEW_CACHE) > _CACHE_LIMIT:
-        _PREVIEW_CACHE.pop(next(iter(_PREVIEW_CACHE)))
-    return preview
+        except (
+            TimeoutError,
+            httpx.HTTPError,
+            DownloadError,
+            ValueError,
+            TypeError,
+            KeyError,
+            IndexError,
+            AttributeError,
+        ) as exc:
+            logger.debug(
+                "Inline preview lookup failed for %s (%s): %s",
+                safe_url_for_log(url),
+                platform,
+                type(exc).__name__,
+            )
+        else:
+            elapsed = time.monotonic() - started
+            logger.info(
+                "Inline preview lookup for %s (%s): %s in %.2fs",
+                safe_url_for_log(url),
+                platform,
+                "preview" if preview else "logo",
+                elapsed,
+            )
+        finally:
+            self._active_lookups -= 1
+            task = asyncio.current_task()
+            if task is not None and self._inflight.get(normalized) is task:
+                self._inflight.pop(normalized, None)
+
+        ttl = _CACHE_TTL_SECONDS if preview else _NEGATIVE_CACHE_TTL_SECONDS
+        self._cache[normalized] = (time.monotonic() + ttl, preview)
+        while len(self._cache) > _CACHE_LIMIT:
+            self._cache.pop(next(iter(self._cache)))
+        return preview
+
+
+async def resolve_preview(
+    url: str,
+    resolver: PreviewResolver | None = None,
+) -> Preview | None:
+    """Resolve with the application service; YouTube thumbnails need no network."""
+    youtube = video_thumbnail_url(url)
+    if youtube is not None:
+        return Preview(youtube, 320, 180)
+    if resolver is None:
+        return None
+    return await resolver.resolve(url)

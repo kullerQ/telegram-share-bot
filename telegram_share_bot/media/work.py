@@ -146,3 +146,17 @@ class MediaWorkSupervisor:
         finally:
             self._waiters -= 1
         return MediaWorkLease(semaphore, deadline)
+
+    async def try_acquire(self, timeout_seconds: float) -> MediaWorkLease | None:
+        """Acquire only an immediately available slot, without joining the queue."""
+        deadline = time.monotonic() + max(0.0, timeout_seconds)
+        semaphore = self._semaphore
+        if semaphore is None:
+            return MediaWorkLease(None, deadline)
+        if semaphore.locked():
+            return None
+
+        # ``locked`` and this immediate acquire execute on one event loop with no
+        # intervening suspension, so a preview never leaves an unbounded waiter.
+        await semaphore.acquire()
+        return MediaWorkLease(semaphore, deadline)

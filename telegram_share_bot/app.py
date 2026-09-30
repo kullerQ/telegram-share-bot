@@ -48,6 +48,7 @@ from telegram_share_bot.handlers import (
 from telegram_share_bot.logging_filters import configure_logging
 from telegram_share_bot.media.jobs import cleanup_stale_downloads
 from telegram_share_bot.media.work import MediaWorkSupervisor
+from telegram_share_bot.platforms.previews import PreviewResolver
 from telegram_share_bot.storage.media_cache import MediaCache
 from telegram_share_bot.storage.user_settings import UserSettingsStore
 
@@ -63,6 +64,7 @@ App = Application[
 _MEDIA_MAINTENANCE_TASK = "media_maintenance_task"
 _MEDIA_MAINTENANCE_STOP = "media_maintenance_stop"
 _MEDIA_MAINTENANCE_INTERVAL_SECONDS = 300
+_PREVIEW_RESOLVER = "preview_resolver"
 
 
 async def _validate_storage_chat(application: App, settings: Settings) -> None:
@@ -131,6 +133,9 @@ async def _post_init(application: App) -> None:
 
     if isinstance(settings, Settings):
         await _validate_storage_chat(application, settings)
+    preview_resolver = application.bot_data.get(_PREVIEW_RESOLVER)
+    if isinstance(preview_resolver, PreviewResolver):
+        await preview_resolver.start()
     if isinstance(download_dir, Path):
         stop_event = asyncio.Event()
         application.bot_data[_MEDIA_MAINTENANCE_STOP] = stop_event
@@ -141,13 +146,18 @@ async def _post_init(application: App) -> None:
 
 
 async def _post_shutdown(application: App) -> None:
+    preview_resolver = application.bot_data.get(_PREVIEW_RESOLVER)
     stop_event = application.bot_data.get(_MEDIA_MAINTENANCE_STOP)
     task = application.bot_data.get(_MEDIA_MAINTENANCE_TASK)
-    if isinstance(stop_event, asyncio.Event):
-        stop_event.set()
-    if isinstance(task, asyncio.Task):
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
+    try:
+        if isinstance(preview_resolver, PreviewResolver):
+            await preview_resolver.close()
+    finally:
+        if isinstance(stop_event, asyncio.Event):
+            stop_event.set()
+        if isinstance(task, asyncio.Task):
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
 
 
 def build_application() -> App:
@@ -192,6 +202,7 @@ def build_application() -> App:
         concurrency,
         max_waiters=4 * concurrency if concurrency > 0 else 0,
     )
+    application.bot_data[_PREVIEW_RESOLVER] = PreviewResolver()
 
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
