@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import logging
 import time
+from typing import Any
 from uuid import uuid4
 
 from telegram.error import BadRequest, NetworkError, TimedOut
@@ -22,6 +23,7 @@ from telegram_share_bot.media.models import (
     TimeRange,
     VideoQualityPolicy,
 )
+from telegram_share_bot.media.work import MediaWorkLease
 from telegram_share_bot.platforms.urls import safe_url_for_log
 from telegram_share_bot.storage.user_settings import (
     UserSharingSettings,
@@ -39,10 +41,10 @@ from .preferences import _resolve_user_caption, _user_preferences
 from .state import (
     _EMPTY_KEYBOARD,
     ActiveInlineRequest,
+    _acquire_download_slot,
     _cache,
     _cache_quality_policy,
     _cancelled_set,
-    _download_slot,
     _finalize_inline_request,
     _pending_map,
     _release_user_download_slot,
@@ -76,9 +78,14 @@ async def _prepare_inline_media(
     cache_quality = _cache_quality_policy(media_format, quality_policy)
     display_url = safe_url_for_log(url)
     media: DownloadedMedia | None = None
+    work_lease: MediaWorkLease | None = None
     keep_pending_for_retry = False
     trace = _SendTrace(uuid4().hex[:12], "inline", media_format, time_range, user_id)
     trace.event("start")
+
+    def register_worker(worker: asyncio.Task[Any]) -> None:
+        if active_request is not None:
+            active_request.lease.track_worker(context, worker)
 
     try:
         # 1. Attempt instant send from cache
@@ -125,7 +132,12 @@ async def _prepare_inline_media(
         # The chosen article already contains the checking status and Cancel button.
         # Try direct URL import via Telegram first (fastest, zero local upload bandwidth).
         # Skip for clips — that path would send the whole video.
+        queue_started_at = time.monotonic()
+        work_lease = await _acquire_download_slot(context, settings.download_timeout_seconds)
+        if time.monotonic() - queue_started_at >= 0.1:
+            trace.event("queue", stage_started_at=queue_started_at)
         if time_range is None and media_format is MediaFormat.AUDIO:
+            discovery_started_at = time.monotonic()
             direct_stream = await get_direct_stream(
                 url=url,
                 max_file_bytes=settings.max_file_bytes,
@@ -133,7 +145,10 @@ async def _prepare_inline_media(
                 allowed_hosts=settings.allowed_media_hosts,
                 media_format=media_format,
                 https_only=settings.https_only,
+                work_lease=work_lease,
+                on_worker_registered=register_worker,
             )
+            trace.event("discovery", stage_started_at=discovery_started_at)
             if direct_stream is not None:
                 ensure_full_media_duration(
                     direct_stream.duration, settings.max_media_duration_seconds
@@ -186,7 +201,6 @@ async def _prepare_inline_media(
             strings.INLINE_DOWNLOADING.format(url=display_url),
             reply_markup=_cancel_keyboard(result_id),
         )
-        queue_started_at = time.monotonic()
         loop = asyncio.get_running_loop()
 
         def show_optimization_status() -> None:
@@ -203,41 +217,40 @@ async def _prepare_inline_media(
             with contextlib.suppress(Exception):
                 future.result(timeout=5)
 
-        async with _download_slot(context):
-            if inline_message_id in _cancelled_set(context):
-                return
-            if time.monotonic() - queue_started_at >= 0.1:
-                trace.event("queue", stage_started_at=queue_started_at)
-            download_started_at = time.monotonic()
-            media = await download_media(
-                url=url,
-                download_dir=settings.download_dir,
-                max_file_bytes=settings.max_file_bytes,
-                timeout_seconds=settings.download_timeout_seconds,
-                allowed_hosts=settings.allowed_media_hosts,
-                https_only=settings.https_only,
-                slideshow_slide_ms=settings.slideshow_slide_ms,
-                slideshow_max_images=settings.slideshow_max_images,
-                slideshow_images_loop=settings.slideshow_images_loop,
-                time_range=time_range,
-                media_format=media_format,
-                quality_policy=quality_policy,
-                max_estimated_download_seconds=settings.max_estimated_download_seconds,
-                max_media_duration_seconds=settings.max_media_duration_seconds,
-                on_optimizing=show_optimization_status,
-            )
-            trace.event("download", stage_started_at=download_started_at)
-            if inline_message_id in _cancelled_set(context):
-                return
-            await _edit_inline_text(
-                context,
-                inline_message_id,
-                strings.INLINE_UPLOADING.format(url=display_url),
-                reply_markup=_cancel_keyboard(result_id),
-            )
-            upload_started_at = time.monotonic()
-            file_id, title, kind, video_height = await _upload_for_file_id(context, settings, media)
-            trace.event("upload", stage_started_at=upload_started_at)
+        if inline_message_id in _cancelled_set(context):
+            return
+        download_started_at = time.monotonic()
+        media = await download_media(
+            url=url,
+            download_dir=settings.download_dir,
+            max_file_bytes=settings.max_file_bytes,
+            timeout_seconds=settings.download_timeout_seconds,
+            allowed_hosts=settings.allowed_media_hosts,
+            https_only=settings.https_only,
+            slideshow_slide_ms=settings.slideshow_slide_ms,
+            slideshow_max_images=settings.slideshow_max_images,
+            slideshow_images_loop=settings.slideshow_images_loop,
+            time_range=time_range,
+            media_format=media_format,
+            quality_policy=quality_policy,
+            max_estimated_download_seconds=settings.max_estimated_download_seconds,
+            max_media_duration_seconds=settings.max_media_duration_seconds,
+            on_optimizing=show_optimization_status,
+            work_lease=work_lease,
+            on_worker_registered=register_worker,
+        )
+        trace.event("download", stage_started_at=download_started_at)
+        if inline_message_id in _cancelled_set(context):
+            return
+        await _edit_inline_text(
+            context,
+            inline_message_id,
+            strings.INLINE_UPLOADING.format(url=display_url),
+            reply_markup=_cancel_keyboard(result_id),
+        )
+        upload_started_at = time.monotonic()
+        file_id, title, kind, video_height = await _upload_for_file_id(context, settings, media)
+        trace.event("upload", stage_started_at=upload_started_at)
         await cache.set(
             url=url,
             file_id=file_id,
@@ -331,12 +344,16 @@ async def _prepare_inline_media(
             _pending_map(context).pop(result_id, None)
         if media is not None:
             try:
-                cleanup_media(media)
+                await asyncio.to_thread(cleanup_media, media)
             except Exception:
                 logger.warning("Inline media cleanup failed category=filesystem")
-        if active_request is not None:
-            await _finalize_inline_request(context, inline_message_id, active_request)
-        else:
-            _task_map(context).pop(inline_message_id, None)
-            _cancelled_set(context).discard(inline_message_id)
-            await _release_user_download_slot(context, user_id)
+        try:
+            if work_lease is not None:
+                await work_lease.release()
+        finally:
+            if active_request is not None:
+                await _finalize_inline_request(context, inline_message_id, active_request)
+            else:
+                _task_map(context).pop(inline_message_id, None)
+                _cancelled_set(context).discard(inline_message_id)
+                await _release_user_download_slot(context, user_id)

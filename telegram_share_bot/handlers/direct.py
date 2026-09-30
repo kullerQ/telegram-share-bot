@@ -7,6 +7,7 @@ import contextlib
 import logging
 import time
 from html import escape
+from typing import Any
 from uuid import uuid4
 
 from telegram import Message, Update
@@ -27,6 +28,7 @@ from telegram_share_bot.media.models import (
 )
 from telegram_share_bot.media.requests import extract_media_request, format_time_range
 from telegram_share_bot.media.security import is_allowed_media_host, is_https_url
+from telegram_share_bot.media.work import MediaWorkLease
 from telegram_share_bot.platforms.urls import has_url_credentials
 from telegram_share_bot.storage.media_cache import CachedMedia
 from telegram_share_bot.storage.user_settings import CaptionPreference, UserSharingSettings
@@ -46,13 +48,13 @@ from .preferences import (
 )
 from .state import (
     PendingClipChoice,
+    UserDownloadLease,
+    _acquire_download_slot,
     _cache,
     _cache_quality_policy,
     _clip_choice_keyboard,
-    _download_slot,
     _format_choice_keyboard,
     _is_user_allowed,
-    _release_user_download_slot,
     _settings,
     _store_pending_clip_choice,
     _try_acquire_user_download_slot,
@@ -426,9 +428,17 @@ async def _run_direct_download(
         trace.event("denied", failure="rate_limit")
         await _edit_direct_status(status_message, denial)
         return
+    assert user_id is not None
 
     media: DownloadedMedia | None = None
+    work_lease: MediaWorkLease | None = None
+    user_lease = UserDownloadLease(user_id)
+
+    def register_worker(worker: asyncio.Task[Any]) -> None:
+        user_lease.track_worker(context, worker)
+
     try:
+        work_lease = await _acquire_download_slot(context, settings.download_timeout_seconds)
         # Direct URL import skips clips (would fetch the whole video).
         if time_range is None and media_format is MediaFormat.AUDIO:
             direct_stream = await get_direct_stream(
@@ -438,6 +448,8 @@ async def _run_direct_download(
                 allowed_hosts=settings.allowed_media_hosts,
                 media_format=media_format,
                 https_only=settings.https_only,
+                work_lease=work_lease,
+                on_worker_registered=register_worker,
             )
             if direct_stream is not None:
                 ensure_full_media_duration(
@@ -490,38 +502,39 @@ async def _run_direct_download(
             with contextlib.suppress(Exception):
                 future.result(timeout=5)
 
-        async with _download_slot(context):
-            download_started_at = time.monotonic()
-            media = await download_media(
-                url=url,
-                download_dir=settings.download_dir,
-                max_file_bytes=settings.max_file_bytes,
-                timeout_seconds=settings.download_timeout_seconds,
-                allowed_hosts=settings.allowed_media_hosts,
-                media_format=media_format,
-                quality_policy=quality_policy,
-                max_estimated_download_seconds=settings.max_estimated_download_seconds,
-                https_only=settings.https_only,
-                slideshow_slide_ms=settings.slideshow_slide_ms,
-                slideshow_max_images=settings.slideshow_max_images,
-                slideshow_images_loop=settings.slideshow_images_loop,
-                time_range=time_range,
-                max_media_duration_seconds=settings.max_media_duration_seconds,
-                on_optimizing=show_optimization_status,
-            )
-            trace.event("download", stage_started_at=download_started_at)
-            await _edit_direct_status(status_message, strings.DIRECT_UPLOADING)
-            upload_started_at = time.monotonic()
-            sent_msg = await _send_media_to_chat(
-                context,
-                chat_id,
-                media,
-                settings=settings,
-                custom_caption=custom_caption,
-                preferences=preferences,
-                original_url=url,
-            )
-            trace.event("upload", stage_started_at=upload_started_at)
+        download_started_at = time.monotonic()
+        media = await download_media(
+            url=url,
+            download_dir=settings.download_dir,
+            max_file_bytes=settings.max_file_bytes,
+            timeout_seconds=settings.download_timeout_seconds,
+            allowed_hosts=settings.allowed_media_hosts,
+            media_format=media_format,
+            quality_policy=quality_policy,
+            max_estimated_download_seconds=settings.max_estimated_download_seconds,
+            https_only=settings.https_only,
+            slideshow_slide_ms=settings.slideshow_slide_ms,
+            slideshow_max_images=settings.slideshow_max_images,
+            slideshow_images_loop=settings.slideshow_images_loop,
+            time_range=time_range,
+            max_media_duration_seconds=settings.max_media_duration_seconds,
+            on_optimizing=show_optimization_status,
+            work_lease=work_lease,
+            on_worker_registered=register_worker,
+        )
+        trace.event("download", stage_started_at=download_started_at)
+        await _edit_direct_status(status_message, strings.DIRECT_UPLOADING)
+        upload_started_at = time.monotonic()
+        sent_msg = await _send_media_to_chat(
+            context,
+            chat_id,
+            media,
+            settings=settings,
+            custom_caption=custom_caption,
+            preferences=preferences,
+            original_url=url,
+        )
+        trace.event("upload", stage_started_at=upload_started_at)
         file_id, result_kind = _file_id_and_kind_from_message(sent_msg)
         await cache.set(
             url=url,
@@ -548,8 +561,12 @@ async def _run_direct_download(
     finally:
         try:
             if media is not None:
-                cleanup_media(media)
+                await asyncio.to_thread(cleanup_media, media)
         except Exception:
             logger.warning("Direct media cleanup failed category=filesystem")
         finally:
-            await _release_user_download_slot(context, user_id)
+            try:
+                if work_lease is not None:
+                    await work_lease.release()
+            finally:
+                await user_lease.release(context)

@@ -12,8 +12,17 @@ from telegram.constants import ChatType
 from telegram.error import BadRequest
 
 from telegram_share_bot import strings
-from telegram_share_bot.app import _post_init, _validate_storage_chat, build_application
+from telegram_share_bot.app import (
+    _MEDIA_MAINTENANCE_STOP,
+    _MEDIA_MAINTENANCE_TASK,
+    _maintain_downloads,
+    _post_init,
+    _post_shutdown,
+    _validate_storage_chat,
+    build_application,
+)
 from telegram_share_bot.config import Settings
+from telegram_share_bot.media.work import MediaWorkSupervisor
 
 
 class TestAppInitialization(unittest.TestCase):
@@ -29,7 +38,25 @@ class TestAppInitialization(unittest.TestCase):
                 self.assertIsNotNone(app)
                 self.assertEqual(app.bot_data["settings"], mock_settings)
                 self.assertIsNotNone(app.post_init)
+                self.assertIsNotNone(app.post_shutdown)
+                self.assertIsInstance(
+                    app.bot_data["media_work_supervisor"], MediaWorkSupervisor
+                )
                 self.assertEqual(app.bot.request._media_write_timeout, 180.0)
+
+    def test_shutdown_stops_owned_download_maintenance_task(self) -> None:
+        async def _run() -> None:
+            stop_event = asyncio.Event()
+            task = asyncio.create_task(_maintain_downloads(Path("."), stop_event))
+            app = MagicMock()
+            app.bot_data = {
+                _MEDIA_MAINTENANCE_STOP: stop_event,
+                _MEDIA_MAINTENANCE_TASK: task,
+            }
+            await _post_shutdown(app)
+            self.assertTrue(task.done())
+
+        asyncio.run(_run())
 
     async def _async_test_post_init_fetches_when_none(self) -> None:
         mock_app = MagicMock()

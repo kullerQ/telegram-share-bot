@@ -4,11 +4,20 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any
+import threading
+import time
+from collections.abc import Callable
+from typing import Any, cast
 
+from telegram_share_bot import strings
 from telegram_share_bot.media.files import _classify_ext
 from telegram_share_bot.media.metadata import _extract_info_cached, _pick_info
-from telegram_share_bot.media.models import DirectMediaStream, MediaFormat, MediaKind
+from telegram_share_bot.media.models import (
+    DirectMediaStream,
+    DownloadError,
+    MediaFormat,
+    MediaKind,
+)
 from telegram_share_bot.media.network import create_youtube_dl
 from telegram_share_bot.media.security import (
     _safe_dns_resolution,
@@ -16,6 +25,7 @@ from telegram_share_bot.media.security import (
     is_https_url,
     is_safe_media_url,
 )
+from telegram_share_bot.media.work import MediaWorkLease
 from telegram_share_bot.platforms.urls import safe_url_for_log
 
 logger = logging.getLogger(__name__)
@@ -25,9 +35,15 @@ def _extract_direct_stream_sync(
     url: str,
     max_file_bytes: int,
     *,
+    abort_event: threading.Event | None = None,
+    allowed_hosts: frozenset[str] | None = None,
     media_format: MediaFormat = MediaFormat.VIDEO,
     https_only: bool = False,
 ) -> DirectMediaStream | None:
+    if abort_event is not None and abort_event.is_set():
+        return None
+    if not is_allowed_media_host(url, allowed_hosts):
+        return None
     if https_only and not is_https_url(url):
         return None
     if not is_safe_media_url(url, https_only=https_only):
@@ -50,6 +66,8 @@ def _extract_direct_stream_sync(
         with _safe_dns_resolution():
             with create_youtube_dl(ydl_opts) as ydl:
                 extracted, _from_cache = _extract_info_cached(ydl, url)
+                if abort_event is not None and abort_event.is_set():
+                    return None
                 info = _pick_info(extracted)
 
                 title = str(info.get("title") or "")[:64]
@@ -150,24 +168,41 @@ async def get_direct_stream(
     *,
     media_format: MediaFormat = MediaFormat.VIDEO,
     https_only: bool = False,
+    work_lease: MediaWorkLease | None = None,
+    on_worker_registered: Callable[[asyncio.Task[Any]], None] | None = None,
 ) -> DirectMediaStream | None:
     if not is_allowed_media_host(url, allowed_hosts):
         return None
-    if https_only and not is_https_url(url):
-        return None
-    if not is_safe_media_url(url, https_only=https_only):
-        return None
 
+    owns_lease = work_lease is None
+    active_lease = work_lease or MediaWorkLease(
+        None, time.monotonic() + max(0, timeout_seconds)
+    )
+    abort_event = threading.Event()
     try:
-        return await asyncio.wait_for(
-            asyncio.to_thread(
+        remaining = min(float(timeout_seconds), active_lease.remaining_seconds())
+        return cast(
+            DirectMediaStream | None,
+            await active_lease.run_sync(
                 _extract_direct_stream_sync,
                 url,
                 max_file_bytes,
+                wait_timeout_seconds=remaining,
+                abort_event=abort_event,
+                on_worker_registered=on_worker_registered,
+                allowed_hosts=allowed_hosts,
                 media_format=media_format,
                 https_only=https_only,
             ),
-            timeout=timeout_seconds,
         )
+    except TimeoutError as exc:
+        abort_event.set()
+        raise DownloadError(
+            strings.DOWNLOAD_TIMED_OUT.format(timeout_seconds=timeout_seconds),
+            retryable=True,
+        ) from exc
     except Exception:
         return None
+    finally:
+        if owns_lease:
+            await active_lease.release()
