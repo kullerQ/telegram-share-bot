@@ -88,6 +88,35 @@ class TestMediaCache(unittest.IsolatedAsyncioTestCase):
         await self.cache.evict(url)
         self.assertIsNone(await self.cache.get(url))
 
+    async def test_evict_entry_preserves_a_concurrent_replacement(self) -> None:
+        url = "https://x.com/user/status/replaced-cache-entry"
+        await self.cache.set(
+            url=url,
+            file_id="observed-old-file-id",
+            kind=MediaKind.VIDEO,
+            title="Old",
+            duration=15,
+            quality_policy="auto-best",
+        )
+        observed = await self.cache.get(url, quality_policy="auto-best")
+        self.assertIsNotNone(observed)
+        assert observed is not None
+
+        await self.cache.set(
+            url=url,
+            file_id="concurrent-new-file-id",
+            kind=MediaKind.VIDEO,
+            title="New",
+            duration=15,
+            quality_policy="auto-best",
+        )
+
+        self.assertFalse(await self.cache.evict_entry(observed))
+        replacement = await self.cache.get(url, quality_policy="auto-best")
+        self.assertIsNotNone(replacement)
+        assert replacement is not None
+        self.assertEqual(replacement.file_id, "concurrent-new-file-id")
+
     async def test_upsert(self) -> None:
         url = "https://example.com/audio.mp3"
         await self.cache.set(

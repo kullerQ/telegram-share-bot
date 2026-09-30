@@ -59,6 +59,105 @@ class TestCacheFallback(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self) -> None:
         self.temp_dir.cleanup()
 
+    async def test_direct_cached_send_errors_preserve_file_and_skip_download(self) -> None:
+        for index, error in enumerate(
+            (NetworkError("temporary connection failure"), BadRequest("chat not found"))
+        ):
+            with self.subTest(error=type(error).__name__):
+                url = f"https://youtu.be/cache-preserve{index}"
+                await self.cache.set(
+                    url,
+                    f"cached-file-{index}",
+                    MediaKind.VIDEO,
+                    "Cached",
+                    30,
+                    quality_policy=VideoQualityPolicy.AUTO.value,
+                )
+                context = MagicMock()
+                context.application.bot_data = {
+                    "settings": self.settings,
+                    "media_cache": self.cache,
+                }
+                context.bot.send_video = AsyncMock(side_effect=error)
+                status = MagicMock()
+                status.edit_text = AsyncMock()
+                status.delete = AsyncMock()
+
+                with patch(
+                    "telegram_share_bot.handlers.direct.download_media", new=AsyncMock()
+                ) as download:
+                    await _run_direct_download(
+                        context,
+                        chat_id=42,
+                        user_id=42,
+                        url=url,
+                        custom_caption=None,
+                        time_range=None,
+                        status_message=status,
+                    )
+
+                download.assert_not_awaited()
+                status.edit_text.assert_any_await(strings.DIRECT_CACHED_SEND_FAILED)
+                self.assertIsNotNone(
+                    await self.cache.get(url, quality_policy=VideoQualityPolicy.AUTO.value)
+                )
+
+    async def test_inline_cached_send_errors_preserve_file_and_offer_retry(self) -> None:
+        for index, error in enumerate(
+            (NetworkError("temporary connection failure"), BadRequest("message not found"))
+        ):
+            with self.subTest(error=type(error).__name__):
+                url = f"https://youtu.be/inline-cache-preserve{index}"
+                await self.cache.set(
+                    url,
+                    f"inline-cached-file-{index}",
+                    MediaKind.VIDEO,
+                    "Cached",
+                    30,
+                    quality_policy=VideoQualityPolicy.AUTO.value,
+                )
+                context = MagicMock()
+                context.application.bot_data = {
+                    "settings": self.settings,
+                    "media_cache": self.cache,
+                    "pending_inline": {},
+                    "inline_prepare_tasks": {},
+                    "cancelled_inline": set(),
+                }
+                context.bot.edit_message_media = AsyncMock(side_effect=error)
+                context.bot.edit_message_text = AsyncMock()
+
+                with patch(
+                    "telegram_share_bot.handlers.prepare.download_media", new=AsyncMock()
+                ) as download:
+                    await _prepare_inline_media(
+                        context,
+                        inline_message_id=f"inline-cache-{index}",
+                        url=url,
+                        result_id=f"result-cache-{index}",
+                        user_id=42,
+                    )
+
+                download.assert_not_awaited()
+                context.bot.edit_message_media.assert_awaited_once()
+                context.bot.edit_message_text.assert_awaited_once()
+                feedback = context.bot.edit_message_text.await_args.kwargs
+                self.assertEqual(
+                    feedback["text"], strings.INLINE_CHOSEN_CACHED_SEND_FAILED
+                )
+                self.assertTrue(
+                    feedback["reply_markup"].inline_keyboard[0][0].callback_data.startswith(
+                        "retry:"
+                    )
+                )
+                self.assertIn(
+                    f"result-cache-{index}", context.application.bot_data["pending_inline"]
+                )
+                cached = await self.cache.get(url, quality_policy=VideoQualityPolicy.AUTO.value)
+                self.assertIsNotNone(cached)
+                assert cached is not None
+                self.assertEqual(cached.file_id, f"inline-cached-file-{index}")
+
     async def test_auto_send_uses_cached_best_video_without_downloading(self) -> None:
         url = "https://youtu.be/quality1234"
         await self.cache.set(

@@ -220,6 +220,7 @@ class TestConcurrencyLimiter(unittest.IsolatedAsyncioTestCase):
 
         mock_cache = MagicMock(spec=MediaCache)
         mock_cache.get = AsyncMock(return_value=None)
+        mock_cache.get_preferred_video = AsyncMock(return_value=None)
         mock_cache.set = AsyncMock()
 
         mock_settings = MagicMock(spec=Settings)

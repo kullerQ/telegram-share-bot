@@ -39,6 +39,7 @@ from .delivery import (
     _send_cached_media_to_chat,
     _send_media_to_chat,
     _upload_direct_url_for_file_id,
+    is_invalid_cached_file_id_error,
 )
 from .preferences import (
     _settings_keyboard,
@@ -403,6 +404,9 @@ async def _run_direct_download(
             trace.cache_outcome = "hit"
             try:
                 await _edit_direct_status(status_message, strings.DIRECT_UPLOADING)
+            except TelegramError:
+                trace.event("cache_status", failure="telegram_error", level=logging.DEBUG)
+            try:
                 await _send_cached_media_to_chat(
                     context,
                     chat_id,
@@ -411,17 +415,56 @@ async def _run_direct_download(
                     preferences=preferences,
                     original_url=url,
                 )
+            except BadRequest as exc:
+                if not is_invalid_cached_file_id_error(exc):
+                    trace.event(
+                        "cache_send_failed", failure="bad_request", level=logging.WARNING
+                    )
+                    trace.cache_outcome = "preserved"
+                    try:
+                        await _edit_direct_status(
+                            status_message, strings.DIRECT_CACHED_SEND_FAILED
+                        )
+                    except TelegramError:
+                        logger.warning("Could not update direct cached-send status")
+                    return
+                trace.event("cache_fallback", failure="invalid_file_id", level=logging.WARNING)
+                removed = await cache.evict_entry(cached)
+                trace.cache_outcome = "evicted" if removed else "changed"
+            except NetworkError:
+                trace.event("cache_send_failed", failure="network", level=logging.WARNING)
+                trace.cache_outcome = "preserved"
+                try:
+                    await _edit_direct_status(
+                        status_message, strings.DIRECT_CACHED_SEND_FAILED
+                    )
+                except TelegramError:
+                    logger.warning("Could not update direct cached-send status")
+                return
+            except TelegramError:
+                trace.event("cache_send_failed", failure="telegram_error", level=logging.WARNING)
+                trace.cache_outcome = "preserved"
+                try:
+                    await _edit_direct_status(
+                        status_message, strings.DIRECT_CACHED_SEND_FAILED
+                    )
+                except TelegramError:
+                    logger.warning("Could not update direct cached-send status")
+                return
+            except Exception:
+                trace.event(
+                    "cache_send_failed", failure="unexpected", level=logging.ERROR
+                )
+                trace.cache_outcome = "preserved"
+                try:
+                    await _edit_direct_status(status_message, strings.DIRECT_SEND_FAILED)
+                except TelegramError:
+                    logger.warning("Could not update direct cached-send status")
+                return
+            else:
                 await _remove_completed_direct_status(status_message)
                 trace.event("complete")
                 return
-            except BadRequest:
-                trace.event("cache_fallback", failure="invalid_file_id", level=logging.WARNING)
-                trace.cache_outcome = "evicted"
-                await cache.evict_entry(cached)
-            except Exception:
-                trace.event("cache_fallback", failure="cache_send", level=logging.WARNING)
-                trace.cache_outcome = "evicted"
-                await cache.evict_entry(cached)
 
     denial = await _try_acquire_user_download_slot(context, user_id)
     if denial is not None:

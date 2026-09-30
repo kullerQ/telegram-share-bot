@@ -214,6 +214,15 @@ class MediaCache:
             cursor = conn.execute("DELETE FROM media_cache WHERE url = ?", (norm_url,))
             return cursor.rowcount > 0
 
+    def _evict_entry_sync(self, cached: CachedMedia) -> bool:
+        """Delete only the exact file ID observed by the failed delivery."""
+        with self._connection() as conn:
+            cursor = conn.execute(
+                "DELETE FROM media_cache WHERE url = ? AND file_id = ?",
+                (cached.url, cached.file_id),
+            )
+            return cursor.rowcount > 0
+
     def _get_with_recovery(self, norm_url: str) -> CachedMedia | None:
         try:
             return self._get_sync(norm_url)
@@ -245,6 +254,14 @@ class MediaCache:
             if not self._recover_db(exc):
                 raise
             return self._evict_sync(norm_url)
+
+    def _evict_entry_with_recovery(self, cached: CachedMedia) -> bool:
+        try:
+            return self._evict_entry_sync(cached)
+        except _RECOVERABLE_DB_ERRORS as exc:
+            if not self._recover_db(exc):
+                raise
+            return self._evict_entry_sync(cached)
 
     async def get(
         self,
@@ -342,12 +359,12 @@ class MediaCache:
                 return max(qualified_candidates, key=lambda item: item.video_height or 0)
         return await self.get(url, time_range=time_range, quality_policy=quality_policy)
 
-    async def evict_entry(self, cached: CachedMedia) -> None:
-        """Remove the exact entry used, including a cross-policy cache hit."""
+    async def evict_entry(self, cached: CachedMedia) -> bool:
+        """Remove the observed entry without erasing a concurrent replacement."""
         try:
-            await asyncio.to_thread(self._evict_with_recovery, cached.url)
+            return await asyncio.to_thread(self._evict_entry_with_recovery, cached)
         except _RECOVERABLE_DB_ERRORS:
-            return
+            return False
 
     async def set(
         self,
