@@ -159,7 +159,7 @@ class TestExtractInfoCache(unittest.TestCase):
                 path.write_bytes(b"video-bytes")
                 return path
 
-            with patch("yt_dlp.YoutubeDL") as mock_cls:
+            with patch("telegram_share_bot.media.transfer.create_youtube_dl") as mock_cls:
                 mock_cls.return_value.__enter__.return_value = mock_ydl
                 with patch(
                     "telegram_share_bot.media.transfer._resolve_downloaded_path",
@@ -193,7 +193,7 @@ class TestExtractInfoCache(unittest.TestCase):
         )
 
         with tempfile.TemporaryDirectory() as tmp_dir:
-            with patch("yt_dlp.YoutubeDL") as mock_cls:
+            with patch("telegram_share_bot.media.transfer.create_youtube_dl") as mock_cls:
                 mock_cls.return_value.__enter__.return_value = mock_ydl
                 with self.assertRaises(DownloadError):
                     _download_sync(

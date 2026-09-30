@@ -1,7 +1,12 @@
 python-telegram-bot==22.8
 httpx>=0.27,<0.29
+# Direct use of httpcore's AsyncNetworkBackend keeps preview DNS pinned at connect time.
+httpcore>=1.0,<2
+# yt-dlp is pinned because the guarded CurlCFFIRH adapter and TikTok extractor
+# integration rely on version-specific request-handler/extractor behavior.
+# Update it together with the native transport and TikTok integration tests.
 # default extras: brotli/certifi/mutagen/etc. curl-cffi is pinned separately —
 # TikTok requires browser impersonation; 0.16.1+ can pick chrome-150 which TikTok blocks.
-yt-dlp[default]>=2025.1.15
+yt-dlp[default]==2026.08.19
 curl-cffi==0.16.0
 python-dotenv==1.1.1

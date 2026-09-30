@@ -385,7 +385,7 @@ class TestClipDownloadOpts(unittest.TestCase):
 
             with (
                 patch(
-                    "telegram_share_bot.media.transfer.yt_dlp.YoutubeDL",
+                    "telegram_share_bot.media.transfer.create_youtube_dl",
                     FakeYdl,
                 ),
                 patch(

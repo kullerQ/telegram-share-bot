@@ -30,7 +30,7 @@ class TestRedditFormats(unittest.TestCase):
         with (
             patch("telegram_share_bot.media.direct.is_safe_media_url", return_value=True),
             patch("telegram_share_bot.media.direct._safe_dns_resolution", contextlib.nullcontext),
-            patch("telegram_share_bot.media.direct.yt_dlp.YoutubeDL") as ydl,
+            patch("telegram_share_bot.media.direct.create_youtube_dl") as ydl,
             patch(
                 "telegram_share_bot.media.direct._extract_info_cached",
                 return_value=(selected, False),
@@ -77,7 +77,7 @@ class TestRedditFormats(unittest.TestCase):
                 patch(
                     "telegram_share_bot.media.transfer._safe_dns_resolution", contextlib.nullcontext
                 ),
-                patch("telegram_share_bot.media.transfer.yt_dlp.YoutubeDL", FakeYdl),
+                patch("telegram_share_bot.media.transfer.create_youtube_dl", FakeYdl),
                 patch(
                     "telegram_share_bot.media.transfer._extract_info_cached",
                     return_value=({"title": "Silent", "ext": "mp4"}, False),
