@@ -92,6 +92,9 @@ DIRECT_AUDIO_USAGE = "Send /audio followed by a media link."
 DIRECT_COMMAND_PRIVATE_ONLY = "Use /audio and /video in a private chat with the bot."
 DIRECT_DOWNLOAD_FAILED = "Could not download that media."
 DIRECT_SEND_FAILED = "Something went wrong while sending the media."
+DIRECT_CACHED_SEND_FAILED = (
+    "Telegram could not send the saved media just now. Send the link again to retry."
+)
 DIRECT_UPLOAD_FAILED = (
     "Could not upload the media to Telegram (network error). Please try again."
 )
@@ -162,6 +165,9 @@ INLINE_UPLOADING = "Sending media to Telegram…\n{url}"
 INLINE_CHOSEN_DOWNLOAD_FAILED = "Download failed."
 INLINE_CHOSEN_UPLOAD_FAILED = (
     "Could not upload the media to Telegram (network error). Please try again."
+)
+INLINE_CHOSEN_CACHED_SEND_FAILED = (
+    "Telegram could not send the saved media just now. Tap Try again to retry."
 )
 INLINE_CHOSEN_PREPARE_FAILED = "Something went wrong while preparing the media."
 

@@ -61,6 +61,21 @@ from .state import (
 
 logger = logging.getLogger("telegram_share_bot.handlers")
 
+_INVALID_CACHED_FILE_ID_MESSAGES = (
+    "wrong file identifier/http url specified",
+    "wrong remote file identifier specified",
+    "file_id is invalid",
+    "file identifier is invalid",
+)
+
+
+def is_invalid_cached_file_id_error(error: BaseException) -> bool:
+    """Match only Telegram's specific responses for an unusable cached file ID."""
+    if not isinstance(error, BadRequest):
+        return False
+    message = " ".join(str(error).casefold().split())
+    return any(marker in message for marker in _INVALID_CACHED_FILE_ID_MESSAGES)
+
 
 def _cancel_keyboard(result_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(

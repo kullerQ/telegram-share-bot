@@ -9,7 +9,7 @@ import time
 from typing import Any
 from uuid import uuid4
 
-from telegram.error import BadRequest, NetworkError, TimedOut
+from telegram.error import BadRequest, NetworkError, TelegramError, TimedOut
 from telegram.ext import ContextTypes
 
 from telegram_share_bot import strings
@@ -36,6 +36,7 @@ from .delivery import (
     _retry_keyboard,
     _upload_direct_url_for_file_id,
     _upload_for_file_id,
+    is_invalid_cached_file_id_error,
 )
 from .preferences import _resolve_user_caption, _user_preferences
 from .state import (
@@ -87,6 +88,29 @@ async def _prepare_inline_media(
         if active_request is not None:
             active_request.lease.track_worker(context, worker)
 
+    async def keep_cached_entry_and_offer_retry(failure: str) -> None:
+        nonlocal keep_pending_for_retry
+        trace.event("cache_send_failed", failure=failure, level=logging.WARNING)
+        trace.cache_outcome = "preserved"
+        keep_pending_for_retry = True
+        _store_pending_url(
+            context,
+            result_id,
+            url,
+            custom_caption=custom_caption,
+            time_range=time_range,
+            media_format=media_format,
+            quality_policy=quality_policy,
+            preferences=preferences,
+            owner_user_id=user_id,
+        )
+        await _edit_inline_text(
+            context,
+            inline_message_id,
+            strings.INLINE_CHOSEN_CACHED_SEND_FAILED,
+            reply_markup=_retry_keyboard(result_id, time_range, media_format),
+        )
+
     try:
         # 1. Attempt instant send from cache
         cached = (
@@ -117,14 +141,22 @@ async def _prepare_inline_media(
                 )
                 trace.event("complete")
                 return
-            except BadRequest:
+            except BadRequest as exc:
+                if not is_invalid_cached_file_id_error(exc):
+                    await keep_cached_entry_and_offer_retry("bad_request")
+                    return
                 trace.event("cache_fallback", failure="invalid_file_id", level=logging.WARNING)
-                trace.cache_outcome = "evicted"
-                await cache.evict_entry(cached)
+                removed = await cache.evict_entry(cached)
+                trace.cache_outcome = "evicted" if removed else "changed"
+            except NetworkError:
+                await keep_cached_entry_and_offer_retry("network")
+                return
+            except TelegramError:
+                await keep_cached_entry_and_offer_retry("telegram_error")
+                return
             except Exception:
-                trace.event("cache_fallback", failure="cache_send", level=logging.WARNING)
-                trace.cache_outcome = "evicted"
-                await cache.evict_entry(cached)
+                await keep_cached_entry_and_offer_retry("unexpected")
+                return
 
         # 2. Cache miss or fallback to download pipeline
         if inline_message_id in _cancelled_set(context):
