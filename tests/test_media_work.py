@@ -25,6 +25,17 @@ from telegram_share_bot.media.work import MediaWorkSupervisor
 
 
 class TestMediaWorkSupervisor(unittest.IsolatedAsyncioTestCase):
+    async def test_try_acquire_falls_back_without_joining_full_queue(self) -> None:
+        supervisor = MediaWorkSupervisor(1)
+        first = await supervisor.acquire(2)
+
+        self.assertIsNone(await supervisor.try_acquire(2))
+        await first.release()
+        available = await supervisor.try_acquire(2)
+        self.assertIsNotNone(available)
+        assert available is not None
+        await available.release()
+
     async def test_direct_url_preflight_runs_off_the_event_loop(self) -> None:
         event_loop_thread = threading.get_ident()
         validation_threads: list[int] = []

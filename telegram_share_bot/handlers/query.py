@@ -139,7 +139,11 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     user_id = query.from_user.id if query.from_user else None
     preferences = await _user_preferences(context, user_id)
 
-    preview = await platform_previews.resolve_preview(url)
+    resolver = context.bot_data.get("preview_resolver")
+    preview = await platform_previews.resolve_preview(
+        url,
+        resolver if isinstance(resolver, platform_previews.PreviewResolver) else None,
+    )
 
     choices: list[tuple[str, MediaFormat, TimeRange | None, bool]] = []
     choice_token = uuid4().hex
