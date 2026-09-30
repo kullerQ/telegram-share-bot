@@ -179,7 +179,9 @@ AUDIO_UNAVAILABLE = "No compatible audio stream is available for this link."
 VIDEO_UNAVAILABLE = "No video is available for this link. Choose Audio instead."
 DOWNLOAD_AUDIO_FFMPEG_MISSING = "ffmpeg is required to prepare native Telegram audio."
 DOWNLOAD_AUDIO_CONVERT_FAILED = "Could not prepare audio for Telegram."
-DOWNLOAD_PLAYLIST_UNSUPPORTED = "Playlist/empty result is not supported."
+DOWNLOAD_PLAYLIST_UNSUPPORTED = (
+    "Playlists and empty media results are not supported. Send one video or post at a time."
+)
 DOWNLOAD_EMPTY_FILE = "Downloaded file is empty."
 DOWNLOAD_FIT_FFMPEG_MISSING = "ffmpeg is required to fit this video within Telegram's size limit."
 DOWNLOAD_FIT_FFMPEG_FAILED = "Could not optimize the video for Telegram delivery."
