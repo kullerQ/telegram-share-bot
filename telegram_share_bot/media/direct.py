@@ -11,7 +11,11 @@ from typing import Any, cast
 
 from telegram_share_bot import strings
 from telegram_share_bot.media.files import _classify_ext
-from telegram_share_bot.media.metadata import _extract_info_cached, _pick_info
+from telegram_share_bot.media.metadata import (
+    _extract_info_cached,
+    _pick_info,
+    is_twitter_animation,
+)
 from telegram_share_bot.media.models import (
     DirectMediaStream,
     DownloadError,
@@ -102,6 +106,8 @@ def _extract_direct_stream_sync(
                 ):
                     ext = str(info.get("ext") or "mp4")
                     kind = _classify_ext(ext)
+                    if media_format is MediaFormat.VIDEO and is_twitter_animation(info):
+                        kind = MediaKind.ANIMATION
                     if kind is not MediaKind.DOCUMENT:
                         return DirectMediaStream(
                             direct_url=direct,
@@ -132,6 +138,8 @@ def _extract_direct_stream_sync(
                         continue
                     ext = str(f.get("ext") or "")
                     kind = _classify_ext(ext)
+                    if media_format is MediaFormat.VIDEO and is_twitter_animation(info):
+                        kind = MediaKind.ANIMATION
                     if kind is MediaKind.DOCUMENT:
                         continue
                     if media_format is MediaFormat.AUDIO:

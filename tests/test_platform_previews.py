@@ -240,6 +240,83 @@ class TestPlatformPreviews(unittest.IsolatedAsyncioTestCase):
             ("https://x.com/animalsbabyy/status/2103205625752953328", "x"),
         )
 
+    async def test_x_media_previews_use_public_post_media_for_video_and_gif(self) -> None:
+        thumbnails = {
+            "2103205625752953328": (
+                "https://pbs.twimg.com/amplify_video_thumb/video/cover.jpg?name=orig",
+                640,
+                360,
+            ),
+            "2105088370078531813": (
+                "https://pbs.twimg.com/tweet_video_thumb/gif.jpg?name=orig",
+                480,
+                270,
+            ),
+        }
+
+        def response(request: httpx.Request) -> httpx.Response:
+            self.assertEqual(request.url.host, "cdn.syndication.twimg.com")
+            status_id = request.url.params["id"]
+            image, width, height = thumbnails[status_id]
+            return httpx.Response(
+                200,
+                json={
+                    "mediaDetails": [
+                        {
+                            "type": "animated_gif" if "gif" in image else "video",
+                            "media_url_https": image,
+                            "sizes": {"medium": {"w": width, "h": height}},
+                        }
+                    ]
+                },
+            )
+
+        resolver = await self._resolver(response)
+        for url, status_id, width, height in (
+            (
+                "https://x.com/animalsbabyy/status/2103205625752953328/video/1",
+                "2103205625752953328",
+                640,
+                360,
+            ),
+            (
+                "https://x.com/i/status/2105088370078531813",
+                "2105088370078531813",
+                480,
+                270,
+            ),
+        ):
+            with self.subTest(status_id=status_id):
+                preview = await resolve_preview(url, resolver)
+                self.assertEqual(
+                    preview,
+                    Preview(
+                        thumbnails[status_id][0].split("?", maxsplit=1)[0]
+                        + "?format=jpg&name=small",
+                        width,
+                        height,
+                    ),
+                )
+
+    async def test_x_syndication_rejects_untrusted_media_thumbnail(self) -> None:
+        resolver = await self._resolver(
+            lambda _request: httpx.Response(
+                200,
+                json={
+                    "mediaDetails": [
+                        {"media_url_https": "https://evil.example/thumbnail.jpg"}
+                    ]
+                },
+            )
+        )
+        with patch(
+            "telegram_share_bot.platforms.previews._lookup_page_image",
+            new=AsyncMock(return_value=None),
+        ) as page_lookup:
+            preview = await resolve_preview("https://x.com/user/status/123", resolver)
+        self.assertIsNone(preview)
+        page_lookup.assert_awaited_once()
+
     async def test_failed_lookup_is_cached_as_logo_fallback(self) -> None:
         resolver = await self._resolver()
         with patch(

@@ -24,6 +24,8 @@ def _classify(path: Path) -> MediaKind:
 
 def _classify_ext(ext: str) -> MediaKind:
     suffix = f".{ext.lower().lstrip('.')}"
+    if suffix == ".gif":
+        return MediaKind.ANIMATION
     if suffix in VIDEO_EXTENSIONS:
         return MediaKind.VIDEO
     if suffix in AUDIO_EXTENSIONS:

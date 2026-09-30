@@ -11,7 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from telegram_share_bot.media.models import MediaFormat, MediaKind
-from telegram_share_bot.storage.media_cache import MediaCache
+from telegram_share_bot.storage.media_cache import MediaCache, _cache_key
 
 
 class TestMediaCache(unittest.IsolatedAsyncioTestCase):
@@ -400,6 +400,45 @@ class TestMediaCache(unittest.IsolatedAsyncioTestCase):
             await self.cache.get(url, media_format=MediaFormat.VIDEO, quality_policy="720p")
         )
         self.assertIsNone(await self.cache.get(url, quality_policy="auto-best"))
+
+    async def test_old_x_video_cache_is_reclassified_once_without_deleting_it(self) -> None:
+        url = "https://x.com/i/status/2105088370078531813"
+        await self.cache.set(
+            url,
+            "old-x-file-id",
+            MediaKind.VIDEO,
+            "Old X media",
+            4,
+            quality_policy="auto-best",
+        )
+        cache_key = _cache_key(url, None, quality_policy="auto-best")
+        assert cache_key is not None
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn, conn:
+            conn.execute(
+                "UPDATE media_cache SET animation_state = 0 WHERE url = ?", (cache_key,)
+            )
+
+        reopened = MediaCache(self.db_path)
+        old_entry = await reopened.get(url, quality_policy="auto-best")
+        self.assertIsNotNone(old_entry)
+        assert old_entry is not None
+        self.assertEqual(old_entry.kind, MediaKind.LEGACY_VIDEO)
+        self.assertEqual(old_entry.file_id, "old-x-file-id")
+        self.assertIsNone(await reopened.get_preferred_video(url, quality_policy="auto-best"))
+
+        await reopened.set(
+            url,
+            "new-animation-file-id",
+            MediaKind.ANIMATION,
+            "X GIF",
+            4,
+            quality_policy="auto-best",
+        )
+        animation = await reopened.get_preferred_video(url, quality_policy="auto-best")
+        self.assertIsNotNone(animation)
+        assert animation is not None
+        self.assertEqual(animation.kind, MediaKind.ANIMATION)
+        self.assertEqual(animation.file_id, "new-animation-file-id")
 
     async def test_best_video_preferred_over_auto_for_same_clip(self) -> None:
         from telegram_share_bot.media.models import TimeRange

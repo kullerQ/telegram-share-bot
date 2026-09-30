@@ -230,7 +230,7 @@ class TestCacheFallback(unittest.IsolatedAsyncioTestCase):
         context.bot.send_video = AsyncMock()
         context.bot.send_video.side_effect = [
             BadRequest("Wrong file identifier/HTTP URL specified"),
-            MagicMock(video=MagicMock(file_id="NEW_FRESH_FILE_ID")),
+            MagicMock(animation=None, video=MagicMock(file_id="NEW_FRESH_FILE_ID")),
         ]
 
         update = MagicMock()
@@ -859,7 +859,7 @@ class TestCacheFallback(unittest.IsolatedAsyncioTestCase):
 
         context = MagicMock()
         context.application.bot_data = {"settings": self.settings}
-        ok_msg = MagicMock(video=MagicMock(file_id="OK_AFTER_RETRY"))
+        ok_msg = MagicMock(animation=None, video=MagicMock(file_id="OK_AFTER_RETRY"))
         context.bot.send_video = AsyncMock(side_effect=[NetworkError("httpx.ReadError: "), ok_msg])
 
         with patch("telegram_share_bot.handlers.delivery.asyncio.sleep", AsyncMock()):

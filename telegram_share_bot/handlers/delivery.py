@@ -12,6 +12,7 @@ from telegram import (
     InlineKeyboardMarkup,
     InlineQueryResultArticle,
     InputFile,
+    InputMediaAnimation,
     InputMediaAudio,
     InputMediaDocument,
     InputMediaVideo,
@@ -278,8 +279,12 @@ def _input_media(
     kind: MediaKind,
     *,
     caption: _RenderedCaption,
-) -> InputMediaVideo | InputMediaAudio | InputMediaDocument:
+) -> InputMediaAnimation | InputMediaVideo | InputMediaAudio | InputMediaDocument:
     # Text stays literal; only the media title gets a link entity.
+    if kind is MediaKind.ANIMATION:
+        return InputMediaAnimation(
+            media=file_id, caption=caption.text, caption_entities=caption.entities or None
+        )
     if kind is MediaKind.VIDEO:
         return InputMediaVideo(
             media=file_id, caption=caption.text, caption_entities=caption.entities or None
@@ -314,7 +319,15 @@ async def _upload_direct_url_for_file_id(
 ) -> tuple[str, str, MediaKind] | None:
     caption = _storage_upload_caption(settings, stream.title)
     try:
-        if stream.kind is MediaKind.VIDEO:
+        if stream.kind is MediaKind.ANIMATION:
+            sent_msg = await context.bot.send_animation(
+                chat_id=settings.storage_chat_id,
+                animation=stream.direct_url,
+                caption=caption,
+                duration=stream.duration,
+                disable_notification=True,
+            )
+        elif stream.kind is MediaKind.VIDEO:
             sent_msg = await context.bot.send_video(
                 chat_id=settings.storage_chat_id,
                 video=stream.direct_url,
@@ -417,6 +430,17 @@ async def _send_media_to_chat(
         try:
             with path.open("rb") as file_obj:
                 upload = InputFile(file_obj, filename=path.name)
+                if media.kind is MediaKind.ANIMATION:
+                    return await context.bot.send_animation(
+                        chat_id=chat_id,
+                        animation=upload,
+                        caption=caption.text,
+                        caption_entities=caption.entities or None,
+                        duration=media.duration,
+                        disable_notification=True,
+                        read_timeout=timeout,
+                        write_timeout=timeout,
+                    )
                 if media.kind is MediaKind.VIDEO:
                     return await context.bot.send_video(
                         chat_id=chat_id,
@@ -486,6 +510,15 @@ async def _send_cached_media_to_chat(
         original_url=original_url or cached.url,
         custom_caption=custom_caption,
     )
+    if cached.kind is MediaKind.ANIMATION:
+        return await context.bot.send_animation(
+            chat_id=chat_id,
+            animation=cached.file_id,
+            caption=caption.text,
+            caption_entities=caption.entities or None,
+            duration=cached.duration,
+            disable_notification=True,
+        )
     if cached.kind is MediaKind.VIDEO:
         return await context.bot.send_video(
             chat_id=chat_id,
@@ -516,6 +549,8 @@ async def _send_cached_media_to_chat(
 
 
 def _file_id_and_kind_from_message(message: Message) -> tuple[str, MediaKind]:
+    if message.animation is not None:
+        return message.animation.file_id, MediaKind.ANIMATION
     if message.video is not None:
         return message.video.file_id, MediaKind.VIDEO
     if message.audio is not None:
@@ -528,4 +563,7 @@ def _file_id_and_kind_from_message(message: Message) -> tuple[str, MediaKind]:
 def _message_video_height(message: Message) -> int | None:
     video = message.video
     height = getattr(video, "height", None) if video is not None else None
+    if height is None:
+        animation_height = getattr(message.animation, "height", None)
+        height = animation_height
     return height if isinstance(height, int) and height > 0 else None

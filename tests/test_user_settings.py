@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from contextlib import closing
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 from telegram.constants import KeyboardButtonStyle
@@ -21,6 +22,7 @@ from telegram_share_bot.handlers import (
     _settings_text,
     settings_callback,
 )
+from telegram_share_bot.handlers.delivery import _file_id_and_kind_from_message
 from telegram_share_bot.media.models import (
     DownloadedMedia,
     MediaFormat,
@@ -130,6 +132,30 @@ class TestPerUserCaptionResolution(unittest.TestCase):
         self.assertEqual(override.text, "Custom <override>")
         self.assertEqual(override.entities, ())
 
+    def test_animation_uses_telegram_animation_media(self) -> None:
+        caption = _resolve_user_caption(
+            UserSharingSettings(caption=CaptionPreference.MEDIA_TITLE),
+            self.settings,
+            media_title="A GIF",
+            original_url="https://x.com/user/status/123",
+            custom_caption=None,
+        )
+        media = _input_media("animation-file", "A GIF", MediaKind.ANIMATION, caption=caption)
+        self.assertEqual(media.type, "animation")
+
+    def test_uploaded_animation_message_keeps_animation_cache_kind(self) -> None:
+        message = SimpleNamespace(
+            animation=SimpleNamespace(file_id="animation-file"),
+            video=None,
+            audio=None,
+            document=None,
+        )
+
+        self.assertEqual(
+            _file_id_and_kind_from_message(message),
+            ("animation-file", MediaKind.ANIMATION),
+        )
+
     def test_custom_choice_needs_per_send_text(self) -> None:
         caption = _resolve_user_caption(
             UserSharingSettings(caption=CaptionPreference.CUSTOM),
@@ -227,6 +253,50 @@ class TestLinkedCaptionDelivery(unittest.IsolatedAsyncioTestCase):
             cached = context.bot.send_video.await_args.kwargs
             self.assertEqual(cached["caption"], "A title")
             self.assertEqual(cached["caption_entities"][0].url, url)
+
+    async def test_fresh_and_cached_animations_use_send_animation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings = Settings(
+                bot_token="test:token",
+                storage_chat_id=1,
+                max_file_bytes=1024,
+                download_timeout_seconds=10,
+                download_dir=Path(temp_dir),
+                cache_db_path=Path(temp_dir) / "media_cache.db",
+                delete_storage_messages=True,
+            )
+            context = MagicMock()
+            context.application.bot_data = {"settings": settings}
+            context.bot.send_animation = AsyncMock(return_value=MagicMock())
+            path = Path(temp_dir) / "animation.mp4"
+            path.write_bytes(b"animation")
+            url = "https://x.com/user/status/123"
+
+            await _send_media_to_chat(
+                context,
+                1001,
+                DownloadedMedia(path, "A GIF", MediaKind.ANIMATION, 4),
+                settings=settings,
+                original_url=url,
+            )
+            context.bot.send_animation.assert_awaited_once()
+            self.assertEqual(
+                context.bot.send_animation.await_args.kwargs["animation"].filename,
+                path.name,
+            )
+
+            context.bot.send_animation.reset_mock()
+            await _send_cached_media_to_chat(
+                context,
+                1001,
+                CachedMedia(url, "animation-file-id", MediaKind.ANIMATION, "A GIF", 4),
+                original_url=url,
+            )
+            context.bot.send_animation.assert_awaited_once()
+            self.assertEqual(
+                context.bot.send_animation.await_args.kwargs["animation"],
+                "animation-file-id",
+            )
 
 
 class TestSettingsCallback(unittest.IsolatedAsyncioTestCase):

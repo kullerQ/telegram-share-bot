@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 
 import yt_dlp
 
+from telegram_share_bot import strings
 from telegram_share_bot.media.metadata import (
     _EXTRACT_INFO_CACHE_MAX,
     _EXTRACT_INFO_TTL_SECONDS,
@@ -17,8 +18,9 @@ from telegram_share_bot.media.metadata import (
     _extract_info_cached,
     _looks_like_stale_cdn_url,
     clear_extract_info_cache,
+    is_twitter_animation,
 )
-from telegram_share_bot.media.models import DownloadError
+from telegram_share_bot.media.models import DownloadError, MediaFormat
 from telegram_share_bot.media.transcode import _VideoProbe
 from telegram_share_bot.media.transfer import _download_sync
 
@@ -118,6 +120,42 @@ class TestExtractInfoCache(unittest.TestCase):
             _looks_like_stale_cdn_url(Exception("Unsupported URL"))
         )
 
+    def test_x_animated_gif_is_distinguished_from_a_silent_video(self) -> None:
+        self.assertTrue(
+            is_twitter_animation(
+                {
+                    "extractor_key": "Twitter",
+                    "thumbnails": [
+                        {
+                            "url": "https://pbs.twimg.com/tweet_video_thumb/gif.jpg?name=orig"
+                        }
+                    ],
+                }
+            )
+        )
+        self.assertFalse(
+            is_twitter_animation(
+                {
+                    "extractor_key": "Twitter",
+                    "thumbnails": [
+                        {
+                            "url": "https://pbs.twimg.com/ext_tw_video_thumb/123/video.jpg"
+                        }
+                    ],
+                }
+            )
+        )
+        self.assertFalse(
+            is_twitter_animation(
+                {
+                    "extractor_key": "Youtube",
+                    "thumbnails": [
+                        {"url": "https://pbs.twimg.com/tweet_video_thumb/gif.jpg"}
+                    ],
+                }
+            )
+        )
+
     def test_download_retries_once_on_stale_cached_extract(self) -> None:
         url = "https://www.youtube.com/watch?v=stale123"
         info = {
@@ -181,6 +219,49 @@ class TestExtractInfoCache(unittest.TestCase):
             # Seed + one forced refresh.
             self.assertEqual(mock_ydl.extract_info.call_count, 2)
             self.assertEqual(mock_ydl.process_ie_result.call_count, 2)
+
+    def test_audio_403_after_stale_extract_refresh_is_retryable(self) -> None:
+        url = "https://www.youtube.com/watch?v=stale-audio"
+        info = {
+            "id": "stale-audio",
+            "title": "Audio",
+            "formats": [
+                {
+                    "format_id": "audio",
+                    "ext": "m4a",
+                    "acodec": "aac",
+                    "vcodec": "none",
+                    "filesize": 1024,
+                }
+            ],
+        }
+        mock_ydl = MagicMock()
+        mock_ydl.extract_info.return_value = info
+        mock_ydl.process_ie_result.side_effect = yt_dlp.utils.DownloadError(
+            "ERROR: unable to download video data: HTTP Error 403: Forbidden"
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with patch("telegram_share_bot.media.transfer.create_youtube_dl") as mock_cls:
+                mock_cls.return_value.__enter__.return_value = mock_ydl
+                _extract_info_cached(mock_ydl, url)
+
+                with self.assertRaises(DownloadError) as raised:
+                    _download_sync(
+                        url=url,
+                        download_dir=Path(tmp_dir),
+                        max_file_bytes=10 * 1024 * 1024,
+                        timeout_seconds=30,
+                        media_format=MediaFormat.AUDIO,
+                    )
+
+        self.assertEqual(
+            str(raised.exception), strings.DOWNLOAD_FAILED_RETRYABLE
+        )
+        self.assertTrue(raised.exception.retryable)
+        self.assertFalse(DownloadError("HTTP Error 403: Forbidden").retryable)
+        self.assertEqual(mock_ydl.extract_info.call_count, 2)
+        self.assertGreaterEqual(mock_ydl.process_ie_result.call_count, 2)
 
     def test_download_does_not_retry_non_stale_errors(self) -> None:
         url = "https://www.youtube.com/watch?v=big123"

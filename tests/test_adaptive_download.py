@@ -916,6 +916,68 @@ class TestMediaDurationLimit(unittest.TestCase):
 
 
 class TestVideoIntegrity(unittest.TestCase):
+    def test_x_animated_gif_is_returned_as_telegram_animation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ydl = MagicMock()
+            ydl.params = {}
+            ydl.__enter__.return_value = ydl
+            info = {
+                "id": "gif123",
+                "title": "X GIF",
+                "extractor_key": "Twitter",
+                "duration": 4,
+                "thumbnails": [
+                    {"url": "https://pbs.twimg.com/tweet_video_thumb/gif.jpg"}
+                ],
+                "formats": [
+                    {
+                        "format_id": "gif-video",
+                        "ext": "mp4",
+                        "width": 480,
+                        "height": 270,
+                        "filesize": 10,
+                        "vcodec": "h264",
+                        "acodec": "none",
+                        "url": "https://video.twimg.com/tweet_video/gif.mp4",
+                    }
+                ],
+            }
+
+            def download_gif(*_args: object, **_kwargs: object) -> dict[str, object]:
+                template = _outtmpl_template(ydl.params)
+                path = Path(template).parent / "gif.mp4"
+                path.write_bytes(b"silent gif video")
+                return {"title": "X GIF", "requested_downloads": [{"filepath": str(path)}]}
+
+            ydl.process_ie_result.side_effect = download_gif
+            ydl.build_format_selector.side_effect = lambda selector: selector
+
+            with (
+                patch("telegram_share_bot.media.transfer.create_youtube_dl", return_value=ydl),
+                patch("telegram_share_bot.media.transfer.is_safe_media_url", return_value=True),
+                patch(
+                    "telegram_share_bot.media.transfer._safe_dns_resolution",
+                    contextlib.nullcontext,
+                ),
+                patch(
+                    "telegram_share_bot.media.transfer._extract_info_cached",
+                    return_value=(info, False),
+                ),
+                patch(
+                    "telegram_share_bot.media.transfer._optimize_video_file",
+                    side_effect=lambda path, **_kwargs: path,
+                ),
+            ):
+                media = _download_sync(
+                    "https://x.com/user/status/123",
+                    Path(tmp),
+                    max_file_bytes=1024,
+                    timeout_seconds=10,
+                )
+
+        self.assertEqual(media.kind, MediaKind.ANIMATION)
+        self.assertEqual(media.path.suffix, ".mp4")
+
     def test_best_never_returns_leftover_audio_when_video_is_skipped(self) -> None:
         for video_size in (None, 200):
             with self.subTest(video_size=video_size), tempfile.TemporaryDirectory() as tmp:

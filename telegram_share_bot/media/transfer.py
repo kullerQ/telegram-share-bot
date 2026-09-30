@@ -48,6 +48,7 @@ from telegram_share_bot.media.metadata import (
     _looks_like_stale_cdn_url,
     _pick_info,
     ensure_video_available,
+    is_twitter_animation,
     source_title_and_duration,
 )
 from telegram_share_bot.media.models import (
@@ -201,6 +202,9 @@ def _download_sync(
                 extracted, from_cache = _extract_info_cached(ydl, url)
                 info = _pick_info(extracted)
                 ensure_video_available(info, media_format)
+                source_is_animation = (
+                    media_format is MediaFormat.VIDEO and is_twitter_animation(info)
+                )
                 if effective_range is None:
                     ensure_full_media_duration(info.get("duration"), max_media_duration_seconds)
                 if is_clip:
@@ -357,6 +361,10 @@ def _download_sync(
                                 _evict_extract_info(url)
                                 extracted, _ = _extract_info_cached(ydl, url, force_refresh=True)
                                 info = _pick_info(extracted)
+                                source_is_animation = (
+                                    media_format is MediaFormat.VIDEO
+                                    and is_twitter_animation(info)
+                                )
                                 refreshed = True
                                 if effective_range is not None:
                                     effective_range = _resolve_clip_range(effective_range, info)
@@ -375,6 +383,9 @@ def _download_sync(
                         path = _resolve_downloaded_path(attempt_info, attempt_dir, ydl)
                         if not path.exists():
                             raise DownloadError(strings.DOWNLOAD_NO_FILE)
+                        is_animation = media_format is MediaFormat.VIDEO and (
+                            source_is_animation or path.suffix.lower() == ".gif"
+                        )
                         if media_format is MediaFormat.AUDIO:
                             path = _convert_audio_for_telegram(
                                 path,
@@ -414,6 +425,8 @@ def _download_sync(
                                 kind=(
                                     MediaKind.AUDIO
                                     if media_format is MediaFormat.AUDIO
+                                    else MediaKind.ANIMATION
+                                    if is_animation
                                     else _classify(result_path)
                                 ),
                                 duration=duration,
@@ -463,10 +476,15 @@ def _download_sync(
                         if quality_policy is VideoQualityPolicy.BEST:
                             raise DownloadError(strings.DOWNLOAD_BEST_QUALITY_FAILED) from exc
                         raise
+                    is_animation = media_format is MediaFormat.VIDEO and (
+                        source_is_animation or best_oversized[0].suffix.lower() == ".gif"
+                    )
                     return DownloadedMedia(
                         path=optimized_path,
                         title=title,
-                        kind=_classify(optimized_path),
+                        kind=(
+                            MediaKind.ANIMATION if is_animation else _classify(optimized_path)
+                        ),
                         duration=duration,
                     )
                 if isinstance(last_error, DownloadError):
@@ -484,9 +502,14 @@ def _download_sync(
                     message = str(last_error).split("\n")[-1].strip()
                     if media_format is MediaFormat.AUDIO and _is_audio_unavailable_error(message):
                         raise DownloadError(strings.AUDIO_UNAVAILABLE) from last_error
+                    retryable = _is_transient_download_error(message)
                     raise DownloadError(
-                        strings.DOWNLOAD_FAILED_GENERIC,
-                        retryable=_is_transient_download_error(message),
+                        (
+                            strings.DOWNLOAD_FAILED_RETRYABLE
+                            if retryable
+                            else strings.DOWNLOAD_FAILED_GENERIC
+                        ),
+                        retryable=retryable,
                     ) from last_error
                 raise DownloadError(strings.DOWNLOAD_NO_FILE)
     except DownloadError:
@@ -503,9 +526,10 @@ def _download_sync(
             raise DownloadError(
                 strings.DOWNLOAD_EXCEEDS_LIMIT.format(max_mb=max_file_bytes // (1024 * 1024))
             ) from exc
+        retryable = _is_transient_download_error(message)
         raise DownloadError(
-            strings.DOWNLOAD_FAILED_GENERIC,
-            retryable=_is_transient_download_error(message),
+            strings.DOWNLOAD_FAILED_RETRYABLE if retryable else strings.DOWNLOAD_FAILED_GENERIC,
+            retryable=retryable,
         ) from exc
     except Exception as exc:
         cleanup_work_dir()
@@ -514,7 +538,8 @@ def _download_sync(
             logger.info("No compatible audio stream available for %s", safe_url_for_log(url))
             raise DownloadError(strings.AUDIO_UNAVAILABLE) from exc
         logger.warning("Download failed for %s: %s", safe_url_for_log(url), message)
+        retryable = _is_transient_download_error(message)
         raise DownloadError(
-            strings.DOWNLOAD_FAILED_GENERIC,
-            retryable=_is_transient_download_error(message),
+            strings.DOWNLOAD_FAILED_RETRYABLE if retryable else strings.DOWNLOAD_FAILED_GENERIC,
+            retryable=retryable,
         ) from exc
