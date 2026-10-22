@@ -14,9 +14,14 @@ EXAMPLE_MEDIA_URL = "https://example.com/video"
 
 # --- Access control ----------------------------------------------------------
 
-ACCESS_DENIED = "You are not authorized to use this bot."
-INLINE_ACCESS_DENIED_TITLE = "Access denied"
-INLINE_ACCESS_DENIED_DESCRIPTION = "You are not authorized to use this bot."
+PROJECT_URL = "https://github.com/kullerQ/telegram-share-bot"
+ACCESS_DENIED = (
+    "👋 This bot is private.\n\n"
+    "Interested in using it? The project is open source, so you can host your own bot:\n"
+    f"{PROJECT_URL}"
+)
+INLINE_ACCESS_DENIED_TITLE = "This bot is private"
+INLINE_ACCESS_DENIED_DESCRIPTION = f"Host your own open-source bot: {PROJECT_URL}"
 RATE_LIMITED = "Too many downloads in progress. Please wait and try again."
 DOWNLOADS_PER_MINUTE_LIMITED = (
     "You've reached the limit of {limit} download requests per minute. "
