@@ -128,7 +128,7 @@ class TestMediaProgress(unittest.IsolatedAsyncioTestCase):
         work_dir.mkdir(parents=True, exist_ok=True)
         path = work_dir / "video.mp4"
         path.write_bytes(b"media")
-        return DownloadedMedia(path, "Example video", MediaKind.VIDEO, 30)
+        return DownloadedMedia(path, "Example video", MediaKind.VIDEO, 30, 1920, 1080)
 
     async def test_direct_chat_shows_optimization_and_clears_status_after_send(self) -> None:
         status = MagicMock()
@@ -328,7 +328,9 @@ class TestMediaProgress(unittest.IsolatedAsyncioTestCase):
             ),
             patch(
                 "telegram_share_bot.handlers.prepare._upload_for_file_id",
-                new=AsyncMock(return_value=("FILE_ID", "Example video", MediaKind.VIDEO, 1080)),
+                new=AsyncMock(
+                    return_value=("FILE_ID", "Example video", MediaKind.VIDEO, media.height)
+                ),
             ),
         ):
             await _prepare_inline_media(
@@ -361,6 +363,8 @@ class TestMediaProgress(unittest.IsolatedAsyncioTestCase):
             60,
             time_range=clip,
             quality_policy=VideoQualityPolicy.AUTO.value,
+            video_width=1280,
+            video_height=720,
         )
         await self.cache.set(
             url,
@@ -369,6 +373,8 @@ class TestMediaProgress(unittest.IsolatedAsyncioTestCase):
             "Example",
             360,
             quality_policy=VideoQualityPolicy.AUTO.value,
+            video_width=1920,
+            video_height=1080,
         )
         query = MagicMock()
         query.from_user = MagicMock(id=42)
@@ -542,7 +548,7 @@ class TestMediaProgress(unittest.IsolatedAsyncioTestCase):
             ),
             patch(
                 "telegram_share_bot.handlers.prepare._upload_for_file_id",
-                new=AsyncMock(return_value=("FILE_ID", "Clip", MediaKind.VIDEO, 720)),
+                new=AsyncMock(return_value=("FILE_ID", "Clip", MediaKind.VIDEO, media.height)),
             ),
         ):
             await _prepare_inline_media(

@@ -11,6 +11,7 @@ from telegram_share_bot.media.models import (
     DownloadError,
     MediaFormat,
     TimeRange,
+    VideoMetadataError,
     VideoUnavailableError,
 )
 
@@ -35,6 +36,10 @@ class _SendTrace:
         failure: str = "none",
         level: int = logging.INFO,
         exc_info: bool = False,
+        local_width: int | None = None,
+        local_height: int | None = None,
+        telegram_width: int | None = None,
+        telegram_height: int | None = None,
     ) -> None:
         """Log an operation stage without its URL, caption, or Telegram token."""
         stage_seconds = (
@@ -42,10 +47,16 @@ class _SendTrace:
             if stage_started_at is not None
             else "-"
         )
+        geometry = ""
+        if local_width is not None or local_height is not None:
+            geometry = (
+                f" local_width={local_width} local_height={local_height}"
+                f" telegram_width={telegram_width} telegram_height={telegram_height}"
+            )
         logger.log(
             level,
             "send op=%s user_id=%s route=%s format=%s scope=%s stage=%s elapsed_s=%.1f "
-            "stage_s=%s cache=%s failure=%s",
+            "stage_s=%s cache=%s failure=%s%s",
             self.operation_id,
             self.user_id if self.user_id is not None else "-",
             self.route,
@@ -56,6 +67,7 @@ class _SendTrace:
             stage_seconds,
             self.cache_outcome,
             failure,
+            geometry,
             exc_info=exc_info,
         )
 
@@ -63,6 +75,8 @@ class _SendTrace:
 def _download_failure_category(exc: DownloadError) -> str:
     """Classify expected failures without putting source text in logs."""
     message = str(exc)
+    if isinstance(exc, VideoMetadataError):
+        return "video_metadata"
     if isinstance(exc, VideoUnavailableError):
         return "no_video"
     if message == strings.AUDIO_UNAVAILABLE:

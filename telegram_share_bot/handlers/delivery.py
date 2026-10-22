@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from urllib.parse import urlsplit
 from uuid import uuid4
@@ -36,6 +37,7 @@ from telegram_share_bot.media.models import (
     MediaFormat,
     MediaKind,
     TimeRange,
+    VideoMetadataError,
     VideoQualityPolicy,
 )
 from telegram_share_bot.media.requests import (
@@ -59,6 +61,7 @@ from .state import (
     _UPLOAD_RETRY_BASE_DELAY_SECONDS,
     _settings,
 )
+from .trace import _SendTrace
 
 logger = logging.getLogger("telegram_share_bot.handlers")
 
@@ -273,21 +276,79 @@ async def _edit_inline_text(
         logger.warning("Could not edit inline status category=telegram_error")
 
 
+def _require_video_geometry(width: int | None, height: int | None) -> tuple[int, int]:
+    if (
+        not isinstance(width, int)
+        or isinstance(width, bool)
+        or width <= 0
+        or not isinstance(height, int)
+        or isinstance(height, bool)
+        or height <= 0
+    ):
+        raise VideoMetadataError()
+    return width, height
+
+
+async def _validate_video_message(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    message: Message,
+    kind: MediaKind,
+    width: int,
+    height: int,
+    trace: _SendTrace | None,
+) -> Message:
+    """Reject unusable server geometry once; never keep its file ID in cache."""
+    visual = message.animation if kind is MediaKind.ANIMATION else message.video
+    reported_width = getattr(visual, "width", None)
+    reported_height = getattr(visual, "height", None)
+    valid = False
+    try:
+        actual_width, actual_height = _require_video_geometry(reported_width, reported_height)
+        # Allow rounding or proportional server resizing, but reject a changed shape.
+        valid = abs(actual_width * height - actual_height * width) <= (
+            actual_height * width * 0.02
+        )
+    except VideoMetadataError:
+        pass
+    if trace is not None:
+        trace.event(
+            "video_metadata",
+            failure="none" if valid else "video_metadata",
+            level=logging.INFO if valid else logging.WARNING,
+            local_width=width,
+            local_height=height,
+            telegram_width=reported_width if type(reported_width) is int else None,
+            telegram_height=reported_height if type(reported_height) is int else None,
+        )
+    if not valid:
+        with contextlib.suppress(TelegramError):
+            await context.bot.delete_message(chat_id=chat_id, message_id=message.message_id)
+        raise VideoMetadataError()
+    return message
+
+
 def _input_media(
     file_id: str,
     title: str,
     kind: MediaKind,
     *,
     caption: _RenderedCaption,
+    width: int | None = None,
+    height: int | None = None,
 ) -> InputMediaAnimation | InputMediaVideo | InputMediaAudio | InputMediaDocument:
     # Text stays literal; only the media title gets a link entity.
+    if kind in (MediaKind.VIDEO, MediaKind.ANIMATION):
+        width, height = _require_video_geometry(width, height)
     if kind is MediaKind.ANIMATION:
         return InputMediaAnimation(
-            media=file_id, caption=caption.text, caption_entities=caption.entities or None
+            media=file_id, caption=caption.text, caption_entities=caption.entities or None,
+            width=width, height=height,
         )
     if kind is MediaKind.VIDEO:
         return InputMediaVideo(
-            media=file_id, caption=caption.text, caption_entities=caption.entities or None
+            media=file_id, caption=caption.text, caption_entities=caption.entities or None,
+            width=width, height=height, supports_streaming=True,
         )
     if kind is MediaKind.AUDIO:
         return InputMediaAudio(
@@ -370,6 +431,8 @@ async def _upload_for_file_id(
     context: ContextTypes.DEFAULT_TYPE,
     settings: Settings,
     media: DownloadedMedia,
+    *,
+    trace: _SendTrace | None = None,
 ) -> tuple[str, str, MediaKind, int | None]:
     message = await _send_media_to_chat(
         context,
@@ -379,6 +442,7 @@ async def _upload_for_file_id(
         # Storage path: never apply custom captions.
         custom_caption=None,
         force_storage_caption=True,
+        trace=trace,
     )
     file_id, result_kind = _file_id_and_kind_from_message(message)
     if settings.delete_storage_messages:
@@ -389,7 +453,7 @@ async def _upload_for_file_id(
             )
         except TelegramError:
             logger.debug("Could not delete storage message %s", message.message_id)
-    return file_id, media.title, result_kind, _message_video_height(message)
+    return file_id, media.title, result_kind, media.height
 
 
 async def _send_media_to_chat(
@@ -402,6 +466,7 @@ async def _send_media_to_chat(
     preferences: UserSharingSettings | None = None,
     original_url: str | None = None,
     force_storage_caption: bool = False,
+    trace: _SendTrace | None = None,
 ) -> Message:
     effective_settings = settings if settings is not None else _settings(context)
     timeout = float(
@@ -425,15 +490,21 @@ async def _send_media_to_chat(
             custom_caption=custom_caption,
         )
 
+    width = height = None
+    if media.kind in (MediaKind.VIDEO, MediaKind.ANIMATION):
+        width, height = _require_video_geometry(media.width, media.height)
+
     last_error: NetworkError | None = None
     for attempt in range(1, _UPLOAD_MAX_ATTEMPTS + 1):
         try:
             with path.open("rb") as file_obj:
                 upload = InputFile(file_obj, filename=path.name)
                 if media.kind is MediaKind.ANIMATION:
-                    return await context.bot.send_animation(
+                    message = await context.bot.send_animation(
                         chat_id=chat_id,
                         animation=upload,
+                        width=width,
+                        height=height,
                         caption=caption.text,
                         caption_entities=caption.entities or None,
                         duration=media.duration,
@@ -441,10 +512,16 @@ async def _send_media_to_chat(
                         read_timeout=timeout,
                         write_timeout=timeout,
                     )
+                    assert width is not None and height is not None
+                    return await _validate_video_message(
+                        context, chat_id, message, media.kind, width, height, trace
+                    )
                 if media.kind is MediaKind.VIDEO:
-                    return await context.bot.send_video(
+                    message = await context.bot.send_video(
                         chat_id=chat_id,
                         video=upload,
+                        width=width,
+                        height=height,
                         caption=caption.text,
                         caption_entities=caption.entities or None,
                         duration=media.duration,
@@ -452,6 +529,10 @@ async def _send_media_to_chat(
                         disable_notification=True,
                         read_timeout=timeout,
                         write_timeout=timeout,
+                    )
+                    assert width is not None and height is not None
+                    return await _validate_video_message(
+                        context, chat_id, message, media.kind, width, height, trace
                     )
                 if media.kind is MediaKind.AUDIO:
                     return await context.bot.send_audio(
@@ -499,6 +580,7 @@ async def _send_cached_media_to_chat(
     custom_caption: str | None = None,
     preferences: UserSharingSettings | None = None,
     original_url: str | None = None,
+    trace: _SendTrace | None = None,
 ) -> Message:
     settings = _settings(context)
     if preferences is None:
@@ -510,24 +592,39 @@ async def _send_cached_media_to_chat(
         original_url=original_url or cached.url,
         custom_caption=custom_caption,
     )
+    width = height = None
+    if cached.kind in (MediaKind.VIDEO, MediaKind.ANIMATION):
+        width, height = _require_video_geometry(cached.video_width, cached.video_height)
     if cached.kind is MediaKind.ANIMATION:
-        return await context.bot.send_animation(
+        message = await context.bot.send_animation(
             chat_id=chat_id,
             animation=cached.file_id,
+            width=width,
+            height=height,
             caption=caption.text,
             caption_entities=caption.entities or None,
             duration=cached.duration,
             disable_notification=True,
         )
+        assert width is not None and height is not None
+        return await _validate_video_message(
+            context, chat_id, message, cached.kind, width, height, trace
+        )
     if cached.kind is MediaKind.VIDEO:
-        return await context.bot.send_video(
+        message = await context.bot.send_video(
             chat_id=chat_id,
             video=cached.file_id,
+            width=width,
+            height=height,
             caption=caption.text,
             caption_entities=caption.entities or None,
             duration=cached.duration,
             supports_streaming=True,
             disable_notification=True,
+        )
+        assert width is not None and height is not None
+        return await _validate_video_message(
+            context, chat_id, message, cached.kind, width, height, trace
         )
     if cached.kind is MediaKind.AUDIO:
         return await context.bot.send_audio(
@@ -558,12 +655,3 @@ def _file_id_and_kind_from_message(message: Message) -> tuple[str, MediaKind]:
     if message.document is not None:
         return message.document.file_id, MediaKind.DOCUMENT
     raise RuntimeError(strings.TELEGRAM_NO_FILE_ID)
-
-
-def _message_video_height(message: Message) -> int | None:
-    video = message.video
-    height = getattr(video, "height", None) if video is not None else None
-    if height is None:
-        animation_height = getattr(message.animation, "height", None)
-        height = animation_height
-    return height if isinstance(height, int) and height > 0 else None

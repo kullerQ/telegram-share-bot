@@ -72,6 +72,8 @@ class TestCacheFallback(unittest.IsolatedAsyncioTestCase):
                     "Cached",
                     30,
                     quality_policy=VideoQualityPolicy.AUTO.value,
+                    video_width=1280,
+                    video_height=720,
                 )
                 context = MagicMock()
                 context.application.bot_data = {
@@ -115,6 +117,8 @@ class TestCacheFallback(unittest.IsolatedAsyncioTestCase):
                     "Cached",
                     30,
                     quality_policy=VideoQualityPolicy.AUTO.value,
+                    video_width=1280,
+                    video_height=720,
                 )
                 context = MagicMock()
                 context.application.bot_data = {
@@ -167,6 +171,7 @@ class TestCacheFallback(unittest.IsolatedAsyncioTestCase):
             "Auto",
             40,
             quality_policy=VideoQualityPolicy.AUTO.value,
+            video_width=1280,
             video_height=720,
         )
         await self.cache.set(
@@ -176,6 +181,7 @@ class TestCacheFallback(unittest.IsolatedAsyncioTestCase):
             "Best",
             40,
             quality_policy=VideoQualityPolicy.BEST.value,
+            video_width=1920,
             video_height=1080,
         )
         context = MagicMock()
@@ -183,7 +189,9 @@ class TestCacheFallback(unittest.IsolatedAsyncioTestCase):
             "settings": self.settings,
             "media_cache": self.cache,
         }
-        context.bot.send_video = AsyncMock()
+        context.bot.send_video = AsyncMock(
+            return_value=MagicMock(video=MagicMock(width=1920, height=1080), animation=None)
+        )
         status = MagicMock()
         status.edit_text = AsyncMock()
         status.delete = AsyncMock()
@@ -220,6 +228,8 @@ class TestCacheFallback(unittest.IsolatedAsyncioTestCase):
             title="Old Title",
             duration=100,
             quality_policy=VideoQualityPolicy.AUTO.value,
+            video_width=1280,
+            video_height=720,
         )
 
         context = MagicMock()
@@ -230,7 +240,10 @@ class TestCacheFallback(unittest.IsolatedAsyncioTestCase):
         context.bot.send_video = AsyncMock()
         context.bot.send_video.side_effect = [
             BadRequest("Wrong file identifier/HTTP URL specified"),
-            MagicMock(animation=None, video=MagicMock(file_id="NEW_FRESH_FILE_ID")),
+            MagicMock(
+                animation=None,
+                video=MagicMock(file_id="NEW_FRESH_FILE_ID", width=1920, height=1080),
+            ),
         ]
 
         update = MagicMock()
@@ -270,6 +283,8 @@ class TestCacheFallback(unittest.IsolatedAsyncioTestCase):
             title="Fresh Download",
             kind=MediaKind.VIDEO,
             duration=120,
+            width=1920,
+            height=1080,
         )
         fresh_media.path.write_bytes(b"dummy video data")
         with (
@@ -588,6 +603,8 @@ class TestCacheFallback(unittest.IsolatedAsyncioTestCase):
             title="Stale Inline",
             duration=60,
             quality_policy=VideoQualityPolicy.AUTO.value,
+            video_width=1280,
+            video_height=720,
         )
 
         context = MagicMock()
@@ -614,12 +631,19 @@ class TestCacheFallback(unittest.IsolatedAsyncioTestCase):
             title="Fresh Inline",
             kind=MediaKind.VIDEO,
             duration=60,
+            width=1920,
+            height=1080,
         )
         fresh_media.path.write_bytes(b"dummy inline data")
 
         download_mock = AsyncMock(return_value=fresh_media)
         upload_mock = AsyncMock(
-            return_value=("FRESH_INLINE_FILE_ID", "Fresh Inline", MediaKind.VIDEO, 1080)
+            return_value=(
+                "FRESH_INLINE_FILE_ID",
+                "Fresh Inline",
+                MediaKind.VIDEO,
+                fresh_media.height,
+            )
         )
         with (
             patch(
@@ -814,6 +838,8 @@ class TestCacheFallback(unittest.IsolatedAsyncioTestCase):
             title="Net Fail",
             kind=MediaKind.VIDEO,
             duration=10,
+            width=1920,
+            height=1080,
         )
         fresh_media.path.write_bytes(b"dummy")
 
@@ -854,12 +880,17 @@ class TestCacheFallback(unittest.IsolatedAsyncioTestCase):
             title="Retry",
             kind=MediaKind.VIDEO,
             duration=5,
+            width=1920,
+            height=1080,
         )
         media.path.write_bytes(b"video-bytes")
 
         context = MagicMock()
         context.application.bot_data = {"settings": self.settings}
-        ok_msg = MagicMock(animation=None, video=MagicMock(file_id="OK_AFTER_RETRY"))
+        ok_msg = MagicMock(
+            animation=None,
+            video=MagicMock(file_id="OK_AFTER_RETRY", width=1920, height=1080),
+        )
         context.bot.send_video = AsyncMock(side_effect=[NetworkError("httpx.ReadError: "), ok_msg])
 
         with patch("telegram_share_bot.handlers.delivery.asyncio.sleep", AsyncMock()):

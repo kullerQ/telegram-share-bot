@@ -253,6 +253,8 @@ class TestInlineRequestLifecycle(unittest.IsolatedAsyncioTestCase):
             title="Prepared",
             kind=MediaKind.VIDEO,
             duration=5,
+            width=1920,
+            height=1080,
         )
 
         with (

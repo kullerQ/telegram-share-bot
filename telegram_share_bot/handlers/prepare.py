@@ -135,7 +135,10 @@ async def _prepare_inline_media(
                     custom_caption=custom_caption,
                 )
                 await context.bot.edit_message_media(
-                    media=_input_media(cached.file_id, cached.title, cached.kind, caption=caption),
+                    media=_input_media(
+                        cached.file_id, cached.title, cached.kind, caption=caption,
+                        width=cached.video_width, height=cached.video_height,
+                    ),
                     inline_message_id=inline_message_id,
                     reply_markup=_EMPTY_KEYBOARD,
                 )
@@ -281,7 +284,9 @@ async def _prepare_inline_media(
             reply_markup=_cancel_keyboard(result_id),
         )
         upload_started_at = time.monotonic()
-        file_id, title, kind, video_height = await _upload_for_file_id(context, settings, media)
+        file_id, title, kind, video_height = await _upload_for_file_id(
+            context, settings, media, trace=trace
+        )
         trace.event("upload", stage_started_at=upload_started_at)
         await cache.set(
             url=url,
@@ -293,6 +298,7 @@ async def _prepare_inline_media(
             media_format=media_format,
             quality_policy=cache_quality,
             video_height=video_height,
+            video_width=media.width,
         )
         if inline_message_id in _cancelled_set(context):
             return
@@ -304,7 +310,9 @@ async def _prepare_inline_media(
             custom_caption=custom_caption,
         )
         await context.bot.edit_message_media(
-            media=_input_media(file_id, title, kind, caption=caption),
+            media=_input_media(
+                file_id, title, kind, caption=caption, width=media.width, height=media.height
+            ),
             inline_message_id=inline_message_id,
             reply_markup=_EMPTY_KEYBOARD,
         )
