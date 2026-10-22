@@ -153,6 +153,7 @@ Inline requests and their Cancel/Retry ownership are held in memory. A bot resta
 
 ## Limits
 
+- Video and animation uploads include their final display dimensions to preserve portrait and landscape proportions. If Telegram reports invalid proportions, the bot returns a retryable error and does not cache that upload. Upgrading to `1.4.20` refreshes older cached videos and animations on their next send; audio cache entries and saved settings are preserved.
 - Video outputs are checked with bundled `ffmpeg` before sending. Compatible files that fit are kept intact. When encoding is needed, the bot preserves the source dimensions and targets the available size budget, with at most two attempts from the original source. Best can fail if its source exceeds the download bound; it never silently substitutes a lower source. Local installations need `ffmpeg`; Docker includes it.
 - Max file size ≈ 45 MB (Telegram Bot API upload limit is 50 MB). Video quality is adapted to fit this limit rather than capped at one fixed resolution.
 - Download preparation defaults to 120 seconds, including queue wait, metadata discovery, and source transfer; source transfers are bounded to twice the output size limit.
