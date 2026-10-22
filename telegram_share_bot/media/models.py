@@ -39,6 +39,17 @@ class DownloadedMedia:
     title: str
     kind: MediaKind
     duration: int | None
+    width: int | None = None
+    height: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedVideo:
+    """Verified video file and its final display dimensions."""
+
+    path: Path
+    width: int
+    height: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,3 +135,10 @@ class VideoUnavailableError(DownloadError):
 
     def __init__(self) -> None:
         super().__init__(strings.VIDEO_UNAVAILABLE, retryable=False)
+
+
+class VideoMetadataError(DownloadError):
+    """Raised when Telegram reports unusable dimensions for a prepared video."""
+
+    def __init__(self) -> None:
+        super().__init__(strings.TELEGRAM_VIDEO_METADATA_FAILED, retryable=True)

@@ -19,7 +19,7 @@ from telegram_share_bot.media.formats import (
     _SOURCE_SIZE_MULTIPLIER,
     _projected_transfer_seconds,
 )
-from telegram_share_bot.media.models import DownloadError, VideoUnavailableError
+from telegram_share_bot.media.models import DownloadError, PreparedVideo, VideoUnavailableError
 
 logger = logging.getLogger(__name__)
 
@@ -174,6 +174,18 @@ class _VideoProbe:
     audio_codec: str | None
     width: int
     height: int
+    sample_aspect_ratio: tuple[int, int] | None = None
+    rotation_degrees: float = 0.0
+
+    @property
+    def display_dimensions(self) -> tuple[int, int]:
+        width, height = self.width, self.height
+        ratio = self.sample_aspect_ratio
+        if ratio is not None and ratio[0] > 0 and ratio[1] > 0:
+            width = max(1, round(width * ratio[0] / ratio[1]))
+        if math.isclose(abs(self.rotation_degrees) % 180, 90, abs_tol=0.1):
+            width, height = height, width
+        return width, height
 
     @property
     def compatible(self) -> bool:
@@ -220,6 +232,11 @@ def _probe_video_file(path: Path, deadline: float) -> _VideoProbe:
         audio_codec: str | None = None
         video_stream_seen = False
         width = height = 0
+        sample_aspect_ratio: tuple[int, int] | None = None
+        rotation_degrees = 0.0
+        actual_video_stream_index: int | None = None
+        current_stream_is_selected_video = False
+        in_video_side_data = False
         for line in (result.stderr or b"").decode("utf-8", errors="replace").splitlines():
             # Only inspect the input: FFmpeg also prints transcoded output streams.
             if line.startswith(("Stream mapping:", "Output #")):
@@ -231,18 +248,34 @@ def _probe_video_file(path: Path, deadline: float) -> _VideoProbe:
                 hours, minutes, seconds = duration_match.groups()
                 duration = int(hours) * 3600 + int(minutes) * 60 + float(seconds)
             stream_match = re.match(
-                r"^\s*Stream #0:\d+(?:\[[^]]+\])?(?:\([^)]*\))?: "
+                r"^\s*Stream #0:(\d+)(?:\[[^]]+\])?(?:\([^)]*\))?: "
                 r"(Video|Audio): ([A-Za-z0-9_]+)\b(.*)$",
                 line,
             )
             if stream_match is None:
+                if current_stream_is_selected_video:
+                    if line.strip() == "Side data:":
+                        in_video_side_data = True
+                    elif in_video_side_data:
+                        rotation_match = re.search(
+                            r"\brotation of (-?\d+(?:\.\d+)?) degrees\b", line
+                        )
+                        if rotation_match is not None:
+                            rotation_degrees = float(rotation_match.group(1))
                 continue
-            kind, codec, details = stream_match.groups()
+            stream_index, kind, codec, details = stream_match.groups()
+            current_stream_is_selected_video = False
+            in_video_side_data = False
             if kind == "Audio" and audio_codec is None:
                 audio_codec = codec
             if kind != "Video" or "(attached pic)" in details:
                 continue
-            video_stream_seen = True
+            if actual_video_stream_index is None:
+                actual_video_stream_index = int(stream_index)
+                video_stream_seen = True
+            elif actual_video_stream_index != int(stream_index):
+                continue
+            current_stream_is_selected_video = True
             if video_codec:
                 continue
             dimensions = re.search(r"(?<!\w)(\d{2,5})x(\d{2,5})(?!\d)", details)
@@ -250,6 +283,11 @@ def _probe_video_file(path: Path, deadline: float) -> _VideoProbe:
                 continue
             video_codec = codec
             width, height = map(int, dimensions.groups())
+            sar_match = re.search(r"\bSAR\s+(\d+):(\d+)\b", details)
+            if sar_match is not None:
+                numerator, denominator = map(int, sar_match.groups())
+                if numerator > 0 and denominator > 0:
+                    sample_aspect_ratio = (numerator, denominator)
             pixel_match = re.search(
                 r",\s*([A-Za-z0-9_]+)(?:\([^)]*\))?,\s*\d{2,5}x\d{2,5}\b",
                 details,
@@ -266,6 +304,8 @@ def _probe_video_file(path: Path, deadline: float) -> _VideoProbe:
             audio_codec,
             width,
             height,
+            sample_aspect_ratio,
+            rotation_degrees,
         )
     except (
         OSError,
@@ -284,7 +324,7 @@ def _optimize_video_file(
     deadline: float,
     abort_event: threading.Event | None,
     on_optimizing: Callable[[], None] | None,
-) -> Path:
+) -> PreparedVideo:
     """Verify video and fit H.264/AAC output to the budget in at most two encodes."""
     probe = _probe_video_file(path, deadline)
     source_size = path.stat().st_size
@@ -296,7 +336,8 @@ def _optimize_video_file(
             probe.height,
             probe.video_codec,
         )
-        return path
+        width, height = probe.display_dimensions
+        return PreparedVideo(path, width, height)
     ffmpeg_bin = shutil.which("ffmpeg")
     if ffmpeg_bin is None:
         raise DownloadError(strings.DOWNLOAD_FIT_FFMPEG_MISSING)
@@ -395,7 +436,8 @@ def _optimize_video_file(
         )
         if 0 < output_size <= max_file_bytes:
             path.unlink(missing_ok=True)
-            return output
+            width, height = output_probe.display_dimensions
+            return PreparedVideo(output, width, height)
         # Retry from the original source, never from an already lossy encode.
         video_rate = max(1, int(video_rate * max_file_bytes / max(1, output_size) * 0.94))
         output.unlink(missing_ok=True)

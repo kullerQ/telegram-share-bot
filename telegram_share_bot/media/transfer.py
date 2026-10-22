@@ -56,6 +56,7 @@ from telegram_share_bot.media.models import (
     DownloadError,
     MediaFormat,
     MediaKind,
+    PreparedVideo,
     TimeRange,
     VideoQualityPolicy,
     VideoUnavailableError,
@@ -403,14 +404,16 @@ def _download_sync(
                                 )
                             )
                         if size <= max_file_bytes:
+                            prepared_video: PreparedVideo | None = None
                             if media_format is MediaFormat.VIDEO:
-                                path = _optimize_video_file(
+                                prepared_video = _optimize_video_file(
                                     path,
                                     max_file_bytes=max_file_bytes,
                                     deadline=deadline,
                                     abort_event=abort_event,
                                     on_optimizing=on_optimizing,
                                 )
+                                path = prepared_video.path
                             if is_clip:
                                 logger.info(
                                     "Clip transfer and processing took %.1fs for %s",
@@ -430,6 +433,16 @@ def _download_sync(
                                     else _classify(result_path)
                                 ),
                                 duration=duration,
+                                width=(
+                                    prepared_video.width
+                                    if prepared_video is not None
+                                    else None
+                                ),
+                                height=(
+                                    prepared_video.height
+                                    if prepared_video is not None
+                                    else None
+                                ),
                             )
                         preserved = work_dir / f"oversized_{attempt}{path.suffix}"
                         path.replace(preserved)
@@ -463,7 +476,7 @@ def _download_sync(
 
                 if best_oversized is not None and media_format is MediaFormat.VIDEO:
                     try:
-                        optimized_path = _optimize_video_file(
+                        prepared_video = _optimize_video_file(
                             best_oversized[0],
                             max_file_bytes=max_file_bytes,
                             deadline=deadline,
@@ -480,12 +493,16 @@ def _download_sync(
                         source_is_animation or best_oversized[0].suffix.lower() == ".gif"
                     )
                     return DownloadedMedia(
-                        path=optimized_path,
+                        path=prepared_video.path,
                         title=title,
                         kind=(
-                            MediaKind.ANIMATION if is_animation else _classify(optimized_path)
+                            MediaKind.ANIMATION
+                            if is_animation
+                            else _classify(prepared_video.path)
                         ),
                         duration=duration,
+                        width=prepared_video.width,
+                        height=prepared_video.height,
                     )
                 if isinstance(last_error, DownloadError):
                     if isinstance(last_error, VideoUnavailableError):

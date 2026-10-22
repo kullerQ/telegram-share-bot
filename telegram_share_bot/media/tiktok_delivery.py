@@ -63,20 +63,25 @@ def try_tiktok_slideshow(
                 abort_event=abort_event,
             )
             result_kind = MediaKind.AUDIO
+            width = height = None
         else:
-            result_path = _optimize_video_file(
+            prepared_video = _optimize_video_file(
                 slideshow.path,
                 max_file_bytes=max_file_bytes,
                 deadline=deadline,
                 abort_event=abort_event,
                 on_optimizing=on_optimizing,
             )
+            result_path = prepared_video.path
             result_kind = slideshow.kind
+            width, height = prepared_video.width, prepared_video.height
         return DownloadedMedia(
             path=result_path,
             title=slideshow.title,
             kind=result_kind,
             duration=slideshow.duration,
+            width=width,
+            height=height,
         )
     except DownloadError:
         _cleanup_dir(work_dir)

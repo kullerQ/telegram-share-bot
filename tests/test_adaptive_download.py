@@ -25,6 +25,7 @@ from telegram_share_bot.media.models import (
     DownloadError,
     MediaFormat,
     MediaKind,
+    PreparedVideo,
     TimeRange,
     VideoQualityPolicy,
 )
@@ -965,7 +966,7 @@ class TestVideoIntegrity(unittest.TestCase):
                 ),
                 patch(
                     "telegram_share_bot.media.transfer._optimize_video_file",
-                    side_effect=lambda path, **_kwargs: path,
+                    side_effect=lambda path, **_kwargs: PreparedVideo(path, 480, 270),
                 ),
             ):
                 media = _download_sync(
@@ -977,6 +978,7 @@ class TestVideoIntegrity(unittest.TestCase):
 
         self.assertEqual(media.kind, MediaKind.ANIMATION)
         self.assertEqual(media.path.suffix, ".mp4")
+        self.assertEqual((media.width, media.height), (480, 270))
 
     def test_best_never_returns_leftover_audio_when_video_is_skipped(self) -> None:
         for video_size in (None, 200):
@@ -1111,7 +1113,7 @@ class TestVideoOptimization(unittest.TestCase):
                     abort_event=None,
                     on_optimizing=None,
                 )
-            self.assertTrue(result.exists())
+            self.assertTrue(result.path.exists())
             self.assertEqual(commands[0][commands[0].index("-c:v") + 1], "libx264")
             self.assertIn("out_range=tv", commands[0][commands[0].index("-vf") + 1])
 
@@ -1154,7 +1156,7 @@ class TestVideoOptimization(unittest.TestCase):
                         abort_event=None,
                         on_optimizing=None,
                     )
-                self.assertTrue(result.exists())
+                self.assertTrue(result.path.exists())
                 self.assertEqual(commands[0][commands[0].index("-c:v") + 1], expected)
 
     def test_optimizes_at_most_twice_and_calls_status_once(self) -> None:
@@ -1195,7 +1197,7 @@ class TestVideoOptimization(unittest.TestCase):
                         on_optimizing=notice,
                     )
             self.assertTrue(any("Optimizing video for Telegram" in line for line in logs.output))
-            self.assertEqual(result.stat().st_size, 8)
+            self.assertEqual(result.path.stat().st_size, 8)
             self.assertLessEqual(calls, 2)
             self.assertEqual(notices, [True])
 
@@ -1292,7 +1294,7 @@ class TestVideoOptimization(unittest.TestCase):
                     abort_event=None,
                     on_optimizing=None,
                 )
-            self.assertEqual(result, source)
+            self.assertEqual(result.path, source)
             encode.assert_not_called()
 
 

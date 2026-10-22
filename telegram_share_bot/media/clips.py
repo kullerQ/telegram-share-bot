@@ -387,7 +387,7 @@ def _download_youtube_hls_clip(
             source_limit=source_limit,
             timeout_seconds=timeout_seconds,
         )
-        merged = _optimize_video_file(
+        prepared_video = _optimize_video_file(
             merged,
             max_file_bytes=max_file_bytes,
             deadline=deadline,
@@ -395,12 +395,19 @@ def _download_youtube_hls_clip(
             on_optimizing=on_optimizing,
         )
         selected = work_dir / "selected.mp4"
-        merged.replace(selected)
+        prepared_video.path.replace(selected)
         logger.info(
             "Clip HLS video and audio merged in %.1fs: bytes=%d",
             time.monotonic() - started_at,
             selected.stat().st_size,
         )
-        return DownloadedMedia(selected, title, MediaKind.VIDEO, clip_duration)
+        return DownloadedMedia(
+            selected,
+            title,
+            MediaKind.VIDEO,
+            clip_duration,
+            width=prepared_video.width,
+            height=prepared_video.height,
+        )
     finally:
         _cleanup_dir(hls_dir)
