@@ -220,8 +220,14 @@ class TestCacheKeyWithRange(unittest.IsolatedAsyncioTestCase):
             cache = MediaCache(Path(tmp) / "cache.db")
             url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
             range_ = TimeRange(10, 20)
-            await cache.set(url, "fid-full", MediaKind.VIDEO, "Full", 100, time_range=None)
-            await cache.set(url, "fid-clip", MediaKind.VIDEO, "Clip", 10, time_range=range_)
+            await cache.set(
+                url, "fid-full", MediaKind.VIDEO, "Full", 100, time_range=None,
+                video_width=1920, video_height=1080,
+            )
+            await cache.set(
+                url, "fid-clip", MediaKind.VIDEO, "Clip", 10, time_range=range_,
+                video_width=1920, video_height=1080,
+            )
             full = await cache.get(url, time_range=None)
             clip = await cache.get(url, time_range=range_)
             assert full is not None and clip is not None

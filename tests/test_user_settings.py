@@ -118,7 +118,9 @@ class TestPerUserCaptionResolution(unittest.TestCase):
         self.assertEqual(len(title.entities), 1)
         self.assertEqual(title.entities[0].url, original)
         self.assertEqual(title.entities[0].length, len(title.text.encode("utf-16-le")) // 2)
-        media = _input_media("file_id", title.text, MediaKind.VIDEO, caption=title)
+        media = _input_media(
+            "file_id", title.text, MediaKind.VIDEO, caption=title, width=1920, height=1080
+        )
         self.assertEqual(media.caption, title.text)
         self.assertEqual(media.caption_entities, title.entities)
 
@@ -140,7 +142,9 @@ class TestPerUserCaptionResolution(unittest.TestCase):
             original_url="https://x.com/user/status/123",
             custom_caption=None,
         )
-        media = _input_media("animation-file", "A GIF", MediaKind.ANIMATION, caption=caption)
+        media = _input_media(
+            "animation-file", "A GIF", MediaKind.ANIMATION, caption=caption, width=640, height=360
+        )
         self.assertEqual(media.type, "animation")
 
     def test_uploaded_animation_message_keeps_animation_cache_kind(self) -> None:
@@ -225,7 +229,8 @@ class TestLinkedCaptionDelivery(unittest.IsolatedAsyncioTestCase):
             )
             context = MagicMock()
             context.application.bot_data = {"settings": settings}
-            context.bot.send_video = AsyncMock(return_value=MagicMock())
+            valid_video = MagicMock(video=MagicMock(width=1920, height=1080), animation=None)
+            context.bot.send_video = AsyncMock(return_value=valid_video)
             url = "https://example.com/video?id=abc&part=1"
             preferences = UserSharingSettings(caption=CaptionPreference.MEDIA_TITLE)
             path = Path(temp_dir) / "video.mp4"
@@ -234,7 +239,7 @@ class TestLinkedCaptionDelivery(unittest.IsolatedAsyncioTestCase):
             await _send_media_to_chat(
                 context,
                 1001,
-                DownloadedMedia(path, "A title", MediaKind.VIDEO, 12),
+                DownloadedMedia(path, "A title", MediaKind.VIDEO, 12, 1920, 1080),
                 settings=settings,
                 preferences=preferences,
                 original_url=url,
@@ -246,7 +251,10 @@ class TestLinkedCaptionDelivery(unittest.IsolatedAsyncioTestCase):
             await _send_cached_media_to_chat(
                 context,
                 1001,
-                CachedMedia(url, "file_id", MediaKind.VIDEO, "A title", 12),
+                CachedMedia(
+                    url, "file_id", MediaKind.VIDEO, "A title", 12,
+                    video_width=1920, video_height=1080,
+                ),
                 preferences=preferences,
                 original_url=url,
             )
@@ -267,7 +275,8 @@ class TestLinkedCaptionDelivery(unittest.IsolatedAsyncioTestCase):
             )
             context = MagicMock()
             context.application.bot_data = {"settings": settings}
-            context.bot.send_animation = AsyncMock(return_value=MagicMock())
+            valid_animation = MagicMock(animation=MagicMock(width=640, height=360), video=None)
+            context.bot.send_animation = AsyncMock(return_value=valid_animation)
             path = Path(temp_dir) / "animation.mp4"
             path.write_bytes(b"animation")
             url = "https://x.com/user/status/123"
@@ -275,7 +284,7 @@ class TestLinkedCaptionDelivery(unittest.IsolatedAsyncioTestCase):
             await _send_media_to_chat(
                 context,
                 1001,
-                DownloadedMedia(path, "A GIF", MediaKind.ANIMATION, 4),
+                DownloadedMedia(path, "A GIF", MediaKind.ANIMATION, 4, 640, 360),
                 settings=settings,
                 original_url=url,
             )
@@ -289,7 +298,10 @@ class TestLinkedCaptionDelivery(unittest.IsolatedAsyncioTestCase):
             await _send_cached_media_to_chat(
                 context,
                 1001,
-                CachedMedia(url, "animation-file-id", MediaKind.ANIMATION, "A GIF", 4),
+                CachedMedia(
+                    url, "animation-file-id", MediaKind.ANIMATION, "A GIF", 4,
+                    video_width=640, video_height=360,
+                ),
                 original_url=url,
             )
             context.bot.send_animation.assert_awaited_once()

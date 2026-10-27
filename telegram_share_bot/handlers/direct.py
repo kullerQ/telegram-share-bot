@@ -24,6 +24,7 @@ from telegram_share_bot.media.models import (
     DownloadError,
     MediaFormat,
     TimeRange,
+    VideoMetadataError,
     VideoQualityPolicy,
 )
 from telegram_share_bot.media.requests import extract_media_request, format_time_range
@@ -35,7 +36,6 @@ from telegram_share_bot.storage.user_settings import CaptionPreference, UserShar
 
 from .delivery import (
     _file_id_and_kind_from_message,
-    _message_video_height,
     _send_cached_media_to_chat,
     _send_media_to_chat,
     _upload_direct_url_for_file_id,
@@ -414,7 +414,12 @@ async def _run_direct_download(
                     custom_caption=custom_caption,
                     preferences=preferences,
                     original_url=url,
+                    trace=trace,
                 )
+            except VideoMetadataError:
+                trace.event("cache_fallback", failure="video_metadata", level=logging.WARNING)
+                removed = await cache.evict_entry(cached)
+                trace.cache_outcome = "evicted" if removed else "changed"
             except BadRequest as exc:
                 if not is_invalid_cached_file_id_error(exc):
                     trace.event(
@@ -576,6 +581,7 @@ async def _run_direct_download(
             custom_caption=custom_caption,
             preferences=preferences,
             original_url=url,
+            trace=trace,
         )
         trace.event("upload", stage_started_at=upload_started_at)
         file_id, result_kind = _file_id_and_kind_from_message(sent_msg)
@@ -588,7 +594,8 @@ async def _run_direct_download(
             time_range=time_range,
             media_format=media_format,
             quality_policy=cache_quality,
-            video_height=_message_video_height(sent_msg),
+            video_height=media.height,
+            video_width=media.width,
         )
         await _remove_completed_direct_status(status_message)
         trace.event("complete")

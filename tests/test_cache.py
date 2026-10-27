@@ -35,6 +35,8 @@ class TestMediaCache(unittest.IsolatedAsyncioTestCase):
             kind=MediaKind.VIDEO,
             title=title,
             duration=duration,
+            video_height=1080,
+            video_width=1920,
         )
 
         cached = await self.cache.get(url)
@@ -44,15 +46,23 @@ class TestMediaCache(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cached.kind, MediaKind.VIDEO)
         self.assertEqual(cached.title, title)
         self.assertEqual(cached.duration, duration)
+        self.assertEqual(cached.video_width, 1920)
+        self.assertEqual(cached.video_height, 1080)
 
     async def test_locked_database_skips_cache_without_removing_wal(self) -> None:
         url = "https://example.com/locked-cache"
-        await self.cache.set(url, "file-before-lock", MediaKind.VIDEO, "Title", 10)
+        await self.cache.set(
+            url, "file-before-lock", MediaKind.VIDEO, "Title", 10,
+            video_height=1080, video_width=1920,
+        )
 
         reader = sqlite3.connect(self.db_path)
         reader.execute("BEGIN")
         reader.execute("SELECT COUNT(*) FROM media_cache").fetchone()
-        await self.cache.set(url, "file-after-reader", MediaKind.VIDEO, "Title", 10)
+        await self.cache.set(
+            url, "file-after-reader", MediaKind.VIDEO, "Title", 10,
+            video_height=1080, video_width=1920,
+        )
 
         wal_path = Path(f"{self.db_path}-wal")
         self.assertTrue(wal_path.exists())
@@ -80,7 +90,10 @@ class TestMediaCache(unittest.IsolatedAsyncioTestCase):
 
     async def test_readonly_error_disables_cache_without_recreating_database(self) -> None:
         url = "https://example.com/readonly-cache"
-        await self.cache.set(url, "file-id", MediaKind.VIDEO, "Title", 10)
+        await self.cache.set(
+            url, "file-id", MediaKind.VIDEO, "Title", 10,
+            video_height=1080, video_width=1920,
+        )
         database_before = self.db_path.read_bytes()
         with patch.object(
             self.cache, "_connection", side_effect=sqlite3.OperationalError("readonly database")
@@ -89,7 +102,10 @@ class TestMediaCache(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNone(await self.cache.get(url))
         self.assertFalse(self.cache.available)
         self.assertEqual(self.db_path.read_bytes(), database_before)
-        await self.cache.set(url, "replacement", MediaKind.VIDEO, "Title", 10)
+        await self.cache.set(
+            url, "replacement", MediaKind.VIDEO, "Title", 10,
+            video_height=1080, video_width=1920,
+        )
         self.assertEqual(self.db_path.read_bytes(), database_before)
 
     async def test_corrupt_database_and_sidecars_are_left_untouched(self) -> None:
@@ -137,7 +153,10 @@ class TestMediaCache(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(await self.cache.get(url))
             self.assertTrue(self.cache.available)
             self.assertTrue(wal_path.exists())
-            await self.cache.set(url, "recovered", MediaKind.VIDEO, "Title", 10)
+            await self.cache.set(
+                url, "recovered", MediaKind.VIDEO, "Title", 10,
+                video_height=1080, video_width=1920,
+            )
             self.assertIsNotNone(await self.cache.get(url))
         finally:
             reader.close()
@@ -145,7 +164,10 @@ class TestMediaCache(unittest.IsolatedAsyncioTestCase):
     async def test_maintenance_prunes_oldest_rows_in_bounded_batches(self) -> None:
         urls = [f"https://example.com/retention/{index}" for index in range(12)]
         for index, url in enumerate(urls):
-            await self.cache.set(url, f"file-{index}", MediaKind.VIDEO, "Title", 10)
+            await self.cache.set(
+                url, f"file-{index}", MediaKind.VIDEO, "Title", 10,
+                video_height=1080, video_width=1920,
+            )
 
         with contextlib.closing(sqlite3.connect(self.db_path)) as conn, conn:
             conn.execute(
@@ -189,12 +211,18 @@ class TestMediaCache(unittest.IsolatedAsyncioTestCase):
     async def test_concurrent_cache_replacement_survives_retention(self) -> None:
         urls = [f"https://example.com/concurrent-retention/{index}" for index in range(6)]
         for index, url in enumerate(urls):
-            await self.cache.set(url, f"file-{index}", MediaKind.VIDEO, "Title", 10)
+            await self.cache.set(
+                url, f"file-{index}", MediaKind.VIDEO, "Title", 10,
+                video_height=1080, video_width=1920,
+            )
         with contextlib.closing(sqlite3.connect(self.db_path)) as conn, conn:
             conn.execute("UPDATE media_cache SET last_used_at = '2000-01-01 00:00:00'")
 
         await asyncio.gather(
-            self.cache.set(urls[0], "replacement-file", MediaKind.VIDEO, "Title", 10),
+            self.cache.set(
+                urls[0], "replacement-file", MediaKind.VIDEO, "Title", 10,
+                video_height=1080, video_width=1920,
+            ),
             self.cache.maintain(max_entries=4, batch_size=2),
         )
 
@@ -206,7 +234,8 @@ class TestMediaCache(unittest.IsolatedAsyncioTestCase):
 
     async def test_sqlite_backup_api_copies_a_consistent_cache_snapshot(self) -> None:
         await self.cache.set(
-            "https://example.com/backup", "backup-file", MediaKind.VIDEO, "Title", 10
+            "https://example.com/backup", "backup-file", MediaKind.VIDEO, "Title", 10,
+            video_height=1080, video_width=1920,
         )
         backup_path = Path(self.temp_dir.name) / "backup.db"
         with (
@@ -235,6 +264,8 @@ class TestMediaCache(unittest.IsolatedAsyncioTestCase):
             kind=MediaKind.VIDEO,
             title="Video Title",
             duration=120,
+            video_height=1080,
+            video_width=1920,
         )
 
         # Looked up with standard youtube.com link with different tracking params
@@ -252,6 +283,8 @@ class TestMediaCache(unittest.IsolatedAsyncioTestCase):
             MediaKind.VIDEO,
             "Private",
             30,
+            video_height=1080,
+            video_width=1920,
         )
 
         self.assertIsNone(await self.cache.get(url))
@@ -264,6 +297,8 @@ class TestMediaCache(unittest.IsolatedAsyncioTestCase):
             kind=MediaKind.VIDEO,
             title="Tweet",
             duration=15,
+            video_height=1080,
+            video_width=1920,
         )
 
         self.assertIsNotNone(await self.cache.get(url))
@@ -279,6 +314,8 @@ class TestMediaCache(unittest.IsolatedAsyncioTestCase):
             title="Old",
             duration=15,
             quality_policy="auto-best",
+            video_height=1080,
+            video_width=1920,
         )
         observed = await self.cache.get(url, quality_policy="auto-best")
         self.assertIsNotNone(observed)
@@ -291,6 +328,8 @@ class TestMediaCache(unittest.IsolatedAsyncioTestCase):
             title="New",
             duration=15,
             quality_policy="auto-best",
+            video_height=1080,
+            video_width=1920,
         )
 
         self.assertFalse(await self.cache.evict_entry(observed))
@@ -324,6 +363,7 @@ class TestMediaCache(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cached.file_id, "new_file_id")
         self.assertEqual(cached.title, "Song V2")
         self.assertEqual(cached.duration, 185)
+        self.assertIsNone(cached.video_width)
 
     async def test_format_and_quality_variants_are_isolated(self) -> None:
         url = "https://www.youtube.com/watch?v=variant12345"
@@ -334,6 +374,8 @@ class TestMediaCache(unittest.IsolatedAsyncioTestCase):
             "Video",
             30,
             media_format=MediaFormat.VIDEO,
+            video_height=1080,
+            video_width=1920,
         )
         await self.cache.set(
             url,
@@ -367,6 +409,8 @@ class TestMediaCache(unittest.IsolatedAsyncioTestCase):
                 "Video",
                 30,
                 quality_policy=policy,
+                video_height=1080,
+                video_width=1920,
             )
         for policy, file_id in (
             ("auto-best", "auto-id"),
@@ -377,6 +421,7 @@ class TestMediaCache(unittest.IsolatedAsyncioTestCase):
             self.assertIsNotNone(cached)
             assert cached is not None
             self.assertEqual(cached.file_id, file_id)
+            self.assertEqual((cached.video_width, cached.video_height), (1920, 1080))
 
     async def test_unverified_legacy_video_is_not_reused(self) -> None:
         from telegram_share_bot.storage.media_cache import _legacy_cache_key
@@ -410,6 +455,8 @@ class TestMediaCache(unittest.IsolatedAsyncioTestCase):
             "Old X media",
             4,
             quality_policy="auto-best",
+            video_height=360,
+            video_width=640,
         )
         cache_key = _cache_key(url, None, quality_policy="auto-best")
         assert cache_key is not None
@@ -433,12 +480,15 @@ class TestMediaCache(unittest.IsolatedAsyncioTestCase):
             "X GIF",
             4,
             quality_policy="auto-best",
+            video_height=360,
+            video_width=640,
         )
         animation = await reopened.get_preferred_video(url, quality_policy="auto-best")
         self.assertIsNotNone(animation)
         assert animation is not None
         self.assertEqual(animation.kind, MediaKind.ANIMATION)
         self.assertEqual(animation.file_id, "new-animation-file-id")
+        self.assertEqual((animation.video_width, animation.video_height), (640, 360))
 
     async def test_best_video_preferred_over_auto_for_same_clip(self) -> None:
         from telegram_share_bot.media.models import TimeRange
@@ -454,6 +504,7 @@ class TestMediaCache(unittest.IsolatedAsyncioTestCase):
             time_range=clip,
             quality_policy="auto-best",
             video_height=720,
+            video_width=1280,
         )
         await self.cache.set(
             url,
@@ -464,11 +515,13 @@ class TestMediaCache(unittest.IsolatedAsyncioTestCase):
             time_range=clip,
             quality_policy="source-best",
             video_height=1080,
+            video_width=1920,
         )
         chosen = await self.cache.get_preferred_video(url, time_range=clip)
         self.assertIsNotNone(chosen)
         assert chosen is not None
         self.assertEqual(chosen.file_id, "best")
+        self.assertEqual((chosen.video_width, chosen.video_height), (1920, 1080))
         await self.cache.set(
             url,
             "auto-higher",
@@ -478,6 +531,7 @@ class TestMediaCache(unittest.IsolatedAsyncioTestCase):
             time_range=clip,
             quality_policy="auto-best",
             video_height=1440,
+            video_width=2560,
         )
         higher = await self.cache.get_preferred_video(url, time_range=clip)
         self.assertIsNotNone(higher)
@@ -499,6 +553,7 @@ class TestMediaCache(unittest.IsolatedAsyncioTestCase):
             60,
             quality_policy="source-best",
             video_height=480,
+            video_width=854,
         )
         await self.cache.set(
             url,
@@ -508,6 +563,7 @@ class TestMediaCache(unittest.IsolatedAsyncioTestCase):
             60,
             quality_policy="balanced",
             video_height=720,
+            video_width=1280,
         )
         chosen = await self.cache.get_preferred_video(url, quality_policy="balanced")
         self.assertIsNotNone(chosen)
@@ -525,6 +581,7 @@ class TestMediaCache(unittest.IsolatedAsyncioTestCase):
             30,
             quality_policy="balanced",
             video_height=720,
+            video_width=1280,
         )
         await self.cache.set(
             url,
@@ -534,6 +591,7 @@ class TestMediaCache(unittest.IsolatedAsyncioTestCase):
             30,
             quality_policy="source-best",
             video_height=1080,
+            video_width=1920,
         )
         cached = await self.cache.get_preferred_video(url, quality_policy="balanced")
         self.assertIsNotNone(cached)
@@ -559,19 +617,26 @@ class TestMediaCache(unittest.IsolatedAsyncioTestCase):
             60,
             quality_policy="source-best",
             video_height=1440,
+            video_width=2560,
         )
         chosen = await self.cache.get_preferred_video(url, quality_policy="1080p")
         self.assertIsNotNone(chosen)
         assert chosen is not None
         self.assertEqual(chosen.file_id, "best-high")
 
-    async def test_existing_database_adds_video_height_without_losing_entries(self) -> None:
+    async def test_existing_database_adds_video_width_without_losing_other_data(self) -> None:
+        from telegram_share_bot.storage.media_cache import _cache_key
+
+        audio_url = "https://example.com/audio-migrated.mp3"
+        audio_key = _cache_key(audio_url, media_format=MediaFormat.AUDIO)
+        assert audio_key is not None
         with contextlib.closing(sqlite3.connect(self.db_path)) as conn, conn:
             conn.execute("DROP TABLE media_cache")
             conn.execute(
                 """CREATE TABLE media_cache (
                     url TEXT PRIMARY KEY, file_id TEXT NOT NULL,
                     media_kind TEXT NOT NULL, title TEXT NOT NULL, duration INTEGER,
+                    video_height INTEGER,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     last_used_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )"""
@@ -580,21 +645,92 @@ class TestMediaCache(unittest.IsolatedAsyncioTestCase):
                 """INSERT INTO media_cache (url, file_id, media_kind, title, duration)
                 VALUES (?, ?, ?, ?, ?)""",
                 (
-                    "https://example.com/video#format=video&quality=auto-best",
+                    "https://example.com/video#format=video&quality=auto-best&delivery=2",
                     "old",
                     "video",
                     "Old",
                     30,
                 ),
             )
+            conn.execute(
+                "INSERT INTO media_cache (url, file_id, media_kind, title, duration) "
+                "VALUES (?, ?, 'audio', 'Song', 120)",
+                (audio_key, "audio-survives"),
+            )
+            conn.execute("CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+            conn.execute("INSERT INTO settings (key, value) VALUES ('theme', 'dark')")
         self.cache._init_db()
         cached = await self.cache.get("https://example.com/video", quality_policy="auto-best")
         self.assertIsNone(cached)
-        cached = self.cache._get_sync("https://example.com/video#format=video&quality=auto-best")
+        cached = self.cache._get_sync(
+            "https://example.com/video#format=video&quality=auto-best&delivery=2"
+        )
         self.assertIsNotNone(cached)
         assert cached is not None
         self.assertEqual(cached.file_id, "old")
         self.assertIsNone(cached.video_height)
+        self.assertIsNone(cached.video_width)
+        audio = await self.cache.get(audio_url, media_format=MediaFormat.AUDIO)
+        self.assertIsNotNone(audio)
+        assert audio is not None
+        self.assertEqual(audio.file_id, "audio-survives")
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn:
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(media_cache)")}
+            setting = conn.execute("SELECT value FROM settings WHERE key = 'theme'").fetchone()
+        self.assertIn("video_width", columns)
+        self.assertEqual(setting, ("dark",))
+
+    async def test_invalid_visual_geometry_is_never_reused(self) -> None:
+        cases = (
+            (None, 1080),
+            (1920, None),
+            (0, 1080),
+            (1920, 0),
+            (-1, 1080),
+            (1920, -1),
+        )
+        for index, (width, height) in enumerate(cases):
+            url = f"https://example.com/invalid-geometry/{index}"
+            key = _cache_key(url)
+            assert key is not None
+            with contextlib.closing(sqlite3.connect(self.db_path)) as conn, conn:
+                conn.execute(
+                    """INSERT INTO media_cache (
+                        url, file_id, media_kind, title, duration, video_width, video_height
+                    ) VALUES (?, ?, 'video', 'Invalid', 10, ?, ?)""",
+                    (key, f"invalid-{index}", width, height),
+                )
+            self.assertIsNone(await self.cache.get(url))
+            self.assertIsNone(await self.cache.get_preferred_video(url))
+
+        declined_url = "https://example.com/declined-invalid-geometry"
+        await self.cache.set(
+            declined_url,
+            "not-stored",
+            MediaKind.VIDEO,
+            "No dimensions",
+            10,
+            video_width=1920,
+        )
+        self.assertIsNone(await self.cache.get(declined_url))
+
+    async def test_delivery_two_video_entry_is_not_used_by_delivery_three(self) -> None:
+        url = "https://example.com/old-video-generation"
+        old_key = f"{url}#format=video&quality=source-best&delivery=2"
+        with contextlib.closing(sqlite3.connect(self.db_path)) as conn, conn:
+            conn.execute(
+                """INSERT INTO media_cache (
+                    url, file_id, media_kind, title, duration, video_width, video_height
+                ) VALUES (?, 'old-video', 'video', 'Old', 10, 1920, 1080)""",
+                (old_key,),
+            )
+        self.assertIsNone(await self.cache.get(url, quality_policy="source-best"))
+        video_key = _cache_key(url, media_format=MediaFormat.VIDEO, quality_policy="source-best")
+        audio_key = _cache_key(url, media_format=MediaFormat.AUDIO, quality_policy="source-best")
+        assert video_key is not None
+        self.assertTrue(video_key.endswith("&delivery=3"))
+        assert audio_key is not None
+        self.assertNotIn("delivery=", audio_key)
 
     async def test_get_recovers_when_db_file_deleted(self) -> None:
         url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
@@ -604,6 +740,8 @@ class TestMediaCache(unittest.IsolatedAsyncioTestCase):
             kind=MediaKind.VIDEO,
             title="Before",
             duration=10,
+            video_height=1080,
+            video_width=1920,
         )
         self.assertTrue(self.db_path.exists())
         self.db_path.unlink()
@@ -621,6 +759,8 @@ class TestMediaCache(unittest.IsolatedAsyncioTestCase):
             kind=MediaKind.VIDEO,
             title="After",
             duration=11,
+            video_height=1080,
+            video_width=1920,
         )
         cached = await self.cache.get(url)
         self.assertIsNotNone(cached)
@@ -639,6 +779,8 @@ class TestMediaCache(unittest.IsolatedAsyncioTestCase):
             kind=MediaKind.VIDEO,
             title="Recovered",
             duration=5,
+            video_height=1080,
+            video_width=1920,
         )
         cached = await self.cache.get(url)
         self.assertIsNotNone(cached)

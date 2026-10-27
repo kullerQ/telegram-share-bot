@@ -255,4 +255,7 @@ STARTUP_POLLING = "Starting telegram-share-bot (polling)"
 
 # --- Internal errors that may surface to users -------------------------------
 
+TELEGRAM_VIDEO_METADATA_FAILED = (
+    "Telegram could not preserve this media's proportions. Please try again."
+)
 TELEGRAM_NO_FILE_ID = "Telegram did not return a usable file_id."

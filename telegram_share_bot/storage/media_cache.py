@@ -30,6 +30,7 @@ _REQUIRED_CACHE_COLUMNS = {
     "title",
     "duration",
     "video_height",
+    "video_width",
     "animation_state",
     "last_used_at",
 }
@@ -39,6 +40,10 @@ _CACHE_MAINTENANCE_BATCH_SIZE = 500
 
 def _is_video_cache_entry(entry: CachedMedia | None) -> bool:
     return entry is not None and entry.kind in (MediaKind.VIDEO, MediaKind.ANIMATION)
+
+
+def _is_visual_cache_entry(entry: CachedMedia) -> bool:
+    return entry.kind in (MediaKind.VIDEO, MediaKind.ANIMATION, MediaKind.LEGACY_VIDEO)
 
 
 def _is_x_status_cache_key(key: str) -> bool:
@@ -125,8 +130,8 @@ def _cache_key(
     if not norm_url:
         return None
     clip_suffix = time_range.cache_suffix() if time_range is not None else ""
-    # Earlier video entries could contain an unchecked audio component or codec.
-    delivery = "&delivery=2" if media_format is MediaFormat.VIDEO else ""
+    # Earlier video entries lack the validated display-geometry upload contract.
+    delivery = "&delivery=3" if media_format is MediaFormat.VIDEO else ""
     return f"{norm_url}#format={media_format.value}&quality={quality}{delivery}{clip_suffix}"
 
 
@@ -138,6 +143,16 @@ class CachedMedia:
     title: str
     duration: int | None
     video_height: int | None = None
+    video_width: int | None = None
+
+
+def _has_valid_video_geometry(entry: CachedMedia) -> bool:
+    return (
+        type(entry.video_width) is int
+        and entry.video_width > 0
+        and type(entry.video_height) is int
+        and entry.video_height > 0
+    )
 
 
 class MediaCache:
@@ -223,6 +238,7 @@ class MediaCache:
                         title TEXT NOT NULL,
                         duration INTEGER,
                         video_height INTEGER,
+                        video_width INTEGER,
                         animation_state INTEGER NOT NULL DEFAULT 0,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         last_used_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -233,6 +249,9 @@ class MediaCache:
                 if "video_height" not in columns:
                     conn.execute("ALTER TABLE media_cache ADD COLUMN video_height INTEGER")
                     columns.add("video_height")
+                if "video_width" not in columns:
+                    conn.execute("ALTER TABLE media_cache ADD COLUMN video_width INTEGER")
+                    columns.add("video_width")
                 if "animation_state" not in columns:
                     conn.execute(
                         "ALTER TABLE media_cache "
@@ -281,7 +300,8 @@ class MediaCache:
             cursor = conn.cursor()
             cursor.execute(
                 """
-                SELECT file_id, media_kind, title, duration, video_height, animation_state
+                SELECT file_id, media_kind, title, duration, video_height, video_width,
+                       animation_state
                 FROM media_cache
                 WHERE url = ?
                 """,
@@ -292,7 +312,7 @@ class MediaCache:
                 return None
 
             kind = MediaKind(row[1])
-            animation_state = row[5]
+            animation_state = row[6]
             if kind is MediaKind.VIDEO:
                 if animation_state == 2:
                     kind = MediaKind.ANIMATION
@@ -317,6 +337,7 @@ class MediaCache:
                 title=row[2],
                 duration=row[3],
                 video_height=row[4],
+                video_width=row[5],
             )
 
     def _set_sync(
@@ -327,23 +348,32 @@ class MediaCache:
         title: str,
         duration: int | None,
         video_height: int | None = None,
+        video_width: int | None = None,
     ) -> None:
+        if kind in (MediaKind.VIDEO, MediaKind.ANIMATION) and not (
+            type(video_width) is int
+            and video_width > 0
+            and type(video_height) is int
+            and video_height > 0
+        ):
+            return
         stored_kind = MediaKind.VIDEO if kind is MediaKind.ANIMATION else kind
         animation_state = 2 if kind is MediaKind.ANIMATION else 1
         with self._connection() as conn:
             conn.execute(
                 """
                 INSERT INTO media_cache (
-                    url, file_id, media_kind, title, duration, video_height,
+                    url, file_id, media_kind, title, duration, video_height, video_width,
                     animation_state, last_used_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, strftime('%Y-%m-%d %H:%M:%f', 'now'))
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, strftime('%Y-%m-%d %H:%M:%f', 'now'))
                 ON CONFLICT(url) DO UPDATE SET
                     file_id = excluded.file_id,
                     media_kind = excluded.media_kind,
                     title = excluded.title,
                     duration = excluded.duration,
                     video_height = excluded.video_height,
+                    video_width = excluded.video_width,
                     animation_state = excluded.animation_state,
                     last_used_at = strftime('%Y-%m-%d %H:%M:%f', 'now')
                 """,
@@ -354,6 +384,7 @@ class MediaCache:
                     title,
                     duration,
                     video_height,
+                    video_width,
                     animation_state,
                 ),
             )
@@ -383,9 +414,12 @@ class MediaCache:
         title: str,
         duration: int | None,
         video_height: int | None = None,
+        video_width: int | None = None,
     ) -> None:
         self._run_with_recovery(
-            lambda: self._set_sync(norm_url, file_id, kind, title, duration, video_height)
+            lambda: self._set_sync(
+                norm_url, file_id, kind, title, duration, video_height, video_width
+            )
         )
 
     def _evict_with_recovery(self, norm_url: str) -> bool:
@@ -419,6 +453,8 @@ class MediaCache:
         try:
             cached = await asyncio.to_thread(self._get_with_recovery, key)
             if cached is not None:
+                if _is_visual_cache_entry(cached) and not _has_valid_video_geometry(cached):
+                    return None
                 return cached
             return None
         except _CacheUnavailable:
@@ -434,7 +470,7 @@ class MediaCache:
         """Reuse a prepared video when it meets the requested quality tier.
 
         A Best upload is preferable to Auto. For a named progressive tier,
-        cross-policy reuse requires Telegram's measured output height.
+        cross-policy reuse requires the verified output dimensions.
         """
         if quality_policy == "source-best":
             best = await self.get(url, time_range=time_range, quality_policy=quality_policy)
@@ -603,6 +639,7 @@ class MediaCache:
         media_format: MediaFormat = MediaFormat.VIDEO,
         quality_policy: str = "best-fit",
         video_height: int | None = None,
+        video_width: int | None = None,
     ) -> None:
         """Cache media file_id under the normalized URL.
 
@@ -622,7 +659,14 @@ class MediaCache:
             return
         try:
             await asyncio.to_thread(
-                self._set_with_recovery, key, file_id, kind, title, duration, video_height
+                self._set_with_recovery,
+                key,
+                file_id,
+                kind,
+                title,
+                duration,
+                video_height,
+                video_width,
             )
             logger.debug("Cached file_id for %s (%s)", key, kind.value)
         except _CacheUnavailable:
