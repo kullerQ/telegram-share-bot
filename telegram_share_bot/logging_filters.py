@@ -44,9 +44,16 @@ def _strip_url_userinfo(match: re.Match[str]) -> str:
     return value[:scheme_end] + host
 
 
+_AUTH_HEADER_RE = re.compile(
+    r"\b((?:proxy-)?authorization)\s*[:=]\s*(?:basic|bearer)\s+[^\s,;\"']+",
+    re.IGNORECASE,
+)
+
+
 def _redact_telegram_secrets(value: str) -> str:
     """Replace Bot API URLs with the method name; mask bare tokens; strip URL queries."""
-    text = _HTTP_URL_WITH_USERINFO_RE.sub(_strip_url_userinfo, value)
+    text = _AUTH_HEADER_RE.sub(r"\1: <redacted>", value)
+    text = _HTTP_URL_WITH_USERINFO_RE.sub(_strip_url_userinfo, text)
     text = _HTTP_URL_WITH_QUERY_RE.sub(_strip_url_query, text)
     text = _TELEGRAM_BOT_URL_RE.sub(r"\1", text)
     return _TELEGRAM_BOT_TOKEN_RE.sub("<redacted-bot-token>", text)

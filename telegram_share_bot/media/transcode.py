@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import re
 import shutil
 import subprocess
@@ -20,8 +21,25 @@ from telegram_share_bot.media.formats import (
     _projected_transfer_seconds,
 )
 from telegram_share_bot.media.models import DownloadError, PreparedVideo, VideoUnavailableError
+from telegram_share_bot.proxy.runtime import get_proxy_runtime
 
 logger = logging.getLogger(__name__)
+
+
+def _ffmpeg_proxy_environment() -> dict[str, str] | None:
+    runtime = get_proxy_runtime()
+    if runtime is None:
+        return None
+    # FFmpeg and child downloaders must not inherit a NO_PROXY bypass or an
+    # alternate proxy from the host. Explicit input options remain authoritative.
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if key.lower() not in {"http_proxy", "https_proxy", "all_proxy", "no_proxy"}
+    }
+    environment["http_proxy"] = runtime.client_proxy_url
+    environment["https_proxy"] = runtime.client_proxy_url
+    return environment
 
 
 def _run_bounded_clip_ffmpeg(
@@ -40,6 +58,7 @@ def _run_bounded_clip_ffmpeg(
     try:
         process = subprocess.Popen(
             argv,
+            env=_ffmpeg_proxy_environment(),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -241,9 +260,7 @@ def _probe_video_file(path: Path, deadline: float) -> _VideoProbe:
             # Only inspect the input: FFmpeg also prints transcoded output streams.
             if line.startswith(("Stream mapping:", "Output #")):
                 break
-            duration_match = re.match(
-                r"^\s*Duration: (\d+):(\d{2}):(\d{2}(?:\.\d+)?)", line
-            )
+            duration_match = re.match(r"^\s*Duration: (\d+):(\d{2}):(\d{2}(?:\.\d+)?)", line)
             if duration_match is not None:
                 hours, minutes, seconds = duration_match.groups()
                 duration = int(hours) * 3600 + int(minutes) * 60 + float(seconds)

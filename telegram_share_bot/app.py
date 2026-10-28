@@ -21,6 +21,7 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
+from telegram.request import HTTPXRequest
 
 from telegram_share_bot import strings
 from telegram_share_bot.config import (
@@ -49,6 +50,7 @@ from telegram_share_bot.logging_filters import configure_logging
 from telegram_share_bot.media.jobs import cleanup_stale_downloads
 from telegram_share_bot.media.work import MediaWorkSupervisor
 from telegram_share_bot.platforms.previews import PreviewResolver
+from telegram_share_bot.proxy.runtime import ProxyRuntime, close_proxy, configure_proxy
 from telegram_share_bot.storage.media_cache import MediaCache
 from telegram_share_bot.storage.user_settings import UserSettingsStore
 
@@ -88,9 +90,7 @@ async def _maintain_downloads(
     """Periodically maintain download work and the optional media cache."""
     while not stop_event.is_set():
         try:
-            await asyncio.wait_for(
-                stop_event.wait(), timeout=_MEDIA_MAINTENANCE_INTERVAL_SECONDS
-            )
+            await asyncio.wait_for(stop_event.wait(), timeout=_MEDIA_MAINTENANCE_INTERVAL_SECONDS)
         except TimeoutError:
             try:
                 removed = await asyncio.to_thread(cleanup_stale_downloads, download_dir)
@@ -134,9 +134,7 @@ async def _post_init(application: App) -> None:
         try:
             removed = await asyncio.to_thread(cleanup_stale_downloads, download_dir)
         except Exception:
-            logging.getLogger(__name__).warning(
-                "Startup download cleanup failed", exc_info=True
-            )
+            logging.getLogger(__name__).warning("Startup download cleanup failed", exc_info=True)
             removed = 0
         if removed:
             logging.getLogger(__name__).info(
@@ -176,7 +174,7 @@ async def _post_init(application: App) -> None:
         )
 
 
-async def _post_shutdown(application: App) -> None:
+async def _shutdown_resources(application: App) -> None:
     preview_resolver = application.bot_data.get(_PREVIEW_RESOLVER)
     stop_event = application.bot_data.get(_MEDIA_MAINTENANCE_STOP)
     task = application.bot_data.get(_MEDIA_MAINTENANCE_TASK)
@@ -191,8 +189,44 @@ async def _post_shutdown(application: App) -> None:
                 await task
 
 
+async def _post_shutdown(application: App) -> None:
+    try:
+        await _shutdown_resources(application)
+    finally:
+        runtime = application.bot_data.get("proxy_runtime")
+        if isinstance(runtime, ProxyRuntime):
+            await asyncio.to_thread(close_proxy, runtime)
+
+
 def build_application() -> App:
     settings = load_settings()
+    # Explicit fields keep tests/embedders with older settings objects direct by default.
+    proxy_url = getattr(settings, "http_proxy", None)
+    proxy_url = proxy_url if isinstance(proxy_url, str) else None
+    dns_url = getattr(settings, "proxy_dns_url", None)
+    runtime = configure_proxy(
+        proxy_url,
+        dns_protection=getattr(settings, "proxy_dns_protection", True) is not False,
+        **({"dns_url": dns_url} if isinstance(dns_url, str) else {}),
+    )
+    try:
+        application = _build_application(settings, runtime.client_proxy_url if runtime else None)
+    except BaseException:
+        close_proxy(runtime)
+        raise
+    application.bot_data["proxy_runtime"] = runtime
+    if runtime is not None:
+        logging.getLogger(__name__).log(
+            logging.INFO if runtime.dns_protection else logging.WARNING,
+            "Outbound proxy enabled; DNS destination protection=%s; direct fallback disabled",
+            "enabled"
+            if runtime.dns_protection
+            else "disabled (proxy must enforce safe destinations)",
+        )
+    return application
+
+
+def _build_application(settings: Settings, proxy_url: str | None) -> App:
     raw_upload_timeout = getattr(settings, "upload_timeout_seconds", DEFAULT_UPLOAD_TIMEOUT_SECONDS)
     try:
         upload_timeout = float(raw_upload_timeout)
@@ -203,15 +237,28 @@ def build_application() -> App:
         Application.builder()
         .token(settings.bot_token)
         .concurrent_updates(True)
-        .connect_timeout(15.0)
-        .read_timeout(30.0)
-        .write_timeout(20.0)
-        .media_write_timeout(upload_timeout)
-        .pool_timeout(5.0)
-        .get_updates_connect_timeout(15.0)
-        .get_updates_read_timeout(30.0)
-        .get_updates_write_timeout(20.0)
-        .get_updates_pool_timeout(5.0)
+        .request(
+            HTTPXRequest(
+                proxy=proxy_url,
+                connect_timeout=15.0,
+                read_timeout=30.0,
+                write_timeout=20.0,
+                media_write_timeout=upload_timeout,
+                pool_timeout=5.0,
+                httpx_kwargs={"trust_env": False},
+            )
+        )
+        .get_updates_request(
+            HTTPXRequest(
+                connection_pool_size=1,
+                proxy=proxy_url,
+                connect_timeout=15.0,
+                read_timeout=30.0,
+                write_timeout=20.0,
+                pool_timeout=5.0,
+                httpx_kwargs={"trust_env": False},
+            )
+        )
         .post_init(_post_init)
         .post_shutdown(_post_shutdown)
         .build()
@@ -283,6 +330,15 @@ def main() -> None:
     configure_logging()
     application = build_application()
     logging.getLogger(__name__).info(strings.STARTUP_POLLING)
+    try:
+        _run_polling(application)
+    finally:
+        runtime = application.bot_data.get("proxy_runtime")
+        if isinstance(runtime, ProxyRuntime):
+            close_proxy(runtime)
+
+
+def _run_polling(application: App) -> None:
     application.run_polling(
         allowed_updates=[
             "message",

@@ -1,15 +1,17 @@
-"""DNS-pinned HTTP transports for source, extractor, and preview requests."""
+"""Protected proxy and DNS-pinned transports for media and preview requests."""
 
 from __future__ import annotations
 
 import asyncio
 import ipaddress
+import re
 import threading
 import time
 from collections.abc import Iterable, Mapping
 from typing import Any, cast
 from urllib.parse import urljoin, urlsplit
 
+import certifi
 import httpcore
 import httpx
 import yt_dlp
@@ -19,7 +21,15 @@ from httpcore._backends.anyio import AnyIOBackend
 from yt_dlp.networking._curlcffi import CurlCFFIRH  # type: ignore[import-not-found]
 from yt_dlp.networking.exceptions import RequestError
 
-from telegram_share_bot.media.security import resolve_safe_addresses
+from telegram_share_bot.media.security import (
+    _is_public_hostname_syntax,
+    resolve_safe_addresses,
+)
+from telegram_share_bot.proxy.runtime import ProxyRuntime, get_proxy_runtime
+
+
+def _proxy_runtime() -> ProxyRuntime | None:
+    return get_proxy_runtime()
 
 _MAX_REDIRECTS = 5
 _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
@@ -46,6 +56,16 @@ def _authority(url: str) -> tuple[str, int]:
 
 
 def _checked_addresses(hostname: str) -> tuple[ipaddress.IPv4Address | ipaddress.IPv6Address, ...]:
+    runtime = _proxy_runtime()
+    if runtime is not None:
+        if not runtime.dns_protection:
+            raise RequestError(
+                "Local media DNS resolution is disabled while proxy routing is active"
+            )
+        try:
+            return runtime.resolve_addresses(hostname)
+        except (OSError, ValueError) as exc:
+            raise RequestError("Media host resolved to an unsafe or unavailable address") from exc
     try:
         return resolve_safe_addresses(hostname)
     except (OSError, ValueError) as exc:
@@ -100,25 +120,40 @@ class _PinnedCurlSession(Session[Any]):
         current_kwargs = dict(kwargs)
         current_kwargs["allow_redirects"] = False
         current_kwargs["proxies"] = {}
-        current_kwargs["proxy"] = None
+        runtime = _proxy_runtime()
+        if runtime is not None:
+            # The proxy is the only socket destination in this mode. Do not
+            # resolve the origin locally or reuse a direct-mode CURLOPT_RESOLVE.
+            current_kwargs["proxy"] = runtime.client_proxy_url
+        else:
+            current_kwargs["proxy"] = None
         current_kwargs.pop("max_redirects", None)
         current_kwargs["stream"] = True
 
         for redirects_followed in range(_MAX_REDIRECTS + 1):
             hostname, port = _authority(current_url)
-            addresses = _checked_addresses(hostname)
+            runtime = _proxy_runtime()
+            if runtime is not None and not _is_public_hostname_syntax(hostname):
+                raise RequestError("Media request has an unsafe destination hostname")
+            addresses = None if runtime is not None else _checked_addresses(hostname)
             with self._resolve_lock:
-                try:
-                    ipaddress.ip_address(hostname)
-                except ValueError:
-                    # CURLOPT_RESOLVE replaces DNS while retaining the original
-                    # URL host, HTTP Host header, certificate validation, and
-                    # TLS SNI. curl-cffi clones this handle for streaming; guard
-                    # the setopt/clone/reset sequence against concurrent calls.
-                    self.curl.setopt(
-                        CurlOpt.RESOLVE,
-                        [_curl_resolve_entry(hostname, port, addresses[0])],
-                    )
+                if runtime is None:
+                    try:
+                        ipaddress.ip_address(hostname)
+                    except ValueError:
+                        # CURLOPT_RESOLVE replaces DNS while retaining the original
+                        # URL host, HTTP Host header, certificate validation, and
+                        # TLS SNI. curl-cffi clones this handle for streaming; guard
+                        # the setopt/clone/reset sequence against concurrent calls.
+                        assert addresses
+                        self.curl.setopt(
+                            CurlOpt.RESOLVE,
+                            [_curl_resolve_entry(hostname, port, addresses[0])],
+                        )
+                else:
+                    # libcurl may otherwise honor ambient NO_PROXY even when the
+                    # session has trust_env=False and an explicit proxy URL.
+                    self.curl.setopt(CurlOpt.NOPROXY, "")
 
                 response = super().request(
                     current_method,
@@ -161,22 +196,86 @@ class _PinnedCurlSession(Session[Any]):
 
 
 class GuardedCurlCFFIRH(CurlCFFIRH):  # type: ignore[misc]
-    """yt-dlp curl-cffi handler with direct-only, DNS-pinned connections."""
+    """yt-dlp curl-cffi handler with DNS pinning or central proxy routing."""
 
     RH_KEY = CurlCFFIRH.RH_KEY
+
+    def _get_proxies(self, request: Any) -> dict[str, str | None]:
+        runtime = _proxy_runtime()
+        if runtime is None:
+            return cast(dict[str, str | None], super()._get_proxies(request))
+        supplied = request.proxies or self.proxies
+        if "no" in supplied:
+            raise RequestError(
+                "Proxy bypass settings are unsupported while proxy routing is active"
+            )
+        if any(
+            value != runtime.client_proxy_url
+            for key, value in supplied.items()
+            if key != "no"
+        ):
+            raise RequestError(
+                "Caller proxy settings are unsupported while proxy routing is active"
+            )
+        # A missing `no` key is intentional: yt-dlp's selector consults
+        # system bypass rules only when that key exists.
+        return {"all": runtime.client_proxy_url}
 
     def _create_instance(self, cookiejar: Any = None) -> _PinnedCurlSession:
         return _PinnedCurlSession(cookies=cookiejar, trust_env=False, allow_redirects=False)
 
     def _send(self, request: Any) -> Any:
         proxies = self._get_proxies(request)
-        if any(value for key, value in proxies.items() if key != "no"):
+        if _proxy_runtime() is None and any(
+            value for key, value in proxies.items() if key != "no"
+        ):
             raise RequestError("Outbound proxies are unsupported by the guarded transport")
         return super()._send(request)
 
 
 class GuardedYoutubeDL(yt_dlp.YoutubeDL):
-    """yt-dlp with guarded curl requests and no proxy-based bypass path."""
+    """yt-dlp with guarded curl requests and central proxy enforcement."""
+
+    def __init__(self, params: dict[str, Any] | None = None) -> None:
+        params = dict(params or {})
+        runtime = _proxy_runtime()
+        if runtime is not None:
+            caller_proxy = params.get("proxy")
+            if caller_proxy not in (None, runtime.client_proxy_url):
+                raise RuntimeError(
+                    "Caller proxy settings are unsupported while proxy routing is active"
+                )
+            if params.get("no_proxy"):
+                raise RuntimeError(
+                    "Proxy bypass settings are unsupported while proxy routing is active"
+                )
+            params["proxy"] = runtime.client_proxy_url
+            _configure_external_ffmpeg_proxy(params, runtime.client_proxy_url)
+        super().__init__(cast(Any, params))
+
+    def urlopen(self, req: Any) -> Any:
+        runtime = _proxy_runtime()
+        if runtime is not None and hasattr(req, "proxies"):
+            supplied = getattr(req, "proxies", None) or {}
+            if "no" in supplied:
+                raise RequestError(
+                    "Proxy bypass settings are unsupported while proxy routing is active"
+                )
+            if any(
+                value != runtime.client_proxy_url
+                for key, value in supplied.items()
+                if key != "no"
+            ):
+                raise RequestError(
+                    "Caller proxy settings are unsupported while proxy routing is active"
+                )
+            headers = getattr(req, "headers", {})
+            if any(str(key).lower() == "ytdl-request-proxy" for key in headers):
+                raise RequestError(
+                    "Per-request proxy overrides are unsupported while proxy routing is active"
+                )
+            req.proxies = {"all": runtime.client_proxy_url}
+        return super().urlopen(req)
 
     def build_request_director(self, handlers: Any, preferences: Any = None) -> Any:
         guarded_handlers = tuple(
@@ -187,19 +286,82 @@ class GuardedYoutubeDL(yt_dlp.YoutubeDL):
         curl_handler = director.handlers.get(CurlCFFIRH.RH_KEY)
         if not isinstance(curl_handler, GuardedCurlCFFIRH):
             raise RuntimeError("The guarded media transport requires yt-dlp curl-cffi support")
-        if any(
+        runtime = _proxy_runtime()
+        if runtime is None and any(
             value
             for handler in director.handlers.values()
             for key, value in getattr(handler, "proxies", {}).items()
             if key != "no"
         ):
             raise RuntimeError("Outbound proxy settings are unsupported by the guarded transport")
+        if runtime is not None:
+            for handler in director.handlers.values():
+                proxies = getattr(handler, "proxies", {})
+                if "no" in proxies or any(
+                    value != runtime.client_proxy_url
+                    for key, value in proxies.items()
+                    if key != "no"
+                ):
+                    raise RuntimeError("Proxy settings bypass the configured central proxy")
         return director
+
+
+def _configure_external_ffmpeg_proxy(params: dict[str, Any], proxy_url: str) -> None:
+    """Force FFmpeg external-downloader input options through the same proxy."""
+    configured = params.get("external_downloader_args")
+    if configured is None:
+        args: dict[str, Any] = {}
+    elif isinstance(configured, dict):
+        args = {str(key).lower(): value for key, value in configured.items()}
+    elif isinstance(configured, (list, tuple)):
+        args = {"ffmpeg": list(configured)}
+    else:
+        raise RuntimeError("Invalid external_downloader_args for central proxy routing")
+
+    forced = [
+        "-http_proxy",
+        proxy_url,
+        "-tls_verify",
+        "1",
+        "-ca_file",
+        certifi.where(),
+        "-protocol_whitelist",
+        "http,https,tcp,tls,crypto,data",
+    ]
+    forced_flags = {"-http_proxy", "-tls_verify", "-ca_file", "-protocol_whitelist"}
+    for key in tuple(args):
+        if re.fullmatch(r"ffmpeg_i\d+", key):
+            existing = args[key]
+            if not isinstance(existing, (list, tuple)):
+                raise RuntimeError("Invalid FFmpeg input arguments for central proxy routing")
+            args[key] = _replace_ffmpeg_proxy_flags(existing, forced_flags) + list(forced)
+    existing = args.get("ffmpeg_i", [])
+    if not isinstance(existing, (list, tuple)):
+        raise RuntimeError("Invalid FFmpeg input arguments for central proxy routing")
+    args["ffmpeg_i"] = _replace_ffmpeg_proxy_flags(existing, forced_flags) + list(forced)
+    params["external_downloader_args"] = args
+
+
+def _replace_ffmpeg_proxy_flags(args: list[Any] | tuple[Any, ...], flags: set[str]) -> list[Any]:
+    """Keep caller input options except those that can bypass proxy/TLS policy."""
+    filtered: list[Any] = []
+    skip_value = False
+    for item in args:
+        if skip_value:
+            skip_value = False
+            continue
+        if isinstance(item, str):
+            option = item.split("=", 1)[0]
+            if option in flags:
+                skip_value = "=" not in item
+                continue
+        filtered.append(item)
+    return filtered
 
 
 def create_youtube_dl(options: dict[str, Any]) -> yt_dlp.YoutubeDL:
     """Create yt-dlp with the guarded native transport installed."""
-    return GuardedYoutubeDL(options)  # type: ignore[arg-type]
+    return GuardedYoutubeDL(options)
 
 
 class _GuardedAsyncBackend(httpcore.AsyncNetworkBackend):
@@ -260,14 +422,17 @@ class _GuardedAsyncBackend(httpcore.AsyncNetworkBackend):
 
 
 class GuardedAsyncHTTPTransport(httpx.AsyncHTTPTransport):
-    """HTTPX transport that pins every new connection to a validated DNS result."""
+    """HTTPX transport that uses the proxy or pins each direct connection."""
 
     def __init__(self) -> None:
-        super().__init__(trust_env=False, proxy=None, retries=0)
-        # httpx 0.27-0.28 does not expose httpcore's network_backend parameter.
-        # The project's bounded httpx dependency range and transport tests cover
-        # this single internal seam; the connection pool itself remains httpcore's.
-        self._pool._network_backend = _GuardedAsyncBackend()
+        runtime = _proxy_runtime()
+        proxy = runtime.client_proxy_url if runtime is not None else None
+        super().__init__(trust_env=False, proxy=proxy, retries=0)
+        if runtime is None:
+            # httpx 0.27-0.28 does not expose httpcore's network_backend parameter.
+            # The project's bounded httpx dependency range and transport tests cover
+            # this single internal seam; the connection pool itself remains httpcore's.
+            self._pool._network_backend = _GuardedAsyncBackend()
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         try:

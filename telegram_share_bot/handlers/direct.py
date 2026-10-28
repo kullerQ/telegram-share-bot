@@ -492,6 +492,7 @@ async def _run_direct_download(
             time_range is None
             and media_format is MediaFormat.AUDIO
             and not settings.normalize_quiet_audio
+            and settings.http_proxy is None
         ):
             direct_stream = await get_direct_stream(
                 url=url,
