@@ -208,7 +208,11 @@ class TestMediaCache(unittest.IsolatedAsyncioTestCase):
         assert retained is not None
         self.assertEqual(retained.file_id, "safe-file")
 
-    async def test_concurrent_cache_replacement_survives_retention(self) -> None:
+    async def _assert_concurrent_cache_replacement_order(
+        self,
+        *,
+        replacement_first: bool,
+    ) -> None:
         urls = [f"https://example.com/concurrent-retention/{index}" for index in range(6)]
         for index, url in enumerate(urls):
             await self.cache.set(
@@ -218,19 +222,68 @@ class TestMediaCache(unittest.IsolatedAsyncioTestCase):
         with contextlib.closing(sqlite3.connect(self.db_path)) as conn, conn:
             conn.execute("UPDATE media_cache SET last_used_at = '2000-01-01 00:00:00'")
 
-        await asyncio.gather(
-            self.cache.set(
-                urls[0], "replacement-file", MediaKind.VIDEO, "Title", 10,
-                video_height=1080, video_width=1920,
+        first_operation_finished = asyncio.Event()
+
+        async def replace_entry() -> None:
+            if not replacement_first:
+                await first_operation_finished.wait()
+            try:
+                await self.cache.set(
+                    urls[0], "replacement-file", MediaKind.VIDEO, "Title", 10,
+                    video_height=1080, video_width=1920,
+                )
+            finally:
+                if replacement_first:
+                    first_operation_finished.set()
+
+        async def maintain_cache() -> tuple[int, int]:
+            if replacement_first:
+                await first_operation_finished.wait()
+            try:
+                return await self.cache.maintain(max_entries=4, batch_size=2)
+            finally:
+                if not replacement_first:
+                    first_operation_finished.set()
+
+        replacement_task = asyncio.create_task(replace_entry())
+        maintenance_task = asyncio.create_task(maintain_cache())
+        results = await asyncio.wait_for(
+            asyncio.gather(
+                replacement_task,
+                maintenance_task,
+                return_exceptions=True,
             ),
-            self.cache.maintain(max_entries=4, batch_size=2),
+            timeout=10,
         )
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
+
+        self.assertEqual(results[1], (2, 0))
+        expected_pair_count = 4 if replacement_first else 5
+        self.assertEqual(await self._cache_row_count(), expected_pair_count)
 
         cached = await self.cache.get(urls[0])
         self.assertIsNotNone(cached)
         assert cached is not None
         self.assertEqual(cached.file_id, "replacement-file")
+
+        expected_followup_prune = 0 if replacement_first else 1
+        self.assertEqual(
+            await self.cache.maintain(max_entries=4, batch_size=2),
+            (expected_followup_prune, 0),
+        )
         self.assertEqual(await self._cache_row_count(), 4)
+        cached = await self.cache.get(urls[0])
+        self.assertIsNotNone(cached)
+        assert cached is not None
+        self.assertEqual(cached.file_id, "replacement-file")
+
+    async def test_replacement_before_retention_prunes_to_limit(self) -> None:
+        await self._assert_concurrent_cache_replacement_order(replacement_first=True)
+
+    async def test_retention_before_replacement_keeps_valid_soft_limit(self) -> None:
+        await self._assert_concurrent_cache_replacement_order(replacement_first=False)
 
     async def test_sqlite_backup_api_copies_a_consistent_cache_snapshot(self) -> None:
         await self.cache.set(
