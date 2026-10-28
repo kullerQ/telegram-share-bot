@@ -112,3 +112,18 @@ Quiet tracks are automatically adjusted in videos, clips, slideshow soundtracks,
 Video is copied without re-encoding; adjusted audio is encoded as AAC. Analysis adds processing time within the existing download deadline. The result must still fit the configured upload limit. A normalization failure reports an error with Retry rather than silently sending an unprocessed file. This improves audibility; it cannot recover missing sound or remove background noise.
 
 Set `NORMALIZE_QUIET_AUDIO=false` in `.env` to preserve original volume, then recreate the container. Each mode uses separate cache entries, including inline previews, so previously cached quiet files do not bypass normalization. Existing cache entries remain available when normalization is disabled. No new Docker packages are required.
+
+## Optional outbound proxy
+
+Leave `HTTP_PROXY` unset for normal direct networking. To proxy Telegram calls, polling, uploads, previews, and media/clip downloads, add to `.env` and recreate the container:
+
+```dotenv
+HTTP_PROXY=http://username:password@proxy-host:3128
+PROXY_DNS_PROTECTION=true
+```
+
+Credentials are optional. Proxy mode never falls back to a direct connection. DNS protection is enabled by default and uses Cloudflare through your proxy; it needs no account, payment, or additional software. `PROXY_DNS_URL` can select another compatible HTTPS DNS-JSON provider.
+
+Set `PROXY_DNS_PROTECTION=false` only when your proxy enforces safe destinations itself: the bot then cannot detect domains resolving to private networks. For a proxy running on the Docker Desktop host, use `host.docker.internal` rather than `localhost`.
+
+See the [proxy setup and security details](docs/README.md#optional-outbound-proxy), including proxy requirements, DNS behavior, and healthchecks.
