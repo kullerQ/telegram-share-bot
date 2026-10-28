@@ -10,6 +10,7 @@ Share videos, audio, YouTube clips, and TikTok photo slideshows directly in Tele
 - Share YouTube clips or full videos.
 - Convert TikTok photo slideshows to video, or share their audio when available.
 - Choose **Auto**, **Best**, or **Balanced** video quality.
+- Automatically improve quiet audio while keeping the video picture unchanged.
 - Reuse previously prepared media when possible.
 
 ## Setup
@@ -103,3 +104,11 @@ The commands above use PowerShell on Windows. On macOS/Linux, activate the envir
 - Only share content you have the right to download and distribute, and respect platform terms.
 
 For detailed configuration, troubleshooting, and backup instructions, see the [operator guide](docs/README.md).
+
+## Quiet audio
+
+Quiet tracks are automatically adjusted in videos, clips, slideshow soundtracks, and audio downloads. The bot measures the whole track first, adjusts only tracks below -20 LUFS, and aims for -16 LUFS while limiting the requested loudness increase to 24 LU. Exceptionally quiet tracks may therefore remain below the target. Peak limiting controls loud transients; this can reduce the difference between quiet and loud passages. An extra peak margin allows for AAC encoding. Loud tracks, silence, and media without audio are left unchanged.
+
+Video is copied without re-encoding; adjusted audio is encoded as AAC. Analysis adds processing time within the existing download deadline. The result must still fit the configured upload limit. A normalization failure reports an error with Retry rather than silently sending an unprocessed file. This improves audibility; it cannot recover missing sound or remove background noise.
+
+Set `NORMALIZE_QUIET_AUDIO=false` in `.env` to preserve original volume, then recreate the container. Each mode uses separate cache entries, including inline previews, so previously cached quiet files do not bypass normalization. Existing cache entries remain available when normalization is disabled. No new Docker packages are required.
