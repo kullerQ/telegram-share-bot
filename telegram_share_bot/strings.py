@@ -71,6 +71,12 @@ HELP_MESSAGE = (
 DIRECT_URL_HINT = "Send a media URL, or use me inline: @{bot_username} <url>"
 DIRECT_PREPARING = "Checking the media link…"
 DIRECT_DOWNLOADING = "Downloading media…"
+AUDIO_NORMALIZATION_FAILED = (
+    "Could not adjust the audio volume. Please try again later."
+)
+
+CHECKING_AUDIO_VOLUME = "🔊 Checking audio volume…"
+
 OPTIMIZING_FOR_TELEGRAM = "Optimizing for Telegram…"
 DIRECT_UPLOADING = "Sending media to Telegram…"
 DIRECT_FORMAT_PROMPT = "Choose what to send:"
