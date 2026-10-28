@@ -175,6 +175,7 @@ async def _prepare_inline_media(
             time_range is None
             and media_format is MediaFormat.AUDIO
             and not settings.normalize_quiet_audio
+            and settings.http_proxy is None
         ):
             discovery_started_at = time.monotonic()
             direct_stream = await get_direct_stream(

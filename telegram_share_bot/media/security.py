@@ -5,13 +5,17 @@ from __future__ import annotations
 import contextlib
 import ipaddress
 import logging
+import re
 import socket
 import threading
 from collections.abc import Generator, Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
 from telegram_share_bot.platforms.urls import has_url_credentials, safe_url_for_log
+
+if TYPE_CHECKING:
+    from telegram_share_bot.proxy.runtime import ProxyRuntime
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +65,13 @@ def resolve_safe_addresses(
     host = hostname.strip().lower().rstrip(".")
     if not host:
         raise ValueError("Media URL has no host")
+    runtime = _proxy_runtime()
+    if runtime is not None:
+        if not runtime.dns_protection:
+            raise RuntimeError(
+                "Local media DNS resolution is disabled while proxy routing is active"
+            )
+        return runtime.resolve_addresses(host)
     try:
         literal = ipaddress.ip_address(host)
     except ValueError:
@@ -112,11 +123,58 @@ def is_safe_media_url(url: str, *, https_only: bool = False) -> bool:
         ):
             return False
 
-        resolve_safe_addresses(hostname_clean)
+        if not _is_public_hostname_syntax(hostname_clean):
+            return False
+        runtime = _proxy_runtime()
+        if runtime is not None:
+            if runtime.dns_protection:
+                runtime.resolve_addresses(hostname_clean)
+        else:
+            resolve_safe_addresses(hostname_clean)
         return True
     except Exception as exc:
         logger.warning("URL security check rejected %s: %s", safe_url_for_log(url), exc)
         return False
+
+
+_HOST_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+_NUMERIC_ADDRESS_RE = re.compile(
+    r"^(?:0[xX][0-9a-fA-F]+|[0-9]+)(?:\.(?:0[xX][0-9a-fA-F]+|[0-9]+))*$"
+)
+
+
+def _is_public_hostname_syntax(hostname: str) -> bool:
+    """Check host syntax and literal IP safety without consulting local DNS."""
+    host = hostname.strip().lower().rstrip(".")
+    if not host or host == "localhost" or host.endswith(
+        (".localhost", ".local", ".internal", ".lan")
+    ):
+        return False
+    try:
+        literal = ipaddress.ip_address(host)
+    except ValueError:
+        literal = None
+    if literal is not None:
+        return _is_safe_ip(literal)
+    if _NUMERIC_ADDRESS_RE.fullmatch(host):
+        # Some proxy resolvers accept non-canonical IPv4 forms such as 127.1,
+        # octal components, or one-integer addresses even though ipaddress does not.
+        return False
+    try:
+        ascii_host = host.encode("idna").decode("ascii")
+    except UnicodeError:
+        return False
+    if len(ascii_host) > 253:
+        return False
+    labels = ascii_host.split(".")
+    return len(labels) >= 2 and all(_HOST_LABEL_RE.fullmatch(label) for label in labels)
+
+
+def _proxy_runtime() -> ProxyRuntime | None:
+    # Imported lazily to avoid coupling the standalone DNS guard to proxy startup.
+    from telegram_share_bot.proxy.runtime import get_proxy_runtime
+
+    return get_proxy_runtime()
 
 
 def is_allowed_media_host(url: str, allowed_hosts: frozenset[str] | None) -> bool:
@@ -239,6 +297,10 @@ def _safe_dns_resolution() -> Generator[None, None, None]:
     state lives in thread-local storage so concurrent ``asyncio.to_thread``
     downloads neither nest wrappers nor leak pins across hosts.
     """
+    if _proxy_runtime() is not None:
+        # All origin connections go through the proxy, which owns DNS policy.
+        yield
+        return
     _ensure_dns_guard_installed()
     existing: dict[str, Any] | None = getattr(_dns_guard_tls, "state", None)
     if existing is not None:

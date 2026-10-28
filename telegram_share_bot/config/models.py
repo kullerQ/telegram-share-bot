@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 
@@ -24,6 +24,7 @@ DEFAULT_DOWNLOAD_COOLDOWN_SECONDS = 2
 DEFAULT_ALLOW_PUBLIC = False
 DEFAULT_ALLOW_SHARED_STORAGE = False
 DEFAULT_HTTPS_ONLY = True
+DEFAULT_PROXY_DNS_URL = "https://cloudflare-dns.com/dns-query"
 DEFAULT_PLATFORM_LOGO_BASE_URL = (
     "https://raw.githubusercontent.com/kullerQ/telegram-share-bot/main/"
     "telegram_share_bot/assets/platforms"
@@ -99,3 +100,6 @@ class Settings:
     slideshow_max_images: int = DEFAULT_SLIDESHOW_MAX_IMAGES
     slideshow_images_loop: bool = DEFAULT_SLIDESHOW_IMAGES_LOOP
     normalize_quiet_audio: bool = True
+    http_proxy: str | None = field(default=None, repr=False)
+    proxy_dns_protection: bool = True
+    proxy_dns_url: str = DEFAULT_PROXY_DNS_URL

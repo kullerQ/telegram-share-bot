@@ -10,6 +10,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
 
+import certifi
 from yt_dlp.utils import download_range_func
 
 from telegram_share_bot import strings
@@ -35,6 +36,7 @@ from telegram_share_bot.media.transcode import (
     _optimize_video_file,
     _run_bounded_clip_ffmpeg,
 )
+from telegram_share_bot.proxy.runtime import get_proxy_runtime
 
 logger = logging.getLogger(__name__)
 
@@ -196,6 +198,23 @@ def _download_hls_clip_stream(
         ]
         if safe_headers:
             argv.extend(["-headers", "".join(safe_headers)])
+    runtime = get_proxy_runtime()
+    if runtime is not None:
+        # This input option is inherited by HLS playlist, segment, and key
+        # requests. Restrict nested playlist protocols so an HLS manifest
+        # cannot switch to local files or another direct transport.
+        argv.extend(
+            [
+                "-http_proxy",
+                runtime.client_proxy_url,
+                "-tls_verify",
+                "1",
+                "-ca_file",
+                certifi.where(),
+                "-protocol_whitelist",
+                "http,https,tcp,tls,crypto,data",
+            ]
+        )
     argv.extend(
         [
             "-ss",

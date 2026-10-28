@@ -39,6 +39,7 @@ from telegram_share_bot.config.parsing import (
     parse_path,
     parse_user_ids,
 )
+from telegram_share_bot.config.proxy import load_proxy_options
 
 
 def load_settings(env_file: Path = _ENV_PATH) -> Settings:
@@ -239,8 +240,13 @@ def load_settings(env_file: Path = _ENV_PATH) -> Settings:
         env_file=env_file,
     )
 
+    proxy_options = load_proxy_options(env_file)
+
     return Settings(
         bot_token=token,
+        http_proxy=proxy_options.url,
+        proxy_dns_protection=proxy_options.dns_protection,
+        proxy_dns_url=proxy_options.dns_url,
         storage_chat_id=storage_chat_id,
         max_file_bytes=max_file_bytes,
         download_timeout_seconds=download_timeout,

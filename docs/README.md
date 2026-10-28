@@ -193,3 +193,24 @@ Quiet tracks are automatically adjusted in videos, clips, slideshow soundtracks,
 Video is copied without re-encoding; adjusted audio is encoded as AAC. Analysis adds processing time within the existing download deadline. The result must still fit the configured upload limit. A normalization failure reports an error with Retry rather than silently sending an unprocessed file. This improves audibility; it cannot recover missing sound or remove background noise.
 
 Set `NORMALIZE_QUIET_AUDIO=false` in `.env` to preserve original volume, then recreate the container. Each mode uses separate cache entries, including inline previews, so previously cached quiet files do not bypass normalization. Existing cache entries remain available when normalization is disabled. No new Docker packages are required.
+
+## Optional outbound proxy
+
+Leave `HTTP_PROXY` unset or empty for direct networking. To route the bot's Telegram API calls, polling, uploads, previews, source requests, media downloads, and clip transfers through an HTTP(S) forward proxy, set:
+
+```dotenv
+HTTP_PROXY=http://username:password@proxy-host:3128
+PROXY_DNS_PROTECTION=true
+# Optional compatible HTTPS DNS-JSON resolver:
+PROXY_DNS_URL=https://cloudflare-dns.com/dns-query
+```
+
+Credentials are optional; percent-encode reserved characters in usernames/passwords. Recreate the container after configuration changes. A proxy running on the Docker Desktop host is typically reached through `host.docker.internal`, not `127.0.0.1` (which refers to the bot container). Only the proxy endpoint itself may require host DNS; use its IP address if local DNS is unavailable. The configured proxy takes precedence over `HTTPS_PROXY`, `ALL_PROXY`, and `NO_PROXY`; there is no automatic direct fallback. The bot temporarily clears inherited `NO_PROXY` settings while proxy mode runs, including for external downloaders, and restores them on shutdown.
+
+With a proxy, DNS protection is enabled by default. The bot makes encrypted DNS queries through that proxy, validates all returned destination addresses, and tunnels connections to checked public IPs. Cloudflare is the default provider: its public resolver is free and requires no account or API key. A custom `PROXY_DNS_URL` must implement Cloudflare/Google-compatible DNS-JSON responses. The proxy must support CONNECT to numeric IP addresses, including the required destination ports. No additional service, published port, Python package, or system package is required. Resolver failures fail the request; they do not trigger local DNS or direct connections. Cached DNS answers reduce lookup overhead. Use a stable proxy exit where possible: rotating exits can invalidate source URLs tied to an IP address. Cloudflare/provider lookups are only used when a proxy and protection are both enabled.
+
+Set `PROXY_DNS_PROTECTION=false` to let the proxy resolve destination domains itself. This disables the external DNS provider, not DNS resolution. The bot still rejects obvious private IP literals and internal hostnames, but cannot verify domain answers at the proxy. A malicious domain, DNS rebinding, or redirect can then reach private/internal services accessible from that proxy, potentially exposing data or making unintended requests. HTTPS certificate checks and the media host allowlist still apply, but do not replace destination-address validation. Use this opt-out only with a trusted proxy that enforces public-only egress for both HTTP and CONNECT traffic. It does not affect direct mode's existing DNS safeguards.
+
+The bot does not forward user media URLs to Telegram for direct source fetching while proxy mode is enabled. Already prepared cached Telegram media can still be reused. Thumbnail URLs and files fetched independently by Telegram's servers or clients are outside this process and cannot be controlled by its proxy setting.
+
+This setting controls the running bot; Docker image pulls/builds use Docker's own network settings. The included Docker healthcheck uses the same proxy/DNS policy. No network request is made just by constructing the bot's configuration. A dead proxy or resolver can prevent startup/polling; check the bot/container logs. Credentials are redacted in logs; avoid sharing your `.env` or Docker environment output.
