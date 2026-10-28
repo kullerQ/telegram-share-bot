@@ -118,6 +118,7 @@ def _cache_key(
     *,
     media_format: MediaFormat = MediaFormat.VIDEO,
     quality_policy: str = "best-fit",
+    normalize_audio: bool = False,
 ) -> str | None:
     """Key cached Telegram files by clip range, requested format, and quality."""
     legacy_key = _legacy_cache_key(url, time_range)
@@ -132,7 +133,11 @@ def _cache_key(
     clip_suffix = time_range.cache_suffix() if time_range is not None else ""
     # Earlier video entries lack the validated display-geometry upload contract.
     delivery = "&delivery=3" if media_format is MediaFormat.VIDEO else ""
-    return f"{norm_url}#format={media_format.value}&quality={quality}{delivery}{clip_suffix}"
+    loudness = "&loudness=quiet-v1" if normalize_audio else ""
+    return (
+        f"{norm_url}#format={media_format.value}&quality={quality}"
+        f"{delivery}{loudness}{clip_suffix}"
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -158,8 +163,9 @@ def _has_valid_video_geometry(entry: CachedMedia) -> bool:
 class MediaCache:
     """Thread-safe, asynchronous SQLite cache for Telegram media file_ids."""
 
-    def __init__(self, db_path: Path) -> None:
+    def __init__(self, db_path: Path, *, normalize_audio: bool = False) -> None:
         self.db_path = db_path
+        self._normalize_audio = normalize_audio
         self._init_lock = threading.Lock()
         self._state_lock = threading.Lock()
         self._maintenance_lock = threading.Lock()
@@ -447,6 +453,7 @@ class MediaCache:
             time_range,
             media_format=media_format,
             quality_policy=quality_policy,
+            normalize_audio=self._normalize_audio,
         )
         if not key:
             return None
@@ -654,6 +661,7 @@ class MediaCache:
             time_range,
             media_format=media_format,
             quality_policy=quality_policy,
+            normalize_audio=self._normalize_audio,
         )
         if not key:
             return
@@ -689,6 +697,7 @@ class MediaCache:
             time_range,
             media_format=media_format,
             quality_policy=quality_policy,
+            normalize_audio=self._normalize_audio,
         )
         if not key:
             return

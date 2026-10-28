@@ -171,7 +171,11 @@ async def _prepare_inline_media(
         work_lease = await _acquire_download_slot(context, settings.download_timeout_seconds)
         if time.monotonic() - queue_started_at >= 0.1:
             trace.event("queue", stage_started_at=queue_started_at)
-        if time_range is None and media_format is MediaFormat.AUDIO:
+        if (
+            time_range is None
+            and media_format is MediaFormat.AUDIO
+            and not settings.normalize_quiet_audio
+        ):
             discovery_started_at = time.monotonic()
             direct_stream = await get_direct_stream(
                 url=url,
@@ -238,13 +242,17 @@ async def _prepare_inline_media(
         )
         loop = asyncio.get_running_loop()
 
-        def show_optimization_status() -> None:
-            trace.event("optimization")
+        def show_optimization_status(
+            message: str = strings.OPTIMIZING_FOR_TELEGRAM,
+        ) -> None:
+            trace.event(
+                "audio_analysis" if message == strings.CHECKING_AUDIO_VOLUME else "optimization"
+            )
             future = asyncio.run_coroutine_threadsafe(
                 _edit_inline_text(
                     context,
                     inline_message_id,
-                    strings.OPTIMIZING_FOR_TELEGRAM,
+                    message,
                     reply_markup=_cancel_keyboard(result_id),
                 ),
                 loop,
@@ -270,6 +278,8 @@ async def _prepare_inline_media(
             quality_policy=quality_policy,
             max_estimated_download_seconds=settings.max_estimated_download_seconds,
             max_media_duration_seconds=settings.max_media_duration_seconds,
+            normalize_quiet_audio=settings.normalize_quiet_audio,
+            on_normalizing=lambda: show_optimization_status(strings.CHECKING_AUDIO_VOLUME),
             on_optimizing=show_optimization_status,
             work_lease=work_lease,
             on_worker_registered=register_worker,

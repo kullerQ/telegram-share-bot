@@ -52,6 +52,7 @@ class TestCacheFallback(unittest.IsolatedAsyncioTestCase):
             download_dir=Path(self.temp_dir.name) / "downloads",
             cache_db_path=self.db_path,
             delete_storage_messages=False,
+            normalize_quiet_audio=False,
             allow_public=True,
             max_downloads_per_user=3,
         )

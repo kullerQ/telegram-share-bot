@@ -488,7 +488,11 @@ async def _run_direct_download(
     try:
         work_lease = await _acquire_download_slot(context, settings.download_timeout_seconds)
         # Direct URL import skips clips (would fetch the whole video).
-        if time_range is None and media_format is MediaFormat.AUDIO:
+        if (
+            time_range is None
+            and media_format is MediaFormat.AUDIO
+            and not settings.normalize_quiet_audio
+        ):
             direct_stream = await get_direct_stream(
                 url=url,
                 max_file_bytes=settings.max_file_bytes,
@@ -542,10 +546,14 @@ async def _run_direct_download(
         await _edit_direct_status(status_message, strings.DIRECT_DOWNLOADING)
         loop = asyncio.get_running_loop()
 
-        def show_optimization_status() -> None:
-            trace.event("optimization")
+        def show_optimization_status(
+            message: str = strings.OPTIMIZING_FOR_TELEGRAM,
+        ) -> None:
+            trace.event(
+                "audio_analysis" if message == strings.CHECKING_AUDIO_VOLUME else "optimization"
+            )
             future = asyncio.run_coroutine_threadsafe(
-                _edit_direct_status(status_message, strings.OPTIMIZING_FOR_TELEGRAM), loop
+                _edit_direct_status(status_message, message), loop
             )
             with contextlib.suppress(Exception):
                 future.result(timeout=5)
@@ -566,6 +574,8 @@ async def _run_direct_download(
             slideshow_images_loop=settings.slideshow_images_loop,
             time_range=time_range,
             max_media_duration_seconds=settings.max_media_duration_seconds,
+            normalize_quiet_audio=settings.normalize_quiet_audio,
+            on_normalizing=lambda: show_optimization_status(strings.CHECKING_AUDIO_VOLUME),
             on_optimizing=show_optimization_status,
             work_lease=work_lease,
             on_worker_registered=register_worker,
