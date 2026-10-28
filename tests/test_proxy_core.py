@@ -217,7 +217,42 @@ class _UpstreamSocket:
         return
 
 
+class _RelaySocket:
+    def __init__(self, incoming: bytes = b"") -> None:
+        self.incoming = bytearray(incoming)
+        self.sent = bytearray()
+
+    def recv(self, size: int) -> bytes:
+        data = self.incoming[:size]
+        del self.incoming[:size]
+        return bytes(data)
+
+    def sendall(self, data: bytes) -> None:
+        self.sent.extend(data)
+
+    def shutdown(self, how: int) -> None:
+        return
+
+
+class _PendingTlsSocket(_RelaySocket):
+    def pending(self) -> int:
+        return len(self.incoming)
+
+
 class GatewayUnitTests(unittest.TestCase):
+    def test_relay_reads_decrypted_tls_bytes_pending_without_fd_readiness(self) -> None:
+        client = _RelaySocket()
+        upstream = _PendingTlsSocket(b"already-decrypted")
+        with (
+            patch("telegram_share_bot.proxy.gateway.ssl.SSLSocket", _PendingTlsSocket),
+            patch("telegram_share_bot.proxy.gateway.select.select") as select_ready,
+        ):
+            select_ready.side_effect = [([], [], []), ([upstream], [], []), ([client], [], [])]
+            ProxyGateway._relay(client, upstream)  # type: ignore[arg-type]
+        self.assertEqual(client.sent, b"already-decrypted")
+        self.assertEqual(select_ready.call_args_list[0].args[3], 0)
+        self.assertEqual(select_ready.call_args_list[1].args[3], 15)
+
     def test_unauthenticated_client_receives_basic_proxy_challenge(self) -> None:
         gateway = ProxyGateway("http://127.0.0.1:3128", None)
         try:

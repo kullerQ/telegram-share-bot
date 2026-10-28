@@ -505,7 +505,12 @@ class ProxyGateway:
         alive = set(peers)
         last_activity = time.monotonic()
         while alive and time.monotonic() - last_activity <= _TUNNEL_IDLE_TIMEOUT:
-            readable, _, _ = select.select(tuple(alive), (), (), _READ_TIMEOUT)
+            pending = {
+                sock for sock in alive if isinstance(sock, ssl.SSLSocket) and sock.pending() > 0
+            }
+            readable: set[socket.socket] = set(pending)
+            ready, _, _ = select.select(tuple(alive), (), (), 0 if pending else _READ_TIMEOUT)
+            readable.update(ready)
             if not readable:
                 continue
             for source in readable:
