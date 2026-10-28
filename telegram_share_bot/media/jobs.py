@@ -19,6 +19,7 @@ from telegram_share_bot.config import (
     DEFAULT_SLIDESHOW_IMAGES_LOOP,
 )
 from telegram_share_bot.media.files import _cleanup_dir
+from telegram_share_bot.media.loudness import normalize_quiet_audio as _normalize_quiet_audio
 from telegram_share_bot.media.models import (
     DownloadedMedia,
     DownloadError,
@@ -82,6 +83,8 @@ async def download_media(
     quality_policy: VideoQualityPolicy = VideoQualityPolicy.AUTO,
     max_estimated_download_seconds: int = DEFAULT_MAX_ESTIMATED_DOWNLOAD_SECONDS,
     max_media_duration_seconds: int = DEFAULT_MAX_MEDIA_DURATION_SECONDS,
+    normalize_quiet_audio: bool = False,
+    on_normalizing: Callable[[], None] | None = None,
     on_optimizing: Callable[[], None] | None = None,
     work_lease: MediaWorkLease | None = None,
     on_worker_registered: Callable[[asyncio.Task[Any]], None] | None = None,
@@ -102,12 +105,31 @@ async def download_media(
     def register_work_dir(path: Path, active: bool) -> None:
         _remember_active_download_dir(path, active)
 
+    def prepare_media(*args: Any, **kwargs: Any) -> DownloadedMedia:
+        media = _download_sync(*args, **kwargs)
+        if not normalize_quiet_audio:
+            return media
+        try:
+            if on_normalizing is not None:
+                on_normalizing()
+            return _normalize_quiet_audio(
+                media,
+                max_file_bytes=max_file_bytes,
+                deadline=active_lease.deadline,
+                abort_event=abort_event,
+            )
+        except BaseException:
+            # This is still the tracked worker: its subprocess has stopped before cleanup.
+            with contextlib.suppress(OSError):
+                _cleanup_dir(work_dir_holder[0] if work_dir_holder else media.path.parent)
+            raise
+
     try:
         remaining = active_lease.remaining_seconds()
         return cast(
             DownloadedMedia,
             await active_lease.run_sync(
-                _download_sync,
+                prepare_media,
                 url,
                 download_dir,
                 max_file_bytes,

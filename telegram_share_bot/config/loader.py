@@ -265,4 +265,10 @@ def load_settings(env_file: Path = _ENV_PATH) -> Settings:
         slideshow_slide_ms=slideshow_slide_ms,
         slideshow_max_images=slideshow_max_images,
         slideshow_images_loop=slideshow_images_loop,
+        normalize_quiet_audio=parse_bool(
+            "NORMALIZE_QUIET_AUDIO",
+            os.getenv("NORMALIZE_QUIET_AUDIO"),
+            default=True,
+            env_file=env_file,
+        ),
     )

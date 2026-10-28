@@ -217,7 +217,9 @@ def build_application() -> App:
         .build()
     )
     application.bot_data["settings"] = settings
-    application.bot_data["media_cache"] = MediaCache(settings.cache_db_path)
+    application.bot_data["media_cache"] = MediaCache(
+        settings.cache_db_path, normalize_audio=settings.normalize_quiet_audio
+    )
     user_settings_db_path = getattr(settings, "user_settings_db_path", None)
     if isinstance(user_settings_db_path, Path):
         application.bot_data["user_settings"] = UserSettingsStore(user_settings_db_path)
