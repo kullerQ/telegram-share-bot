@@ -159,6 +159,7 @@ def _download_sync(
 
     outtmpl = str(work_dir / "%(title).80B [%(id)s].%(ext)s")
     is_clip = time_range is not None
+    youtube = is_youtube_url(url)
 
     monitor = TransferMonitor(
         source_limit=source_limit,
@@ -224,7 +225,7 @@ def _download_sync(
 
                 if (
                     effective_range is not None
-                    and is_youtube_url(url)
+                    and youtube
                     and quality_policy is not VideoQualityPolicy.BEST
                 ):
                     hls_clip = _download_youtube_hls_clip(
@@ -255,6 +256,7 @@ def _download_sync(
                     quality_policy=quality_policy,
                     max_file_bytes=max_file_bytes,
                     source_limit=source_limit,
+                    prefer_original_audio=youtube,
                 )
 
                 title, duration = source_title_and_duration(info, effective_range)

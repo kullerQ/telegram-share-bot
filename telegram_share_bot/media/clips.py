@@ -19,6 +19,7 @@ from telegram_share_bot.media.formats import (
     _MAX_FORMAT_ATTEMPTS,
     _SOURCE_SIZE_MULTIPLIER,
     _format_bytes,
+    _is_original_youtube_audio,
     _video_quality_label,
 )
 from telegram_share_bot.media.models import (
@@ -102,6 +103,7 @@ def _youtube_hls_clip_streams(
         return None
     usable = [item for item in formats if isinstance(item, dict)]
     hls_protocols = {"m3u8", "m3u8_native"}
+    prefer_original = any(_is_original_youtube_audio(item) for item in usable)
     audio = next(
         (
             item
@@ -110,6 +112,7 @@ def _youtube_hls_clip_streams(
             and item.get("vcodec") == "none"
             and item.get("resolution") == "audio only"
             and isinstance(item.get("url"), str)
+            and (not prefer_original or _is_original_youtube_audio(item))
         ),
         None,
     )
@@ -345,17 +348,26 @@ def _download_youtube_hls_clip(
         audio_path = hls_dir / "audio.m4a"
         audio_id = str(audio.get("format_id") or "unknown")
         logger.info("Clip HLS audio transfer started: format=%s", audio_id)
-        _download_hls_clip_stream(
-            audio,
-            ffmpeg_bin=ffmpeg_bin,
-            time_range=time_range,
-            media_type="audio",
-            output=audio_path,
-            deadline=deadline,
-            abort_event=abort_event,
-            source_limit=source_limit,
-            timeout_seconds=timeout_seconds,
-        )
+        try:
+            _download_hls_clip_stream(
+                audio,
+                ffmpeg_bin=ffmpeg_bin,
+                time_range=time_range,
+                media_type="audio",
+                output=audio_path,
+                deadline=deadline,
+                abort_event=abort_event,
+                source_limit=source_limit,
+                timeout_seconds=timeout_seconds,
+            )
+        except DownloadError:
+            if (
+                _is_original_youtube_audio(audio)
+                and time.monotonic() < deadline
+                and not (abort_event is not None and abort_event.is_set())
+            ):
+                return None  # Let yt-dlp try another encoding or soundtrack.
+            raise
         logger.info(
             "Clip HLS audio ready: format=%s bytes=%d",
             audio_id,

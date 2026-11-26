@@ -16,6 +16,7 @@ from urllib.parse import urlsplit
 from telegram_share_bot.media.models import MediaFormat, MediaKind, TimeRange
 from telegram_share_bot.platforms.urls import (
     is_public_cacheable_url,
+    is_youtube_url,
     normalize_url,
     safe_url_for_log,
 )
@@ -134,9 +135,10 @@ def _cache_key(
     # Earlier video entries lack the validated display-geometry upload contract.
     delivery = "&delivery=3" if media_format is MediaFormat.VIDEO else ""
     loudness = "&loudness=quiet-v1" if normalize_audio else ""
+    soundtrack = "&audio=original-first" if is_youtube_url(norm_url) else ""
     return (
         f"{norm_url}#format={media_format.value}&quality={quality}"
-        f"{delivery}{loudness}{clip_suffix}"
+        f"{delivery}{loudness}{soundtrack}{clip_suffix}"
     )
 
 
