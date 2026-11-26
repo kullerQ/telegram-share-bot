@@ -202,6 +202,8 @@ def _download_sync(
                 metadata_started_at = time.monotonic()
                 extracted, from_cache = _extract_info_cached(ydl, url)
                 info = _pick_info(extracted)
+                # yt-dlp can carry the probe's merge components into a single-format download.
+                info.pop("requested_formats", None)
                 ensure_video_available(info, media_format)
                 source_is_animation = (
                     media_format is MediaFormat.VIDEO and is_twitter_animation(info)
@@ -362,6 +364,7 @@ def _download_sync(
                                 _evict_extract_info(url)
                                 extracted, _ = _extract_info_cached(ydl, url, force_refresh=True)
                                 info = _pick_info(extracted)
+                                info.pop("requested_formats", None)
                                 source_is_animation = (
                                     media_format is MediaFormat.VIDEO
                                     and is_twitter_animation(info)
