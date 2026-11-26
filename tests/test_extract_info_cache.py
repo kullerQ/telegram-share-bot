@@ -220,6 +220,56 @@ class TestExtractInfoCache(unittest.TestCase):
             self.assertEqual(mock_ydl.extract_info.call_count, 2)
             self.assertEqual(mock_ydl.process_ie_result.call_count, 2)
 
+    def test_download_uses_single_format_after_probe_selected_a_merge(self) -> None:
+        url = "https://www.tiktok.com/@example/video/123"
+        title = "ТГК: @example"
+        metadata = {
+            "id": "123",
+            "title": title,
+            "extractor": "TikTok",
+            "formats": [
+                {
+                    "format_id": format_id,
+                    "url": f"https://cdn.example/{format_id}.{ext}",
+                    "ext": ext,
+                    "vcodec": vcodec,
+                    "acodec": acodec,
+                }
+                for format_id, ext, vcodec, acodec in (
+                    ("h264", "mp4", "h264", "aac"),
+                    ("hevc", "mp4", "hevc", "none"),
+                    ("audio", "m4a", "none", "aac"),
+                )
+            ],
+        }
+        with yt_dlp.YoutubeDL({"format": "hevc+audio", "quiet": True}) as probe:
+            extracted = probe.process_ie_result(metadata, download=False)
+            self.assertEqual(extracted["format_id"], "hevc+audio")
+            with patch.object(probe, "extract_info", return_value=extracted):
+                _extract_info_cached(probe, url)
+
+        def download(filename: str, info: dict) -> tuple[bool, bool]:
+            self.assertEqual(info["format_id"], "h264")
+            self.assertEqual(info["url"], "https://cdn.example/h264.mp4")
+            self.assertNotIn("requested_formats", info)
+            Path(filename).write_bytes(b"video")
+            return True, True
+
+        with (
+            tempfile.TemporaryDirectory() as tmp_dir,
+            patch("telegram_share_bot.media.transfer.is_safe_media_url", return_value=True),
+            patch("telegram_share_bot.media.transfer.try_tiktok_slideshow", return_value=None),
+            patch.object(yt_dlp.YoutubeDL, "dl", side_effect=download),
+        ):
+            media = _download_sync(url, Path(tmp_dir), 1024 * 1024, 10)
+
+        self.assertEqual(media.title, title)
+        self.assertEqual(media.path.name, "selected.mp4")
+        with yt_dlp.YoutubeDL({"quiet": True}) as probe:
+            cached, from_cache = _extract_info_cached(probe, url)
+            self.assertTrue(from_cache)
+            self.assertIn("requested_formats", cached)
+
     def test_audio_403_after_stale_extract_refresh_is_retryable(self) -> None:
         url = "https://www.youtube.com/watch?v=stale-audio"
         info = {
