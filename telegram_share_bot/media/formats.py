@@ -28,6 +28,21 @@ class _FormatCandidate:
     estimated_size: int | None
     clip_transport_priority: int = 0
     codec_priority: int = 0
+    original_audio: bool = False
+
+
+def _is_original_youtube_audio(item: dict[str, Any]) -> bool:
+    # The pinned YouTube extractor uses 10 for original and 5 for playback default.
+    return item.get("language_preference") == 10
+
+
+def _limit_format_attempts(ranked: list[_FormatCandidate], limit: int) -> list[_FormatCandidate]:
+    selected = ranked[:limit]
+    if selected and all(candidate.original_audio for candidate in selected):
+        fallback = next((candidate for candidate in ranked if not candidate.original_audio), None)
+        if fallback is not None:
+            selected.append(fallback)
+    return selected
 
 
 def _projected_transfer_seconds(elapsed: float, downloaded: int, total: int) -> float | None:
@@ -97,6 +112,7 @@ def _format_candidates(
     max_file_bytes: int,
     duration_scale: float = 1.0,
     quality_policy: VideoQualityPolicy = VideoQualityPolicy.AUTO,
+    prefer_original_audio: bool = False,
 ) -> list[_FormatCandidate]:
     """Rank bounded sources by quality or proximity to the balanced tier."""
     formats = info.get("formats")
@@ -123,37 +139,28 @@ def _format_candidates(
         and item.get("vcodec") == "none"
         and format_id(item) is not None
     ]
-    best_audio = max(
+    ranked_audio = sorted(
         audio_only,
         key=lambda item: float(item.get("abr") or item.get("tbr") or 0),
-        default=None,
+        reverse=True,
     )
+    prioritize_original = prefer_original_audio and any(
+        _is_original_youtube_audio(item) for item in usable
+    )
+    audio_groups = [ranked_audio[:1]]
+    if prioritize_original:
+        audio_groups = [
+            [item for item in ranked_audio if _is_original_youtube_audio(item)],
+            [item for item in ranked_audio if not _is_original_youtube_audio(item)],
+        ]
+    source_limit = max_file_bytes * _SOURCE_SIZE_MULTIPLIER
     candidates: dict[str, _FormatCandidate] = {}
     for item in usable:
         identifier = format_id(item)
         if identifier is None or item.get("vcodec") in (None, "none"):
             continue
         has_audio = item.get("acodec") not in (None, "none")
-        selector = identifier
-        estimated = _format_bytes(item, duration_scale, fallback_duration)
-        if not has_audio:
-            if best_audio is None:
-                continue
-            audio_id = format_id(best_audio)
-            if audio_id is None:
-                continue
-            selector = f"{identifier}+{audio_id}"
-            audio_size = _format_bytes(best_audio, duration_scale, fallback_duration)
-            if estimated is not None and audio_size is not None:
-                estimated += audio_size
-            elif estimated is not None:
-                estimated = None
-        if (
-            estimated is not None
-            and estimated > max_file_bytes * _SOURCE_SIZE_MULTIPLIER
-            and quality_policy is not VideoQualityPolicy.BEST
-        ):
-            continue
+        video_size = _format_bytes(item, duration_scale, fallback_duration)
         height = item.get("height")
         fps = item.get("fps")
         bitrate = item.get("tbr") or item.get("vbr")
@@ -166,17 +173,40 @@ def _format_candidates(
         clip_transport_priority = (
             0 if duration_scale >= 1.0 or protocol in {"m3u8", "m3u8_native"} else 1
         )
-        candidates[selector] = _FormatCandidate(
-            selector,
-            quality,
-            estimated,
-            clip_transport_priority,
-            0 if str(item.get("vcodec") or "").lower().startswith(("avc1", "h264")) else 1,
+        codec_priority = (
+            0 if str(item.get("vcodec") or "").lower().startswith(("avc1", "h264")) else 1
         )
+        # Try the highest-bitrate soundtrack in each group that fits the source limit.
+        groups = [[item]] if has_audio else audio_groups
+        for group in groups:
+            for audio in group:
+                selector = identifier
+                estimated = video_size
+                if not has_audio:
+                    selector = f"{identifier}+{audio['format_id']}"
+                    audio_size = _format_bytes(audio, duration_scale, fallback_duration)
+                    estimated = (
+                        video_size + audio_size
+                        if video_size is not None and audio_size is not None else None
+                    )
+                if estimated is not None and estimated > source_limit and (
+                    quality_policy is not VideoQualityPolicy.BEST or prioritize_original
+                ):
+                    continue
+                candidates[selector] = _FormatCandidate(
+                    selector,
+                    quality,
+                    estimated,
+                    clip_transport_priority,
+                    codec_priority,
+                    prioritize_original and _is_original_youtube_audio(audio),
+                )
+                break
 
     def rank(candidate: _FormatCandidate) -> tuple[float, ...]:
         if quality_policy is VideoQualityPolicy.BALANCED:
             return (
+                not candidate.original_audio,
                 0
                 if candidate.quality[0] == 720
                 and abs(candidate.quality[1] - 60) <= 1
@@ -188,6 +218,7 @@ def _format_candidates(
                 -candidate.quality[2],
             )
         return (
+            not candidate.original_audio,
             candidate.clip_transport_priority,
             -candidate.quality[0],
             -candidate.quality[1],
@@ -196,9 +227,8 @@ def _format_candidates(
         )
 
     ranked = sorted(candidates.values(), key=rank)
-    if quality_policy is VideoQualityPolicy.BEST:
-        return ranked[:1]
-    return ranked[:_MAX_FORMAT_ATTEMPTS]
+    limit = 1 if quality_policy is VideoQualityPolicy.BEST else _MAX_FORMAT_ATTEMPTS
+    return _limit_format_attempts(ranked, limit)
 
 
 def _audio_format_candidates(
@@ -206,6 +236,7 @@ def _audio_format_candidates(
     *,
     max_file_bytes: int,
     duration_scale: float = 1.0,
+    prefer_original_audio: bool = False,
 ) -> list[_FormatCandidate]:
     """Rank audio-only source formats by bitrate while avoiding implausible sizes."""
     formats = info.get("formats")
@@ -223,30 +254,36 @@ def _audio_format_candidates(
         if not isinstance(item, dict):
             continue
         identifier = item.get("format_id")
+        original = prefer_original_audio and _is_original_youtube_audio(item)
+        audio_only = item.get("vcodec") == "none"
         if (
             not isinstance(identifier, str)
             or not re.fullmatch(r"[A-Za-z0-9_.-]+", identifier)
-            or item.get("vcodec") != "none"
+            or not (audio_only or original)
             or item.get("acodec") in (None, "none")
         ):
             continue
         estimated = _format_bytes(item, duration_scale, fallback_duration)
         if estimated is not None and estimated > source_limit:
             continue
-        bitrate = item.get("abr") or item.get("tbr")
+        bitrate = item.get("abr") or (item.get("tbr") if audio_only else None)
         quality = (
             0.0,
             0.0,
             float(bitrate) if isinstance(bitrate, (int, float)) else 0.0,
         )
-        candidates[identifier] = _FormatCandidate(identifier, quality, estimated)
-    return sorted(
+        candidates[identifier] = _FormatCandidate(
+            identifier, quality, estimated, original_audio=original,
+        )
+    ranked = sorted(
         candidates.values(),
         key=lambda candidate: (
+            not candidate.original_audio,
             candidate.estimated_size is not None and candidate.estimated_size > max_file_bytes,
             -candidate.quality[2],
         ),
-    )[:_MAX_FORMAT_ATTEMPTS]
+    )
+    return _limit_format_attempts(ranked, _MAX_FORMAT_ATTEMPTS)
 
 
 def _set_attempt_format_selector(ydl: yt_dlp.YoutubeDL, selector: str) -> None:
@@ -305,6 +342,7 @@ def select_download_candidates(
     quality_policy: VideoQualityPolicy,
     max_file_bytes: int,
     source_limit: int,
+    prefer_original_audio: bool = False,
 ) -> tuple[float, list[_FormatCandidate], list[str]]:
     """Choose ranked source formats and the fallback selector for one request."""
     duration_scale = 1.0
@@ -323,6 +361,7 @@ def select_download_candidates(
             info,
             max_file_bytes=max_file_bytes,
             duration_scale=duration_scale,
+            prefer_original_audio=prefer_original_audio,
         )
         if media_format is MediaFormat.AUDIO
         else _format_candidates(
@@ -330,11 +369,10 @@ def select_download_candidates(
             max_file_bytes=max_file_bytes,
             duration_scale=duration_scale,
             quality_policy=quality_policy,
+            prefer_original_audio=prefer_original_audio,
         )
     )
     selectors = [candidate.selector for candidate in candidates]
-    if media_format is MediaFormat.VIDEO and quality_policy is VideoQualityPolicy.BEST:
-        selectors = selectors[:1]
     fallback_selector = (
         _default_audio_selector(time_range, source_limit)
         if media_format is MediaFormat.AUDIO

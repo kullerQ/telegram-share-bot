@@ -11,6 +11,7 @@ from typing import Any, cast
 
 from telegram_share_bot import strings
 from telegram_share_bot.media.files import _classify_ext
+from telegram_share_bot.media.formats import _is_original_youtube_audio
 from telegram_share_bot.media.metadata import (
     _extract_info_cached,
     _pick_info,
@@ -30,7 +31,7 @@ from telegram_share_bot.media.security import (
     is_safe_media_url,
 )
 from telegram_share_bot.media.work import MediaWorkLease
-from telegram_share_bot.platforms.urls import safe_url_for_log
+from telegram_share_bot.platforms.urls import is_youtube_url, safe_url_for_log
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +78,14 @@ def _extract_direct_stream_sync(
                 title = str(info.get("title") or "")[:64]
                 duration_raw = info.get("duration")
                 duration = int(duration_raw) if isinstance(duration_raw, (int, float)) else None
+                formats = info.get("formats") or []
+                prefer_original = is_youtube_url(url) and (
+                    _is_original_youtube_audio(info)
+                    or any(
+                        isinstance(item, dict) and _is_original_youtube_audio(item)
+                        for item in formats
+                    )
+                )
 
                 direct = info.get("url")
                 selected_size = info.get("filesize")
@@ -86,6 +95,13 @@ def _extract_direct_stream_sync(
                     and is_safe_media_url(direct, https_only=https_only)
                     and ".m3u8" not in direct
                     and ".mpd" not in direct
+                    and (
+                        not prefer_original
+                        or (
+                            _is_original_youtube_audio(info)
+                            and not info.get("requested_formats")
+                        )
+                    )
                     and (
                         info.get("vcodec") == "none"
                         if media_format is MediaFormat.AUDIO
@@ -117,9 +133,10 @@ def _extract_direct_stream_sync(
                             size_bytes=int(selected_size),
                         )
 
-                formats = info.get("formats") or []
                 for f in reversed(formats):
                     if not isinstance(f, dict):
+                        continue
+                    if prefer_original and not _is_original_youtube_audio(f):
                         continue
                     u = f.get("url")
                     if (
